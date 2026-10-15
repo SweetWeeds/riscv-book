@@ -1,0 +1,1572 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>21 H 확장: 하이퍼바이저 · RISC-V Book</title>
+<meta name="description" content="RISC-V H 확장 v1.0이 게스트 운영체제를 하드웨어에서 직접 돌리는 방법. HS·VS·VU 모드와 V 비트, VS CSR 바꿔치기, vsatp·hgatp 2단계 주소 변환과 그 비용, 게스트 페이지 폴트, 트랩 위임, HLV·HSV·HFENCE를 그림과 시뮬레이터로 살펴본다.">
+<link rel="icon" href="../assets/img/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/style.css">
+<script src="../assets/js/book.js"></script>
+<style>
+  /* 그림 21-9: 월드 스위치 단계가 차례로 빛나게 한다 */
+  .world-switch-glow { fill: var(--accent-2); opacity: 0; animation: world-switch-glow 6s linear infinite; }
+  @keyframes world-switch-glow { 0% { opacity: 0; } 4% { opacity: 0.42; } 14% { opacity: 0.42; } 20% { opacity: 0; } 100% { opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) { .world-switch-glow { animation: none; opacity: 0; } }
+
+  /* 트랩 경로 시뮬레이터의 모드 띠 */
+  .trap-lane { fill: var(--surface); stroke: var(--border); stroke-width: 1; transition: fill 0.25s; }
+  .trap-lane.is-virtual { fill: var(--violet-soft); }
+  .trap-lane.is-origin { stroke: var(--violet); stroke-width: 2; }
+  .trap-lane.is-handler { fill: var(--accent-2-soft); stroke: var(--accent-2); stroke-width: 2.4; }
+  .trap-controls select { max-width: 100%; }
+  .sim .scroll-x { overflow-x: auto; }
+  .delegation-boxes { display: flex; flex-direction: column; gap: 6px; }
+  .delegation-boxes .read-only-note { font-size: 12.5px; color: var(--bad); font-weight: 600; }
+  .trap-write-list { margin: 6px 0 0; padding-left: 1.2em; font-size: 14.5px; }
+  .trap-write-list li { margin: 2px 0; }
+
+  /* CSR 바꿔치기 탐색기 */
+  .csr-access-line { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; font-family: var(--mono); font-size: 15px; margin-bottom: 18px; }
+  .csr-access-line .instruction-chip { padding: 4px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--canvas-bg); }
+  .csr-access-line .flow-arrow { color: var(--accent-2); font-weight: 800; }
+  .csr-access-line .target-chip { padding: 4px 10px; border-radius: 8px; border: 1px solid var(--accent); background: var(--accent-soft); color: var(--accent); font-weight: 700; font-family: var(--mono); font-size: 14px; }
+  .csr-access-line .target-chip.is-exception { border-color: var(--bad); background: var(--bad-soft); color: var(--bad); }
+  .csr-banks { display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr); }
+  @media (min-width: 760px) { .csr-banks { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+  .csr-banks h4 { margin: 0 0 8px; font-size: 14px; color: var(--text-dim); }
+  .csr-banks .cell-grid { grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); }
+  .csr-banks .cell { cursor: pointer; }
+  .cell.is-exception { background: var(--bad-soft); border-color: var(--bad); }
+  .cell.is-ignored { opacity: 0.45; }
+  .csr-selector .segmented { max-width: 100%; }
+</style>
+</head>
+<body data-chapter="hypervisor">
+<main class="chapter">
+  <header class="chapter-hero">
+    <div class="eyebrow">Chapter 21</div>
+    <h1>H 확장: 하이퍼바이저</h1>
+    <p class="lead">클라우드 서버 한 대에는 수십 개의 운영체제가 동시에 돈다. 그 운영체제들은 저마다 자기가 컴퓨터의 주인이라고 믿고 페이지 테이블을 바꾸고, 인터럽트를 끄고, 특권 명령을 실행한다. <strong>H 확장은 이런 게스트 운영체제를 대부분 트랩 없이 하드웨어에서 직접 돌리게 해 주는 특권 구조의 확장이다.</strong> 핵심은 두 가지다. 게스트 전용의 가짜 S 모드(VS 모드)와 그 모드가 쓰는 복제 CSR, 그리고 게스트 물리 주소를 한 번 더 바꾸는 2단계 주소 변환이다.</p>
+    <ul class="objectives">
+      <li>트랩하고 흉내 내는 고전적 가상화의 비용과, H 확장이 그 비용을 없애는 방식을 설명한다.</li>
+      <li>V 비트와 HS·VS·VU 모드의 관계를 그림으로 그린다.</li>
+      <li>V=1일 때 <code>sstatus</code>·<code>sepc</code>·<code>satp</code> 접근이 <code>vsstatus</code>·<code>vsepc</code>·<code>vsatp</code>로 바뀌는 규칙을 안다.</li>
+      <li>VS-stage(vsatp)와 G-stage(hgatp)의 2단계 변환, Sv39x4의 16 KiB 루트 테이블을 이해한다.</li>
+      <li>중첩 페이지 워크의 최악 메모리 접근 횟수 <code>n·m + n + m</code>을 직접 유도한다.</li>
+      <li>게스트 페이지 폴트·가상 명령 예외와 M→HS→VS 트랩 위임 경로를 따라간다.</li>
+      <li>HLV·HLVX·HSV, HFENCE.VVMA·HFENCE.GVMA, 월드 스위치 순서, 게스트 인터럽트 주입을 안다.</li>
+    </ul>
+    <div class="spec-meta">
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/priv/hypervisor.html" target="_blank" rel="noopener">Privileged · "H" Extension v1.0</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/priv/priv-csrs.html" target="_blank" rel="noopener">Privileged · CSR Listing</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/aia/v1.0/IMSIC.html" target="_blank" rel="noopener">AIA v1.0 · IMSIC</a>
+    </div>
+  </header>
+
+  <!-- ============================================================ -->
+  <section id="why-virtualization">
+    <h2>왜 하드웨어 가상화가 필요한가</h2>
+    <p>가상 머신을 만드는 가장 오래된 방법은 <span class="term">트랩하고 흉내 내기</span><span class="english">(trap-and-emulate)</span>다. 게스트 운영체제를 권한이 낮은 U 모드에서 돌리면, 게스트가 특권 명령(<code>csrw satp</code>, <code>sret</code>, <code>sfence.vma</code> …)을 실행할 때마다 불법 명령 예외가 나서 하이퍼바이저로 넘어온다. 하이퍼바이저는 그 명령을 해독하고, 게스트 몫의 가짜 레지스터에 결과를 반영한 뒤 게스트로 돌아간다. 1974년 Popek과 Goldberg가 정리한 “가상화 가능한 구조”의 조건이 바로 이 방식이 성립하는 조건이다.</p>
+    <p>RISC-V의 기본 특권 구조는 이 방식을 쓰기 쉽게 설계되었다. 특권 명령이 몇 개 없고 모두 확실히 트랩되기 때문이다. 하지만 <b>트랩 한 번에 수백 사이클</b>이 들고, 게스트 커널은 생각보다 훨씬 자주 특권 동작을 한다. 특히 가상 메모리가 문제다. 게스트가 고친 페이지 테이블을 하드웨어가 그대로 쓸 수 없으니, 하이퍼바이저는 게스트 페이지 테이블을 감시하며 진짜 주소를 넣은 <span class="term">섀도 페이지 테이블</span><span class="english">(shadow page table)</span>을 따로 만들어 둘을 계속 맞춰야 한다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 360" role="img" aria-label="고전적 트랩하고 흉내 내기 방식과 H 확장 방식의 비교">
+        <defs>
+          <marker id="why-arrow-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--bad)"/></marker>
+          <marker id="why-arrow-line" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--text-faint)"/></marker>
+          <marker id="why-arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--ok)"/></marker>
+        </defs>
+        <!-- 왼쪽: 고전적 방식 -->
+        <g transform="translate(10,10)">
+          <rect width="410" height="338" rx="14" fill="none" stroke="var(--border)" stroke-dasharray="6 5"/>
+          <text x="205" y="28" text-anchor="middle" class="t t-bold">① 고전적 방식: 트랩하고 흉내 내기</text>
+          <rect x="20" y="46" width="250" height="44" rx="9" class="f-elev"/>
+          <text x="145" y="73" text-anchor="middle" class="t">게스트 앱</text><text x="258" y="73" text-anchor="end" class="t-faint">U</text>
+          <rect x="20" y="102" width="250" height="56" rx="9" class="f-violet-soft"/>
+          <text x="145" y="124" text-anchor="middle" class="t t-bold">게스트 OS</text>
+          <text x="145" y="145" text-anchor="middle" class="t-faint">권한을 빼앗겨 U 모드에서 실행</text>
+          <text x="258" y="124" text-anchor="end" class="t-faint">U</text>
+          <rect x="20" y="190" width="250" height="62" rx="9" class="f-gold-soft"/>
+          <text x="145" y="214" text-anchor="middle" class="t t-bold">하이퍼바이저</text>
+          <text x="145" y="236" text-anchor="middle" class="t-faint">명령 해독·흉내 · 섀도 페이지 테이블</text>
+          <text x="258" y="214" text-anchor="end" class="t-faint">S</text>
+          <rect x="20" y="266" width="250" height="40" rx="9" class="f-surface"/>
+          <text x="145" y="291" text-anchor="middle" class="t">펌웨어 (M)</text>
+          <path d="M296 128 V184" class="s-bad flow-dash" marker-end="url(#why-arrow-bad)"/>
+          <text x="304" y="162" class="t-bad" style="font-size:13px">트랩</text>
+          <path d="M356 186 V132" class="s-line s-dashed" marker-end="url(#why-arrow-line)"/>
+          <text x="364" y="162" class="t-dim">복귀</text>
+          <text x="205" y="330" text-anchor="middle" class="t-dim">csrw satp · sret · 페이지 테이블 쓰기 … 모두 트랩</text>
+        </g>
+        <!-- 오른쪽: H 확장 -->
+        <g transform="translate(440,10)">
+          <rect width="410" height="338" rx="14" fill="none" stroke="var(--border)" stroke-dasharray="6 5"/>
+          <text x="205" y="28" text-anchor="middle" class="t t-bold">② H 확장: 하드웨어가 직접 지원</text>
+          <rect x="20" y="46" width="250" height="44" rx="9" class="f-elev"/>
+          <text x="145" y="73" text-anchor="middle" class="t">게스트 앱</text><text x="258" y="73" text-anchor="end" class="t-faint">VU</text>
+          <rect x="20" y="102" width="250" height="56" rx="9" class="f-violet-soft"/>
+          <text x="145" y="124" text-anchor="middle" class="t t-bold">게스트 OS</text>
+          <text x="145" y="145" text-anchor="middle" class="t-faint">자기 CSR을 직접 다룬다</text>
+          <text x="258" y="124" text-anchor="end" class="t-faint">VS</text>
+          <rect x="300" y="108" width="92" height="42" rx="8" class="f-teal-soft"/>
+          <text x="346" y="134" text-anchor="middle" class="t-mono">vsatp</text>
+          <path d="M272 129 H296" class="s-ok flow-dash" marker-end="url(#why-arrow-ok)"/>
+          <text x="346" y="170" text-anchor="middle" class="t-ok" style="font-size:13px">트랩 없음</text>
+          <rect x="20" y="190" width="250" height="62" rx="9" class="f-gold-soft"/>
+          <text x="145" y="214" text-anchor="middle" class="t t-bold">하이퍼바이저</text>
+          <text x="145" y="236" text-anchor="middle" class="t-faint">G-stage 테이블 · 드문 트랩만 처리</text>
+          <text x="258" y="214" text-anchor="end" class="t-faint">HS</text>
+          <path d="M145 160 V186" class="s-line s-dashed" marker-end="url(#why-arrow-line)"/>
+          <rect x="20" y="266" width="250" height="40" rx="9" class="f-surface"/>
+          <text x="145" y="291" text-anchor="middle" class="t">펌웨어 (M)</text>
+          <text x="205" y="330" text-anchor="middle" class="t-dim">게스트 페이지 폴트 · 가상 명령 예외 때만 트랩</text>
+        </g>
+      </svg></div>
+      <figcaption><b>그림 21-1.</b> 두 가지 가상화 방식. 왼쪽은 게스트 OS를 U 모드로 강등시켜 특권 동작마다 트랩(빨간 화살표)을 일으킨다. 오른쪽의 H 확장에서는 게스트 OS가 VS 모드에서 자기 몫의 CSR(<code>vsatp</code> 등)을 트랩 없이 직접 고치고, 하이퍼바이저는 정말 필요할 때만 개입한다.</figcaption>
+    </figure>
+
+    <div class="table-wrap"><table>
+      <thead><tr><th>방식</th><th>게스트 OS가 도는 곳</th><th>메모리 가상화</th><th>대표적인 비용</th></tr></thead>
+      <tbody>
+        <tr><td><b>트랩하고 흉내 내기</b></td><td>U 모드 (강등)</td><td>섀도 페이지 테이블</td><td>특권 명령·페이지 테이블 수정마다 트랩</td></tr>
+        <tr><td><b>반가상화</b> (para-virtualization)</td><td>U 모드 + 수정된 커널</td><td>하이퍼콜로 페이지 테이블 요청</td><td>게스트 커널을 고쳐야 한다</td></tr>
+        <tr><td><b>H 확장</b> (하드웨어 지원)</td><td>VS 모드</td><td>2단계 주소 변환 (vsatp + hgatp)</td><td>TLB 미스 때 페이지 워크가 길어진다</td></tr>
+      </tbody>
+    </table></div>
+    <p>H 확장은 게스트 운영체제를 <b>수정 없이</b> 돌리면서 트랩 횟수를 크게 줄인다. 대가는 하드웨어 복잡도와 2단계 페이지 워크의 비용이다. 이 장의 뒤쪽에서 그 비용을 정확히 세어 본다. H 확장이 켜지려면 정수 레지스터가 32개인 RV32I·RV64I 베이스여야 하고(E 베이스 불가), <code>mtval</code>이 읽기 전용 0이면 안 되며, 페이지 기반 변환(RV32는 Sv32, RV64는 최소 Sv39)이 있어야 한다. <code>misa</code>의 비트 7(문자 H)이 이 확장을 나타낸다.</p>
+    <div class="callout history"><strong>H 확장의 비준</strong><p>H 확장 v1.0은 2021년 말 다른 여러 확장과 함께 비준되었다. 그 뒤 RVA23 프로파일이 응용 프로세서용 S 모드 프로파일(RVA23S64)에서 H를 필수로 정하면서, 리눅스를 돌리는 범용 RISC-V 칩이라면 하이퍼바이저 지원을 갖추는 것이 기본이 되었다(<a href="profiles.html">23장</a>).</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="modes">
+    <h2>V 비트와 다섯 가지 모드</h2>
+    <p>H 확장은 새 특권 수준을 끼워 넣지 않는다. 대신 하트에 <span class="term">가상화 모드</span><span class="english">(virtualization mode)</span> 비트 <b>V</b>를 하나 더한다. V는 CSR로 보이는 값이 아니라 하트 내부의 상태이고, 트랩과 트랩 복귀 때만 바뀐다. V=1이면 하트는 지금 게스트를 실행하고 있으며 2단계 주소 변환이 켜진다. 원래의 S 모드는 <b>HS 모드</b>(hypervisor-extended supervisor)로 이름이 바뀌고, 하이퍼바이저나 KVM 같은 호스팅 기능이 있는 OS가 여기서 돈다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 400" role="img" aria-label="V 비트에 따라 나뉘는 M, HS, U, VS, VU 모드">
+        <defs>
+          <marker id="modes-arrow-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--bad)"/></marker>
+          <marker id="modes-arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--ok)"/></marker>
+          <marker id="modes-arrow-gold" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent-2)"/></marker>
+          <path id="modes-path-guest-ecall" d="M635 254 V200"/>
+          <path id="modes-path-host-ecall" d="M225 254 V200"/>
+          <path id="modes-path-sbi" d="M225 128 V76"/>
+          <path id="modes-path-trap" d="M458 152 H404"/>
+          <path id="modes-path-return" d="M402 174 H456"/>
+        </defs>
+        <rect x="30" y="16" width="800" height="56" rx="12" class="f-surface"/>
+        <text x="430" y="40" text-anchor="middle" class="t t-bold">M 모드 · 펌웨어 (OpenSBI 등)</text>
+        <text x="430" y="60" text-anchor="middle" class="t-faint">V = 0 · 가장 높은 권한 · 위임하지 않은 모든 트랩을 받는다</text>
+
+        <rect x="30" y="90" width="390" height="250" rx="14" fill="var(--surface)" opacity="0.6"/>
+        <text x="48" y="114" class="t-accent">V = 0</text>
+        <text x="404" y="114" text-anchor="end" class="t-faint">2단계 변환 꺼짐</text>
+        <rect x="440" y="90" width="390" height="250" rx="14" fill="var(--violet-soft)"/>
+        <text x="458" y="114" class="t-violet">V = 1</text>
+        <text x="814" y="114" text-anchor="end" class="t-faint">2단계 변환 켜짐</text>
+
+        <rect x="50" y="130" width="350" height="66" rx="10" class="f-gold-soft"/>
+        <text x="225" y="157" text-anchor="middle" class="t t-bold">HS 모드 · 하이퍼바이저</text>
+        <text x="225" y="180" text-anchor="middle" class="t-faint">명목 권한 S · 호스트 OS(KVM 등)</text>
+        <rect x="50" y="256" width="350" height="64" rx="10" class="f-elev"/>
+        <text x="225" y="282" text-anchor="middle" class="t t-bold">U 모드 · 호스트 프로세스</text>
+        <text x="225" y="304" text-anchor="middle" class="t-faint">명목 권한 U · 예: QEMU 같은 VMM</text>
+
+        <rect x="460" y="130" width="350" height="66" rx="10" class="f-elev"/>
+        <text x="635" y="157" text-anchor="middle" class="t t-bold">VS 모드 · 게스트 커널</text>
+        <text x="635" y="180" text-anchor="middle" class="t-faint">명목 권한 S · vs* CSR을 쓴다</text>
+        <rect x="460" y="256" width="350" height="64" rx="10" class="f-elev"/>
+        <text x="635" y="282" text-anchor="middle" class="t t-bold">VU 모드 · 게스트 앱</text>
+        <text x="635" y="304" text-anchor="middle" class="t-faint">명목 권한 U</text>
+
+        <use href="#modes-path-guest-ecall" class="s-gold flow-dash" marker-end="url(#modes-arrow-gold)"/>
+        <use href="#modes-path-host-ecall" class="s-gold flow-dash" marker-end="url(#modes-arrow-gold)"/>
+        <use href="#modes-path-sbi" class="s-gold flow-dash" marker-end="url(#modes-arrow-gold)"/>
+        <use href="#modes-path-trap" class="s-bad" marker-end="url(#modes-arrow-bad)"/>
+        <use href="#modes-path-return" class="s-ok" marker-end="url(#modes-arrow-ok)"/>
+        <circle r="5" fill="var(--accent-2)"><animateMotion dur="1.6s" begin="-0.4s" repeatCount="indefinite"><mpath href="#modes-path-guest-ecall"/></animateMotion></circle>
+        <circle r="5" fill="var(--accent-2)"><animateMotion dur="1.6s" begin="-1.1s" repeatCount="indefinite"><mpath href="#modes-path-host-ecall"/></animateMotion></circle>
+        <circle r="5" fill="var(--accent-2)"><animateMotion dur="1.6s" begin="-0.8s" repeatCount="indefinite"><mpath href="#modes-path-sbi"/></animateMotion></circle>
+
+        <g transform="translate(30,364)">
+          <line x1="0" y1="0" x2="34" y2="0" class="s-bad"/><text x="42" y="5" class="t-dim">트랩 → HS (V ← 0)</text>
+          <line x1="230" y1="0" x2="264" y2="0" class="s-ok"/><text x="272" y="5" class="t-dim">SRET, hstatus.SPV = 1 (V ← 1)</text>
+          <line x1="540" y1="0" x2="574" y2="0" class="s-gold s-dashed"/><text x="582" y="5" class="t-dim">ecall (시스템 호출 · SBI 호출)</text>
+        </g>
+      </svg></div>
+      <figcaption><b>그림 21-2.</b> H 확장의 특권 모드. 왼쪽(V=0)은 H 확장이 없을 때와 같은 M·S·U 구조이고, 오른쪽(V=1)은 게스트를 위한 VS·VU 모드다. 게스트에서 HS로 트랩하면 V가 0이 되고, 하이퍼바이저가 <code>hstatus.SPV=1</code>로 둔 채 <code>sret</code>을 실행하면 V가 1이 되어 게스트로 돌아간다.</figcaption>
+    </figure>
+
+    <div class="table-wrap"><table>
+      <thead><tr><th>V</th><th>명목 권한</th><th>약칭</th><th>이름</th><th>2단계 변환</th></tr></thead>
+      <tbody>
+        <tr><td>0</td><td>U</td><td><b>U</b></td><td>User mode</td><td>꺼짐</td></tr>
+        <tr><td>0</td><td>S</td><td><b>HS</b></td><td>Hypervisor-extended supervisor mode</td><td>꺼짐</td></tr>
+        <tr><td>0</td><td>M</td><td><b>M</b></td><td>Machine mode</td><td>꺼짐</td></tr>
+        <tr><td>1</td><td>U</td><td><b>VU</b></td><td>Virtual user mode</td><td>켜짐</td></tr>
+        <tr><td>1</td><td>S</td><td><b>VS</b></td><td>Virtual supervisor mode</td><td>켜짐</td></tr>
+      </tbody>
+    </table></div>
+    <p><span class="term">명목 권한</span><span class="english">(nominal privilege)</span>이라는 말에 주목하자. VS 모드의 명목 권한은 S다. 그래서 게스트 커널 안에서는 <code>sret</code>도, <code>csrr a0, sstatus</code>도 그대로 실행된다. 권한의 크기는 <b>M &gt; HS &gt; VS &gt; VU</b> 순서이며, HS는 VS보다 높다. 이 순서가 뒤에서 볼 트랩 위임 규칙의 바탕이다.</p>
+    <div class="callout tip"><strong>타입 1과 타입 2 하이퍼바이저</strong><p>규격은 두 가지를 모두 염두에 둔다. Xen 같은 타입 1 하이퍼바이저는 HS 모드 자체가 하이퍼바이저이고, 리눅스 KVM 같은 타입 2는 일반 커널이 HS에서 돌면서 가상 머신도 함께 돌린다. KVM은 U 모드에 QEMU 같은 가상 머신 관리 프로그램을 두고, 게스트를 실행할 때만 <code>sret</code>으로 V=1 세계에 들어간다. HS 모드는 S 모드와 똑같이 동작하므로 일반 S 모드 OS는 고치지 않고 HS에서도, VS 게스트로도 돈다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="csrs">
+    <h2>하이퍼바이저 CSR과 VS CSR 바꿔치기</h2>
+    <p>H 확장이 더하는 CSR은 두 무리다. 하나는 HS 모드만 쓰는 <b>하이퍼바이저 CSR</b>(<code>h</code>로 시작)으로, 게스트를 어떻게 다룰지 정한다. 다른 하나는 <b>VS CSR</b>(<code>vs</code>로 시작)로, 보통의 S CSR을 그대로 복제한 게스트 전용 사본이다. 주소를 보면 규칙이 보인다. S CSR이 <code>0x1xx</code>이면 짝이 되는 VS CSR은 <code>0x2xx</code>, 하이퍼바이저 CSR은 대부분 <code>0x6xx</code>다.</p>
+
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>CSR</th><th class="number">주소</th><th>하는 일</th></tr></thead>
+      <tbody>
+        <tr><td><code>hstatus</code></td><td class="number">0x600</td><td>게스트 실행을 제어·기록하는 상태 레지스터 (SPV, SPVP, GVA, VTSR …)</td></tr>
+        <tr><td><code>hedeleg</code></td><td class="number">0x602</td><td>HS로 온 예외를 VS로 한 번 더 위임</td></tr>
+        <tr><td><code>hideleg</code></td><td class="number">0x603</td><td>HS로 온 인터럽트를 VS로 한 번 더 위임</td></tr>
+        <tr><td><code>hie</code></td><td class="number">0x604</td><td>VS 수준 인터럽트와 게스트 외부 인터럽트(SGEI)의 허용 비트</td></tr>
+        <tr><td><code>hip</code></td><td class="number">0x644</td><td>같은 인터럽트들의 대기 비트</td></tr>
+        <tr><td><code>hvip</code></td><td class="number">0x645</td><td>하이퍼바이저가 게스트에 가상 인터럽트를 주입</td></tr>
+        <tr><td><code>hcounteren</code></td><td class="number">0x606</td><td>게스트가 cycle·time·instret 등을 읽을 수 있는지</td></tr>
+        <tr><td><code>htimedelta</code></td><td class="number">0x605</td><td>게스트가 읽는 <code>time</code> = 실제 <code>time</code> + htimedelta</td></tr>
+        <tr><td><code>hgeie</code></td><td class="number">0x607</td><td>게스트 외부 인터럽트 허용</td></tr>
+        <tr><td><code>hgeip</code></td><td class="number">0xE12</td><td>게스트 외부 인터럽트 대기 (읽기 전용)</td></tr>
+        <tr><td><code>henvcfg</code></td><td class="number">0x60A</td><td>V=1일 때의 실행 환경 설정 (PBMTE, ADUE, STCE, CBZE …)</td></tr>
+        <tr><td><code>htval</code></td><td class="number">0x643</td><td>트랩 때 기록: 게스트 물리 주소 ≫ 2</td></tr>
+        <tr><td><code>htinst</code></td><td class="number">0x64A</td><td>트랩 때 기록: 변환된 명령어 또는 의사 명령 값</td></tr>
+        <tr><td><code>hgatp</code></td><td class="number">0x680</td><td>G-stage 변환의 MODE·VMID·루트 PPN</td></tr>
+      </tbody>
+    </table></div>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>VS CSR</th><th class="number">주소</th><th>대신하는 S CSR</th><th class="number">S CSR 주소</th></tr></thead>
+      <tbody>
+        <tr><td><code>vsstatus</code></td><td class="number">0x200</td><td><code>sstatus</code></td><td class="number">0x100</td></tr>
+        <tr><td><code>vsie</code></td><td class="number">0x204</td><td><code>sie</code></td><td class="number">0x104</td></tr>
+        <tr><td><code>vstvec</code></td><td class="number">0x205</td><td><code>stvec</code></td><td class="number">0x105</td></tr>
+        <tr><td><code>vsscratch</code></td><td class="number">0x240</td><td><code>sscratch</code></td><td class="number">0x140</td></tr>
+        <tr><td><code>vsepc</code></td><td class="number">0x241</td><td><code>sepc</code></td><td class="number">0x141</td></tr>
+        <tr><td><code>vscause</code></td><td class="number">0x242</td><td><code>scause</code></td><td class="number">0x142</td></tr>
+        <tr><td><code>vstval</code></td><td class="number">0x243</td><td><code>stval</code></td><td class="number">0x143</td></tr>
+        <tr><td><code>vsip</code></td><td class="number">0x244</td><td><code>sip</code></td><td class="number">0x144</td></tr>
+        <tr><td><code>vstimecmp</code> (Sstc)</td><td class="number">0x24D</td><td><code>stimecmp</code></td><td class="number">0x14D</td></tr>
+        <tr><td><code>vsatp</code></td><td class="number">0x280</td><td><code>satp</code></td><td class="number">0x180</td></tr>
+      </tbody>
+    </table></div>
+    <p>M 모드에도 두 CSR이 더해진다. 게스트 물리 주소를 담는 <code>mtval2</code>(<code>0x34B</code>)와 변환된 명령어를 담는 <code>mtinst</code>(<code>0x34A</code>)로, HS의 <code>htval</code>·<code>htinst</code>와 같은 역할을 M 쪽에서 한다.</p>
+
+    <h3>바꿔치기 규칙</h3>
+    <p>H 확장의 가장 영리한 부분이 여기다. V=1일 때 게스트 커널이 <code>csrr a0, sepc</code>(주소 <code>0x141</code>)를 실행하면, 하트는 <code>sepc</code>가 아니라 <code>vsepc</code>를 읽는다. 게스트 커널은 자기가 진짜 S 모드에 있다고 믿고 평소의 주소를 쓰지만, 하드웨어가 조용히 게스트 사본으로 연결해 준다. 그동안 HS의 진짜 <code>sepc</code>는 값을 그대로 지키며 기계 동작에 영향을 주지 않는다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 300" role="img" aria-label="V 비트가 S CSR 주소를 VS CSR로 연결하는 모습">
+        <defs>
+          <marker id="substitution-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker>
+          <marker id="substitution-arrow-faint" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--text-faint)"/></marker>
+        </defs>
+        <rect x="16" y="110" width="214" height="80" rx="10" class="f-elev"/>
+        <text x="123" y="142" text-anchor="middle" class="t-mono" style="font-size:15px">csrr a0, sepc</text>
+        <text x="123" y="168" text-anchor="middle" class="t-faint">CSR 주소 0x141</text>
+        <path d="M232 150 H294" class="s-accent flow-dash" marker-end="url(#substitution-arrow)"/>
+        <polygon points="300,95 352,117 352,183 300,205" class="f-accent-soft"/>
+        <text x="326" y="156" text-anchor="middle" class="t-accent">V</text>
+        <text x="326" y="80" text-anchor="middle" class="t-dim">V 비트로 선택</text>
+        <path d="M326 86 V104" class="s-line"/>
+        <path d="M352 130 C 396 130 396 75 436 75" class="s-line s-dashed" marker-end="url(#substitution-arrow-faint)"/>
+        <text x="404" y="126" class="t-faint">V = 0</text>
+        <path d="M352 170 C 396 170 396 225 436 225" class="s-accent flow-dash" marker-end="url(#substitution-arrow)"/>
+        <text x="404" y="182" class="t-accent" style="font-size:13px">V = 1</text>
+        <!-- HS 수준 S CSR -->
+        <rect x="440" y="14" width="404" height="122" rx="12" class="f-surface"/>
+        <text x="454" y="36" class="t-dim">HS 수준 S CSR · V = 0 일 때 쓰인다</text>
+        <g class="t-mono" style="font-size:12px">
+          <rect x="452" y="48" width="72" height="30" rx="6" class="f-elev"/><text x="488" y="68" text-anchor="middle" class="t-mono" style="font-size:12px">sstatus</text>
+          <rect x="530" y="48" width="72" height="30" rx="6" class="f-elev"/><text x="566" y="68" text-anchor="middle" class="t-mono" style="font-size:12px">sie</text>
+          <rect x="608" y="48" width="72" height="30" rx="6" class="f-elev"/><text x="644" y="68" text-anchor="middle" class="t-mono" style="font-size:12px">stvec</text>
+          <rect x="686" y="48" width="72" height="30" rx="6" class="f-elev"/><text x="722" y="68" text-anchor="middle" class="t-mono" style="font-size:12px">sscratch</text>
+          <rect x="764" y="48" width="72" height="30" rx="6" class="f-surface-2"/><text x="800" y="68" text-anchor="middle" class="t-mono" style="font-size:12px">sepc</text>
+          <rect x="452" y="88" width="72" height="30" rx="6" class="f-elev"/><text x="488" y="108" text-anchor="middle" class="t-mono" style="font-size:12px">scause</text>
+          <rect x="530" y="88" width="72" height="30" rx="6" class="f-elev"/><text x="566" y="108" text-anchor="middle" class="t-mono" style="font-size:12px">stval</text>
+          <rect x="608" y="88" width="72" height="30" rx="6" class="f-elev"/><text x="644" y="108" text-anchor="middle" class="t-mono" style="font-size:12px">sip</text>
+          <rect x="686" y="88" width="72" height="30" rx="6" class="f-elev"/><text x="722" y="108" text-anchor="middle" class="t-mono" style="font-size:12px">satp</text>
+          <text x="800" y="108" text-anchor="middle" class="t-faint">…</text>
+        </g>
+        <!-- VS CSR -->
+        <rect x="440" y="164" width="404" height="122" rx="12" class="f-violet-soft"/>
+        <text x="454" y="186" class="t-dim">VS CSR · V = 1 일 때 대신 쓰인다</text>
+        <g>
+          <rect x="452" y="198" width="72" height="30" rx="6" class="f-elev"/><text x="488" y="218" text-anchor="middle" class="t-mono" style="font-size:12px">vsstatus</text>
+          <rect x="530" y="198" width="72" height="30" rx="6" class="f-elev"/><text x="566" y="218" text-anchor="middle" class="t-mono" style="font-size:12px">vsie</text>
+          <rect x="608" y="198" width="72" height="30" rx="6" class="f-elev"/><text x="644" y="218" text-anchor="middle" class="t-mono" style="font-size:12px">vstvec</text>
+          <rect x="686" y="198" width="72" height="30" rx="6" class="f-elev"/><text x="722" y="218" text-anchor="middle" class="t-mono" style="font-size:12px">vsscratch</text>
+          <rect x="764" y="198" width="72" height="30" rx="6" class="f-gold-soft blink-highlight"/><text x="800" y="218" text-anchor="middle" class="t-mono" style="font-size:12px">vsepc</text>
+          <rect x="452" y="238" width="72" height="30" rx="6" class="f-elev"/><text x="488" y="258" text-anchor="middle" class="t-mono" style="font-size:12px">vscause</text>
+          <rect x="530" y="238" width="72" height="30" rx="6" class="f-elev"/><text x="566" y="258" text-anchor="middle" class="t-mono" style="font-size:12px">vstval</text>
+          <rect x="608" y="238" width="72" height="30" rx="6" class="f-elev"/><text x="644" y="258" text-anchor="middle" class="t-mono" style="font-size:12px">vsip</text>
+          <rect x="686" y="238" width="72" height="30" rx="6" class="f-elev"/><text x="722" y="258" text-anchor="middle" class="t-mono" style="font-size:12px">vsatp</text>
+          <text x="800" y="258" text-anchor="middle" class="t-faint">…</text>
+        </g>
+      </svg></div>
+      <figcaption><b>그림 21-3.</b> VS CSR 바꿔치기. 같은 명령 <code>csrr a0, sepc</code>라도 V=1이면 <code>vsepc</code>(금색)로 연결된다. 게스트는 VS CSR을 자기 주소(<code>0x241</code>)로 직접 건드릴 수 없고, 그렇게 하면 가상 명령 예외가 난다. VS CSR을 이름 그대로 다룰 수 있는 것은 M과 HS뿐이다.</figcaption>
+    </figure>
+
+    <div class="callout spec"><strong>규격 원문에서</strong>
+      <blockquote>“When V=1, the VS CSRs substitute for the corresponding supervisor CSRs, taking over all functions of the usual supervisor CSRs except as specified otherwise. Instructions that normally read or modify a supervisor CSR shall instead access the corresponding VS CSR.”</blockquote>
+      <p><a href="https://docs.riscv.org/reference/isa/v20260120/priv/hypervisor.html" target="_blank" rel="noopener">Volume II, “H” Extension — Hypervisor and Virtual Supervisor CSRs</a> — VS 사본은 트랩이 자동으로 쓰거나 트랩 직후·SRET 직전에 곧바로 쓰이는 CSR에만 있다. 소프트웨어가 정확한 순간에 바꿔 끼울 수 없는 것들이기 때문이다.</p></div>
+    <p>그 이유 때문에 모든 S CSR에 짝이 있는 것은 아니다. <code>senvcfg</code>, <code>scounteren</code>, <code>scontext</code>는 VS 사본이 없어서 V=1에서도 같은 레지스터가 그대로 쓰인다. 하이퍼바이저는 게스트를 바꿀 때 이런 CSR을 손으로 저장·복원해야 한다.</p>
+
+    <div class="sim" id="csr-substitution-sim">
+      <div class="sim-head"><span class="sim-tag">EXPLORER</span><h3>CSR 바꿔치기 탐색기</h3></div>
+      <div class="sim-pad">
+        <div class="csr-access-line">
+          <span class="instruction-chip" id="csr-instruction-text">csrr a0, sepc</span>
+          <span class="flow-arrow">→</span>
+          <span class="target-chip" id="csr-target-text">sepc (0x141)</span>
+        </div>
+        <div class="csr-banks">
+          <div><h4>HS 수준 S CSR</h4><div class="cell-grid" id="csr-supervisor-bank"></div></div>
+          <div><h4>VS CSR</h4><div class="cell-grid" id="csr-virtual-bank"></div></div>
+          <div><h4>하이퍼바이저 CSR</h4><div class="cell-grid" id="csr-hypervisor-bank"></div></div>
+        </div>
+      </div>
+      <div class="step-description" id="csr-description">CSR을 고르고 V를 바꿔 보자.</div>
+      <div class="sim-controls">
+        <div class="control"><span>실행 중인 모드</span><div class="segmented" id="csr-mode-segmented"><button data-value="0" class="on">HS 모드 (V=0)</button><button data-value="1">VS 모드 (V=1)</button></div></div>
+        <div class="control"><span>하이퍼바이저 설정</span>
+          <label class="checkbox"><input type="checkbox" id="csr-vtvm-checkbox"> hstatus.VTVM = 1</label>
+          <label class="checkbox"><input type="checkbox" id="csr-stce-checkbox" checked> henvcfg.STCE = 1</label>
+        </div>
+        <div class="control wide csr-selector"><span>실행할 명령: csrr a0, ___</span><div class="segmented" id="csr-name-segmented"></div></div>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">명령이 가리킨 주소</span><span class="value" id="csr-readout-requested">0x141</span></div>
+        <div class="stat"><span class="key">실제로 접근한 CSR</span><span class="value" id="csr-readout-target">sepc</span></div>
+        <div class="stat"><span class="key">결과</span><span class="value" id="csr-readout-result">정상</span></div>
+      </div>
+      <div class="sim-note">V=1로 바꾼 뒤 <code>satp</code>를 고르고 <code>hstatus.VTVM</code>을 켜 보자. 하이퍼바이저가 게스트의 페이지 테이블 교체를 가로채고 싶을 때 쓰는 스위치다. 또 V=1에서 <code>hgatp</code>나 <code>vsstatus</code>를 이름 그대로 읽으면 무슨 일이 생기는지, <code>senvcfg</code>는 왜 바뀌지 않는지도 확인하자.</div>
+    </div>
+
+    <h3>hstatus 한눈에 보기</h3>
+    <p><code>hstatus</code>는 <code>mstatus</code>가 M 모드를 위해 하는 일을 게스트에 대해 한다. 트랩이 들어올 때 하드웨어가 기록하는 필드(SPV·SPVP·GVA)와, 게스트의 특정 동작을 가로채는 필드(VTSR·VTW·VTVM)가 핵심이다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 880 240" role="img" aria-label="RV64 hstatus 비트 배치">
+        <text x="20" y="22" class="t-faint">hstatus (HSXLEN = 64) · 비트 63–23</text>
+        <g>
+          <rect x="20" y="44" width="200" height="48" class="f-surface"/><text x="120" y="73" text-anchor="middle" class="t-dim">WPRI</text>
+          <text x="24" y="38" class="t-faint">63</text><text x="216" y="38" text-anchor="end" class="t-faint">50</text>
+          <rect x="220" y="44" width="120" height="48" class="f-teal-soft"/><text x="280" y="73" text-anchor="middle" class="t-mono t-bold">HUPMM</text>
+          <text x="224" y="38" class="t-faint">49</text><text x="336" y="38" text-anchor="end" class="t-faint">48</text>
+          <rect x="340" y="44" width="200" height="48" class="f-surface"/><text x="440" y="73" text-anchor="middle" class="t-dim">WPRI</text>
+          <text x="344" y="38" class="t-faint">47</text><text x="536" y="38" text-anchor="end" class="t-faint">34</text>
+          <rect x="540" y="44" width="120" height="48" class="f-teal-soft"/><text x="600" y="73" text-anchor="middle" class="t-mono t-bold">VSXL</text>
+          <text x="544" y="38" class="t-faint">33</text><text x="656" y="38" text-anchor="end" class="t-faint">32</text>
+          <rect x="660" y="44" width="200" height="48" class="f-surface"/><text x="760" y="73" text-anchor="middle" class="t-dim">WPRI</text>
+          <text x="664" y="38" class="t-faint">31</text><text x="856" y="38" text-anchor="end" class="t-faint">23</text>
+        </g>
+        <text x="20" y="116" class="t-faint">비트 22–0</text>
+        <g>
+          <rect x="20" y="136" width="70" height="48" class="f-violet-soft"/><text x="55" y="165" text-anchor="middle" class="t-mono t-bold">VTSR</text><text x="55" y="130" text-anchor="middle" class="t-faint">22</text>
+          <rect x="90" y="136" width="70" height="48" class="f-violet-soft"/><text x="125" y="165" text-anchor="middle" class="t-mono t-bold">VTW</text><text x="125" y="130" text-anchor="middle" class="t-faint">21</text>
+          <rect x="160" y="136" width="70" height="48" class="f-violet-soft"/><text x="195" y="165" text-anchor="middle" class="t-mono t-bold">VTVM</text><text x="195" y="130" text-anchor="middle" class="t-faint">20</text>
+          <rect x="230" y="136" width="70" height="48" class="f-surface"/><text x="265" y="165" text-anchor="middle" class="t-dim">WPRI</text><text x="265" y="130" text-anchor="middle" class="t-faint">19:18</text>
+          <rect x="300" y="136" width="70" height="48" class="f-teal-soft"/><text x="335" y="165" text-anchor="middle" class="t-mono t-bold">VGEIN</text><text x="335" y="130" text-anchor="middle" class="t-faint">17:12</text>
+          <rect x="370" y="136" width="70" height="48" class="f-surface"/><text x="405" y="165" text-anchor="middle" class="t-dim">WPRI</text><text x="405" y="130" text-anchor="middle" class="t-faint">11:10</text>
+          <rect x="440" y="136" width="70" height="48" class="f-gold-soft"/><text x="475" y="165" text-anchor="middle" class="t-mono t-bold">HU</text><text x="475" y="130" text-anchor="middle" class="t-faint">9</text>
+          <rect x="510" y="136" width="70" height="48" class="f-accent-soft"/><text x="545" y="165" text-anchor="middle" class="t-mono t-bold">SPVP</text><text x="545" y="130" text-anchor="middle" class="t-faint">8</text>
+          <rect x="580" y="136" width="70" height="48" class="f-accent-soft"/><text x="615" y="165" text-anchor="middle" class="t-mono t-bold">SPV</text><text x="615" y="130" text-anchor="middle" class="t-faint">7</text>
+          <rect x="650" y="136" width="70" height="48" class="f-accent-soft"/><text x="685" y="165" text-anchor="middle" class="t-mono t-bold">GVA</text><text x="685" y="130" text-anchor="middle" class="t-faint">6</text>
+          <rect x="720" y="136" width="70" height="48" class="f-elev"/><text x="755" y="165" text-anchor="middle" class="t-mono t-bold">VSBE</text><text x="755" y="130" text-anchor="middle" class="t-faint">5</text>
+          <rect x="790" y="136" width="70" height="48" class="f-surface"/><text x="825" y="165" text-anchor="middle" class="t-dim">WPRI</text><text x="825" y="130" text-anchor="middle" class="t-faint">4:0</text>
+        </g>
+        <g transform="translate(20,212)">
+          <rect width="14" height="14" class="f-accent-soft"/><text x="20" y="12" class="t-dim">트랩 때 하드웨어가 기록</text>
+          <rect x="210" width="14" height="14" class="f-violet-soft"/><text x="230" y="12" class="t-dim">VS 모드 동작 가로채기</text>
+          <rect x="410" width="14" height="14" class="f-gold-soft"/><text x="430" y="12" class="t-dim">U 모드의 HLV/HSV 허용</text>
+          <rect x="620" width="14" height="14" class="f-teal-soft"/><text x="640" y="12" class="t-dim">인터럽트 선택 · 폭 · 마스킹</text>
+        </g>
+      </svg></div>
+      <figcaption><b>그림 21-4.</b> RV64의 <code>hstatus</code> 비트 배치(규격 Figure 2). HSXLEN=32이면 VSXL과 HUPMM이 없고 나머지 위치는 같다.</figcaption>
+    </figure>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>필드</th><th>비트</th><th>뜻</th></tr></thead>
+      <tbody>
+        <tr><td><b>SPV</b></td><td>7</td><td>HS로 트랩할 때 직전의 V를 기록. V=0에서 SRET하면 V ← SPV.</td></tr>
+        <tr><td><b>SPVP</b></td><td>8</td><td>V=1에서 트랩하면 직전의 명목 권한(VS=1, VU=0)을 기록. HLV/HSV가 어떤 권한으로 게스트 메모리를 읽을지 정한다.</td></tr>
+        <tr><td><b>GVA</b></td><td>6</td><td>트랩이 <code>stval</code>에 게스트 가상 주소를 썼으면 1.</td></tr>
+        <tr><td><b>VSBE</b></td><td>5</td><td>VS 모드 메모리 접근의 엔디언 (0 = 리틀).</td></tr>
+        <tr><td><b>HU</b></td><td>9</td><td>1이면 U 모드에서도 HLV·HLVX·HSV를 쓸 수 있다.</td></tr>
+        <tr><td><b>VGEIN</b></td><td>17:12</td><td>VS 외부 인터럽트로 연결할 게스트 외부 인터럽트 번호(0 = 없음).</td></tr>
+        <tr><td><b>VTVM · VTW · VTSR</b></td><td>20 · 21 · 22</td><td>VS 모드의 satp 접근·SFENCE.VMA / WFI / SRET을 가상 명령 예외로 가로챈다. <code>mstatus</code>의 TVM·TW·TSR과 같은 구실.</td></tr>
+        <tr><td><b>VSXL</b></td><td>33:32</td><td>VS 모드의 XLEN (misa.MXL과 같은 인코딩).</td></tr>
+        <tr><td><b>HUPMM</b></td><td>49:48</td><td>U 모드 HLV/HSV의 포인터 마스킹 (Ssnpm).</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="two-stage">
+    <h2>2단계 주소 변환: VS-stage와 G-stage</h2>
+    <p>메모리 가상화가 H 확장의 두 번째 기둥이다. V=1이면 모든 메모리 접근이 <b>두 번</b> 변환된다. 첫 단계 <span class="term">VS-stage</span>는 게스트 커널이 <code>vsatp</code>로 관리하는 평범한 Sv39/Sv48 페이지 테이블이고, 게스트 가상 주소(GVA)를 <span class="term">게스트 물리 주소</span><span class="english">(GPA)</span>로 바꾼다. 둘째 단계 <span class="term">G-stage</span>는 하이퍼바이저가 <code>hgatp</code>로 관리하며, GPA를 진짜 <span class="term">슈퍼바이저 물리 주소</span><span class="english">(SPA)</span>로 바꾼다. 게스트는 G-stage가 있다는 사실조차 모른다. 섀도 페이지 테이블이 필요 없어지는 이유다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 250" role="img" aria-label="게스트 가상 주소가 VS-stage와 G-stage를 거쳐 물리 주소가 되는 흐름">
+        <defs>
+          <marker id="two-stage-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker>
+          <marker id="two-stage-arrow-faint" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--text-faint)"/></marker>
+        </defs>
+        <text x="430" y="30" text-anchor="middle" class="t-dim">V = 1 이면 모든 메모리 접근이 두 단계를 거친다</text>
+        <rect x="16" y="60" width="120" height="76" rx="10" class="f-elev"/>
+        <text x="76" y="92" text-anchor="middle" class="t t-bold">GVA</text><text x="76" y="114" text-anchor="middle" class="t-faint">게스트 가상 주소</text>
+        <path d="M138 98 H174" class="s-accent flow-dash" marker-end="url(#two-stage-arrow)"/>
+        <rect x="180" y="60" width="160" height="76" rx="10" class="f-violet-soft"/>
+        <text x="260" y="86" text-anchor="middle" class="t t-bold">VS-stage</text><text x="260" y="107" text-anchor="middle" class="t-faint">vsatp가 가리키는</text><text x="260" y="124" text-anchor="middle" class="t-faint">게스트 페이지 테이블</text>
+        <path d="M342 98 H374" class="s-accent flow-dash" marker-end="url(#two-stage-arrow)"/>
+        <rect x="380" y="60" width="120" height="76" rx="10" class="f-elev"/>
+        <text x="440" y="92" text-anchor="middle" class="t t-bold">GPA</text><text x="440" y="114" text-anchor="middle" class="t-faint">게스트 물리 주소</text>
+        <path d="M502 98 H534" class="s-accent flow-dash" marker-end="url(#two-stage-arrow)"/>
+        <rect x="540" y="60" width="160" height="76" rx="10" class="f-gold-soft"/>
+        <text x="620" y="86" text-anchor="middle" class="t t-bold">G-stage</text><text x="620" y="107" text-anchor="middle" class="t-faint">hgatp가 가리키는</text><text x="620" y="124" text-anchor="middle" class="t-faint">하이퍼바이저 테이블</text>
+        <path d="M702 98 H734" class="s-accent flow-dash" marker-end="url(#two-stage-arrow)"/>
+        <rect x="740" y="60" width="104" height="76" rx="10" class="f-ok-soft"/>
+        <text x="792" y="92" text-anchor="middle" class="t t-bold">SPA</text><text x="792" y="114" text-anchor="middle" class="t-faint">실제 물리 주소</text>
+        <line x1="76" y1="147" x2="792" y2="147" stroke="var(--border)" stroke-width="2" stroke-dasharray="3 5"/>
+        <circle r="6" fill="var(--accent-2)"><animateMotion dur="3.2s" begin="-0.6s" repeatCount="indefinite" path="M76 147 H792"/></circle>
+        <text x="260" y="172" text-anchor="middle" class="t-violet" style="font-size:13px">게스트 OS가 관리</text>
+        <text x="620" y="172" text-anchor="middle" class="t-gold" style="font-size:13px">하이퍼바이저가 관리</text>
+        <path d="M260 180 V206 H620 V186" class="s-line s-dashed" marker-end="url(#two-stage-arrow-faint)"/>
+        <text x="440" y="228" text-anchor="middle" class="t-dim">VS 단계의 페이지 테이블 읽기(주소가 GPA)도 하나하나 G-stage를 거친다</text>
+      </svg></div>
+      <figcaption><b>그림 21-5.</b> 2단계 주소 변환. 금색 점은 하나의 메모리 접근이 GVA → GPA → SPA로 바뀌는 흐름이다. 점선 화살표가 중요하다. VS-stage 페이지 테이블 자체가 게스트 물리 메모리에 있으므로, 게스트 PTE를 읽는 일조차 G-stage 변환을 거쳐야 한다.</figcaption>
+    </figure>
+
+    <h3>hgatp와 Sv39x4</h3>
+    <p><code>hgatp</code>는 <code>satp</code>와 비슷하게 생겼다. MODE, 가상 머신 식별자 <b>VMID</b>, G-stage 루트 테이블의 PPN이 들어간다. ASID가 프로세스를 구별하듯 VMID는 가상 머신을 구별해, 게스트를 바꿀 때 TLB를 통째로 비우지 않아도 되게 한다. HSXLEN=64에서 MODE 값은 0(Bare), 8(Sv39x4), 9(Sv48x4), 10(Sv57x4)이고 나머지는 예약이다. HSXLEN=32이면 0(Bare)과 1(Sv32x4)뿐이다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 252" role="img" aria-label="hgatp 레지스터와 Sv39x4 게스트 물리 주소의 비트 배치">
+        <text x="20" y="20" class="t t-bold">hgatp (HSXLEN = 64)</text>
+        <rect x="20" y="46" width="140" height="40" class="f-accent-soft"/><text x="90" y="71" text-anchor="middle" class="t-mono t-bold">MODE</text>
+        <rect x="160" y="46" width="70" height="40" class="f-surface"/><text x="195" y="71" text-anchor="middle" class="t-dim">0</text>
+        <rect x="230" y="46" width="230" height="40" class="f-teal-soft"/><text x="345" y="71" text-anchor="middle" class="t-mono t-bold">VMID</text>
+        <rect x="460" y="46" width="380" height="40" class="f-gold-soft"/><text x="650" y="71" text-anchor="middle" class="t-mono t-bold">PPN</text>
+        <text x="24" y="40" class="t-faint">63</text><text x="156" y="40" text-anchor="end" class="t-faint">60</text>
+        <text x="164" y="40" class="t-faint">59</text><text x="226" y="40" text-anchor="end" class="t-faint">58</text>
+        <text x="234" y="40" class="t-faint">57</text><text x="456" y="40" text-anchor="end" class="t-faint">44</text>
+        <text x="464" y="40" class="t-faint">43</text><text x="836" y="40" text-anchor="end" class="t-faint">0</text>
+        <text x="90" y="104" text-anchor="middle" class="t-faint">0 Bare · 8 Sv39x4</text>
+        <text x="90" y="120" text-anchor="middle" class="t-faint">9 Sv48x4 · 10 Sv57x4</text>
+        <text x="345" y="104" text-anchor="middle" class="t-faint">가상 머신 번호 (최대 14비트)</text>
+        <text x="650" y="104" text-anchor="middle" class="t-faint">G-stage 루트 테이블의 물리 페이지 번호</text>
+        <text x="650" y="120" text-anchor="middle" class="t-faint">16 KiB 정렬 → PPN[1:0]은 항상 0</text>
+
+        <text x="20" y="150" class="t t-bold">Sv39x4 게스트 물리 주소 (41비트)</text>
+        <rect x="20" y="174" width="280" height="40" class="f-gold-soft"/><text x="160" y="199" text-anchor="middle" class="t-mono t-bold">VPN[2] · 11비트</text>
+        <rect x="300" y="174" width="180" height="40" class="f-accent-soft"/><text x="390" y="199" text-anchor="middle" class="t-mono t-bold">VPN[1] · 9</text>
+        <rect x="480" y="174" width="180" height="40" class="f-accent-soft"/><text x="570" y="199" text-anchor="middle" class="t-mono t-bold">VPN[0] · 9</text>
+        <rect x="660" y="174" width="180" height="40" class="f-surface"/><text x="750" y="199" text-anchor="middle" class="t-mono">page offset · 12</text>
+        <text x="24" y="168" class="t-faint">40</text><text x="296" y="168" text-anchor="end" class="t-faint">30</text>
+        <text x="304" y="168" class="t-faint">29</text><text x="476" y="168" text-anchor="end" class="t-faint">21</text>
+        <text x="484" y="168" class="t-faint">20</text><text x="656" y="168" text-anchor="end" class="t-faint">12</text>
+        <text x="664" y="168" class="t-faint">11</text><text x="836" y="168" text-anchor="end" class="t-faint">0</text>
+        <text x="160" y="234" text-anchor="middle" class="t-dim">2048 PTE × 8 B = 16 KiB 루트</text>
+        <text x="390" y="234" text-anchor="middle" class="t-dim">512 PTE · 4 KiB</text>
+        <text x="570" y="234" text-anchor="middle" class="t-dim">512 PTE · 4 KiB</text>
+        <text x="750" y="234" text-anchor="middle" class="t-dim">4 KiB 페이지 안 위치</text>
+      </svg></div>
+      <figcaption><b>그림 21-6.</b> 위: RV64 <code>hgatp</code>. 아래: Sv39x4가 나누는 41비트 게스트 물리 주소. Sv39 가상 주소와 똑같고 VPN[2]만 2비트 넓다. 그래서 루트 테이블만 4배(16 KiB)로 커진다. 비트 63:41 중 하나라도 1이면 게스트 페이지 폴트다.</figcaption>
+    </figure>
+    <div class="callout spec"><strong>규격 원문에서</strong>
+      <blockquote>“In each case, the size of the incoming address is widened by 2 bits (to 34, 41, 50, or 59 bits). To accommodate the 2 extra bits, the root page table (only) is expanded by a factor of four to be 16 KiB instead of the usual 4 KiB.”</blockquote>
+      <p><a href="https://docs.riscv.org/reference/isa/v20260120/priv/hypervisor.html" target="_blank" rel="noopener">Volume II, “H” Extension — Guest Physical Address Translation</a> — 규격은 게스트에게 가상 주소 공간의 4배까지 물리 주소 공간을 줄 수 있게 하려고 이렇게 했다고 설명한다. 예를 들어 Sv39만 지원하는 칩도 41비트 게스트 물리 주소를 만들 수 있다.</p></div>
+
+    <h3>G-stage만의 규칙</h3>
+    <ul>
+      <li><b>모든 G-stage 접근은 U 모드 접근으로 본다.</b> 그래서 G-stage의 리프 PTE는 <b>U=1</b>이어야 한다. U=0이면 게스트 페이지 폴트가 난다. PTE 형식이 같아서 하이퍼바이저가 자기 페이지 테이블 일부를 G-stage와 함께 쓸 수도 있다.</li>
+      <li><b>VS 페이지 테이블을 읽는 접근</b>은 G-stage에서 원래 접근 종류(명령 인출·읽기·쓰기)와 상관없이 <b>암묵적 읽기</b>(A/D 갱신이면 쓰기)로 권한을 검사한다. 다만 예외가 나면 원래 접근 종류로 보고한다. 명령 인출 중이었다면 명령 게스트 페이지 폴트(20)가 된다.</li>
+      <li>G-stage PTE의 G 비트는 아직 쓰지 않는다. 소프트웨어는 0으로 둔다.</li>
+      <li><code>vsstatus.MXR</code>은 VS-stage에만 작용하고, HS 수준 <code>sstatus.MXR</code>은 두 단계 모두에 작용한다.</li>
+    </ul>
+    <div class="callout warn"><strong>G-stage의 폴트는 게스트 페이지 폴트다</strong><p>G-stage에서 문제가 생기면 보통의 페이지 폴트(12·13·15)가 아니라 <b>게스트 페이지 폴트</b>(20·21·23)가 난다. 이 예외는 게스트에게 위임할 수 없고 항상 HS(또는 M)가 받는다. 게스트는 G-stage를 모르니 고칠 수도 없기 때문이다. 하이퍼바이저는 보통 이 폴트를 받아 게스트에게 메모리를 실제로 할당하거나(지연 할당), MMIO 장치 접근을 흉내 낸다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="nested-walk">
+    <h2>중첩 페이지 워크의 비용</h2>
+    <p>TLB가 모두 빗나간 최악의 경우를 세어 보자. 게스트가 <b>n</b>단계 페이지 테이블(Sv39이면 3)을, 하이퍼바이저가 <b>m</b>단계 G-stage(Sv39x4이면 3)를 쓴다고 하자.</p>
+    <ol>
+      <li>게스트 페이지 워크는 <code>vsatp.PPN</code>에서 시작한다. 이 값은 <b>GPA</b>다. 루트 테이블의 PTE 주소 <code>vsatp.PPN × 4096 + VPN[n−1] × 8</code>도 GPA이므로, 그 PTE를 읽으려면 먼저 G-stage 워크(m번 읽기)로 SPA를 구해야 한다. 그다음에야 PTE 자체를 읽는다(1번). 한 게스트 단계에 <b>m + 1</b>번이다.</li>
+      <li>게스트 PTE 안의 PPN이 가리키는 다음 테이블도 GPA다. 그래서 n개의 게스트 단계 모두 같은 일을 반복한다: <b>n × (m + 1)</b>번.</li>
+      <li>마지막 리프 PTE가 준 것은 데이터의 <b>GPA</b>다. 이를 SPA로 바꾸려면 G-stage 워크가 한 번 더 필요하다: <b>+ m</b>번.</li>
+    </ol>
+    <p>합치면 페이지 테이블 읽기는 <b>n(m+1) + m = nm + n + m = (n+1)(m+1) − 1</b>번이고, 실제 데이터 접근 1번이 따로 붙는다. Sv39 게스트를 Sv39x4 위에서 돌리면 3·3 + 3 + 3 = <b>15번</b>, Sv48 위의 Sv48x4라면 4·4 + 4 + 4 = <b>24번</b>이다. 가상화가 없을 때 각각 3번, 4번이던 것에 비하면 5–6배다. 24라는 숫자는 x86-64의 4단계 × 4단계 중첩 페이징을 분석한 Bhargava 등(ASPLOS 2008)의 결과와도 같다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 390" role="img" aria-label="Sv39 게스트와 Sv39x4 G-stage의 2차원 페이지 워크 순서">
+        <text x="274" y="40" text-anchor="middle" class="t-dim">G-stage L2</text>
+        <text x="404" y="40" text-anchor="middle" class="t-dim">G-stage L1</text>
+        <text x="534" y="40" text-anchor="middle" class="t-dim">G-stage L0</text>
+        <text x="664" y="40" text-anchor="middle" class="t-dim">게스트 PTE 읽기</text>
+        <text x="790" y="40" text-anchor="middle" class="t-dim">이 줄의 읽기</text>
+        <path d="M274 84 H664 L274 150 H664 L274 216 H664 L274 282 H664" class="s-accent flow-dash" fill="none"/>
+        <g>
+          <text x="28" y="89" class="t t-bold">VS 레벨 2 PTE</text>
+          <text x="28" y="155" class="t t-bold">VS 레벨 1 PTE</text>
+          <text x="28" y="221" class="t t-bold">VS 레벨 0 PTE</text>
+          <text x="28" y="287" class="t t-bold">데이터의 GPA</text>
+          <text x="28" y="107" class="t-faint">주소 = vsatp.PPN 기준</text>
+          <text x="28" y="173" class="t-faint">주소 = 앞 PTE의 PPN 기준</text>
+          <text x="28" y="239" class="t-faint">주소 = 앞 PTE의 PPN 기준</text>
+          <text x="28" y="305" class="t-faint">리프 PTE가 준 GPA</text>
+        </g>
+        <g>
+          <rect x="215" y="56" width="118" height="56" rx="9" fill="var(--bg-elev)"/><rect x="345" y="56" width="118" height="56" rx="9" fill="var(--bg-elev)"/><rect x="475" y="56" width="118" height="56" rx="9" fill="var(--bg-elev)"/><rect x="605" y="56" width="118" height="56" rx="9" fill="var(--bg-elev)"/><rect x="215" y="122" width="118" height="56" rx="9" fill="var(--bg-elev)"/><rect x="345" y="122" width="118" height="56" rx="9" fill="var(--bg-elev)"/><rect x="475" y="122" width="118" height="56" rx="9" fill="var(--bg-elev)"/><rect x="605" y="122" width="118" height="56" rx="9" fill="var(--bg-elev)"/><rect x="215" y="188" width="118" height="56" rx="9" fill="var(--bg-elev)"/><rect x="345" y="188" width="118" height="56" rx="9" fill="var(--bg-elev)"/><rect x="475" y="188" width="118" height="56" rx="9" fill="var(--bg-elev)"/><rect x="605" y="188" width="118" height="56" rx="9" fill="var(--bg-elev)"/><rect x="215" y="254" width="118" height="56" rx="9" fill="var(--bg-elev)"/><rect x="345" y="254" width="118" height="56" rx="9" fill="var(--bg-elev)"/><rect x="475" y="254" width="118" height="56" rx="9" fill="var(--bg-elev)"/><rect x="605" y="254" width="118" height="56" rx="9" fill="var(--bg-elev)"/>
+          <rect x="215" y="56" width="118" height="56" rx="9" class="f-teal-soft"/><text x="274" y="90" text-anchor="middle" class="t t-bold" style="font-size:17px">1</text>
+          <rect x="345" y="56" width="118" height="56" rx="9" class="f-teal-soft"/><text x="404" y="90" text-anchor="middle" class="t t-bold" style="font-size:17px">2</text>
+          <rect x="475" y="56" width="118" height="56" rx="9" class="f-teal-soft"/><text x="534" y="90" text-anchor="middle" class="t t-bold" style="font-size:17px">3</text>
+          <rect x="605" y="56" width="118" height="56" rx="9" class="f-violet-soft"/><text x="664" y="90" text-anchor="middle" class="t t-bold" style="font-size:17px">4</text>
+          <rect x="215" y="122" width="118" height="56" rx="9" class="f-teal-soft"/><text x="274" y="156" text-anchor="middle" class="t t-bold" style="font-size:17px">5</text>
+          <rect x="345" y="122" width="118" height="56" rx="9" class="f-teal-soft"/><text x="404" y="156" text-anchor="middle" class="t t-bold" style="font-size:17px">6</text>
+          <rect x="475" y="122" width="118" height="56" rx="9" class="f-teal-soft"/><text x="534" y="156" text-anchor="middle" class="t t-bold" style="font-size:17px">7</text>
+          <rect x="605" y="122" width="118" height="56" rx="9" class="f-violet-soft"/><text x="664" y="156" text-anchor="middle" class="t t-bold" style="font-size:17px">8</text>
+          <rect x="215" y="188" width="118" height="56" rx="9" class="f-teal-soft"/><text x="274" y="222" text-anchor="middle" class="t t-bold" style="font-size:17px">9</text>
+          <rect x="345" y="188" width="118" height="56" rx="9" class="f-teal-soft"/><text x="404" y="222" text-anchor="middle" class="t t-bold" style="font-size:17px">10</text>
+          <rect x="475" y="188" width="118" height="56" rx="9" class="f-teal-soft"/><text x="534" y="222" text-anchor="middle" class="t t-bold" style="font-size:17px">11</text>
+          <rect x="605" y="188" width="118" height="56" rx="9" class="f-violet-soft"/><text x="664" y="222" text-anchor="middle" class="t t-bold" style="font-size:17px">12</text>
+          <rect x="215" y="254" width="118" height="56" rx="9" class="f-teal-soft"/><text x="274" y="288" text-anchor="middle" class="t t-bold" style="font-size:17px">13</text>
+          <rect x="345" y="254" width="118" height="56" rx="9" class="f-teal-soft"/><text x="404" y="288" text-anchor="middle" class="t t-bold" style="font-size:17px">14</text>
+          <rect x="475" y="254" width="118" height="56" rx="9" class="f-teal-soft"/><text x="534" y="288" text-anchor="middle" class="t t-bold" style="font-size:17px">15</text>
+          <rect x="605" y="254" width="118" height="56" rx="9" class="f-gold-soft"/><text x="664" y="288" text-anchor="middle" class="t t-bold">데이터</text>
+        </g>
+        <text x="790" y="89" text-anchor="middle" class="t-mono">3 + 1</text>
+        <text x="790" y="155" text-anchor="middle" class="t-mono">3 + 1</text>
+        <text x="790" y="221" text-anchor="middle" class="t-mono">3 + 1</text>
+        <text x="790" y="287" text-anchor="middle" class="t-mono">3</text>
+        <text x="430" y="346" text-anchor="middle" class="t t-bold" style="font-size:15px">3 × (3 + 1) + 3 = 15 번의 페이지 테이블 읽기 = (3 + 1)(3 + 1) − 1</text>
+        <text x="430" y="372" text-anchor="middle" class="t-dim">가상화가 없으면 3번 · TLB 미스 한 번의 비용이 다섯 배가 된다</text>
+      </svg></div>
+      <figcaption><b>그림 21-7.</b> Sv39 게스트 × Sv39x4 G-stage의 2차원 페이지 워크. 청록 칸은 G-stage PTE 읽기, 보라 칸은 게스트 PTE 읽기, 숫자는 접근 순서다. 각 줄은 “GPA 하나를 G-stage로 변환(3번) → 그 SPA에서 게스트 PTE 읽기(1번)”이고, 마지막 줄은 데이터의 GPA 변환이다.</figcaption>
+    </figure>
+
+    <div class="sim" id="nested-walk-sim">
+      <div class="sim-head"><span class="sim-tag animation">ANIMATION</span><h3>2차원 페이지 워크 계수기</h3></div>
+      <div class="sim-view"><canvas id="nested-walk-canvas"></canvas></div>
+      <div class="step-description" id="nested-walk-description"><b>한 단계</b>나 <b>자동 재생</b>을 누르면 TLB가 모두 빗나간 상황에서 메모리 접근이 하나씩 일어난다.</div>
+      <div class="sim-controls">
+        <div class="control"><span>게스트 (vsatp)</span><div class="segmented" id="nested-walk-guest"><button data-value="sv39" class="on">Sv39</button><button data-value="sv48">Sv48</button><button data-value="sv57">Sv57</button></div></div>
+        <div class="control"><span>호스트 (hgatp)</span><div class="segmented" id="nested-walk-host"><button data-value="bare">Bare</button><button data-value="sv39x4" class="on">Sv39x4</button><button data-value="sv48x4">Sv48x4</button><button data-value="sv57x4">Sv57x4</button></div></div>
+        <div class="control"><span>실행</span><div class="button-row"><button class="button primary" id="nested-walk-step">한 단계</button><button class="button" id="nested-walk-play">자동 재생</button><button class="button" id="nested-walk-reset">처음으로</button></div></div>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">페이지 테이블 읽기</span><span class="value" id="nested-walk-count">0 / 15</span></div>
+        <div class="stat"><span class="key">공식 n·m + n + m</span><span class="value" id="nested-walk-formula">3·3 + 3 + 3</span></div>
+        <div class="stat"><span class="key">가상화 없을 때</span><span class="value" id="nested-walk-native">3</span></div>
+        <div class="stat"><span class="key">배수</span><span class="value" id="nested-walk-ratio">5.0×</span></div>
+      </div>
+      <div class="sim-note">호스트를 <b>Bare</b>로 바꾸면 G-stage가 사라져 게스트 단계 수만큼만 읽는다. 게스트와 호스트를 하나씩 키우며 표의 숫자가 어떻게 늘어나는지, 그리고 왜 하이퍼바이저가 G-stage에 큰 페이지(2 MiB, 1 GiB)를 즐겨 쓰는지 생각해 보자. 큰 페이지는 m을 줄인다.</div>
+    </div>
+
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>게스트 \ G-stage</th><th class="number">Bare (m=0)</th><th class="number">Sv39x4 (m=3)</th><th class="number">Sv48x4 (m=4)</th><th class="number">Sv57x4 (m=5)</th></tr></thead>
+      <tbody>
+        <tr><td>Sv39 (n=3)</td><td class="number">3</td><td class="number">15</td><td class="number">19</td><td class="number">23</td></tr>
+        <tr><td>Sv48 (n=4)</td><td class="number">4</td><td class="number">19</td><td class="number">24</td><td class="number">29</td></tr>
+        <tr><td>Sv57 (n=5)</td><td class="number">5</td><td class="number">23</td><td class="number">29</td><td class="number">35</td></tr>
+      </tbody>
+    </table></div>
+    <div class="callout deep"><strong>그래서 TLB와 VMID가 중요하다</strong><p>실제 칩은 이 비용을 거의 치르지 않는다. TLB가 GVA → SPA를 곧바로 기억하고, 페이지 워크 캐시가 중간 단계의 결과를 붙잡아 두기 때문이다. 규격은 <code>hgatp.VMID</code>와 VS 수준 ASID를 합친 것을 실질적인 ASID로 보라고 설명한다. 덕분에 여러 가상 머신의 변환이 TLB에 섞여 있어도 서로를 구별할 수 있고, 월드 스위치 때 TLB를 비울 필요가 없다. VMID 비트 수는 구현마다 다르며 Sv39x4·Sv48x4·Sv57x4에서 최대 14비트, Sv32x4에서 최대 7비트다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="traps">
+    <h2>게스트 페이지 폴트와 트랩 위임</h2>
+    <p>H 확장은 원인 코드도 늘린다. 게스트를 위한 예외 넷과 인터럽트 넷이다. VS 모드의 <code>ecall</code>은 HS 모드의 ecall(9)과 다른 코드 <b>10</b>을 받는다. 두 ecall을 따로 위임할 수 있게 하려는 것이다.</p>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>종류</th><th class="number">코드</th><th>이름</th><th>언제</th></tr></thead>
+      <tbody>
+        <tr><td>예외</td><td class="number">8</td><td>Environment call from U-mode or VU-mode</td><td>사용자·게스트 앱의 시스템 호출</td></tr>
+        <tr><td>예외</td><td class="number">10</td><td>Environment call from VS-mode</td><td>게스트 커널의 SBI 호출</td></tr>
+        <tr><td>예외</td><td class="number">20</td><td>Instruction guest-page fault</td><td>명령 인출 중 G-stage 실패</td></tr>
+        <tr><td>예외</td><td class="number">21</td><td>Load guest-page fault</td><td>읽기 중 G-stage 실패</td></tr>
+        <tr><td>예외</td><td class="number">22</td><td>Virtual instruction</td><td>V=1에서 HS라면 허용될 명령이 막힘</td></tr>
+        <tr><td>예외</td><td class="number">23</td><td>Store/AMO guest-page fault</td><td>쓰기·AMO 중 G-stage 실패</td></tr>
+        <tr><td>인터럽트</td><td class="number">2 · 6 · 10</td><td>Virtual supervisor software / timer / external</td><td>VS 수준 인터럽트 (VSSI·VSTI·VSEI)</td></tr>
+        <tr><td>인터럽트</td><td class="number">12</td><td>Supervisor guest external interrupt</td><td>게스트 외부 인터럽트가 HS에 알림 (SGEI)</td></tr>
+      </tbody>
+    </table></div>
+
+    <h3>가상 명령 예외</h3>
+    <p>V=1에서 어떤 명령이 막혔는데, 그 명령이 HS 모드였다면 실행될 수 있었던(<b>HS-qualified</b>) 경우에는 불법 명령 예외(2) 대신 <span class="term">가상 명령 예외</span><span class="english">(virtual instruction, 22)</span>가 난다. 예를 들어 게스트 커널이 <code>hgatp</code>를 읽거나, <code>VTSR=1</code>일 때 <code>sret</code>을, <code>VTVM=1</code>일 때 <code>satp</code>에 쓰거나, HLV·HFENCE 같은 하이퍼바이저 명령을 실행하는 경우다. 규격은 M이 가상 명령 예외를 HS로 곧장 위임하고, 불법 명령 예외는 먼저 M에서 살펴보는 것이 보통이라 가상 명령 예외가 더 빨리 처리될 것이라고 설명한다.</p>
+
+    <h3>위임은 두 단계로</h3>
+    <p>예외와 인터럽트는 기본적으로 모두 M으로 간다. <code>medeleg</code>/<code>mideleg</code>이 HS로 내려 보내고, V=1에서 일어난 트랩이라면 <code>hedeleg</code>/<code>hideleg</code>가 한 번 더 VS로 내려 보낸다. 트랩은 자기보다 권한이 낮은 모드로는 가지 않으므로, HS에서 일어난 트랩이 VS로 가는 일은 없다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 310" role="img" aria-label="V=1에서 일어난 트랩의 위임 결정 과정">
+        <defs>
+          <marker id="delegation-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker>
+          <marker id="delegation-arrow-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--bad)"/></marker>
+        </defs>
+        <rect x="16" y="124" width="150" height="62" rx="10" class="f-violet-soft"/>
+        <text x="91" y="150" text-anchor="middle" class="t t-bold">트랩 발생</text>
+        <text x="91" y="171" text-anchor="middle" class="t-faint">V = 1 (VS · VU)</text>
+        <path d="M168 155 H178" class="s-accent" marker-end="url(#delegation-arrow)"/>
+        <polygon points="180,155 270,105 360,155 270,205" class="f-elev"/>
+        <text x="270" y="150" text-anchor="middle" class="t-mono">medeleg[원인]</text>
+        <text x="270" y="172" text-anchor="middle" class="t-dim">= 1 ?</text>
+        <rect x="200" y="20" width="140" height="54" rx="10" class="f-surface"/>
+        <text x="270" y="44" text-anchor="middle" class="t t-bold">M 모드</text>
+        <text x="270" y="63" text-anchor="middle" class="t-faint">V ← 0, MPV ← 1</text>
+        <path d="M270 104 V78" class="s-bad flow-dash" marker-end="url(#delegation-arrow-bad)"/>
+        <text x="280" y="96" class="t-bad" style="font-size:12px">아니오</text>
+        <text x="352" y="44" class="t-dim">위임하지 않은 트랩은 모두 M으로</text>
+        <path d="M361 155 H416" class="s-accent flow-dash" marker-end="url(#delegation-arrow)"/>
+        <text x="388" y="146" text-anchor="middle" class="t-ok" style="font-size:12px">예</text>
+        <polygon points="420,155 510,105 600,155 510,205" class="f-elev"/>
+        <text x="510" y="150" text-anchor="middle" class="t-mono">hedeleg[원인]</text>
+        <text x="510" y="172" text-anchor="middle" class="t-dim">= 1 ?</text>
+        <rect x="430" y="236" width="160" height="54" rx="10" class="f-gold-soft"/>
+        <text x="510" y="259" text-anchor="middle" class="t t-bold">HS 모드</text>
+        <text x="510" y="278" text-anchor="middle" class="t-faint">V ← 0, SPV ← 1</text>
+        <path d="M510 206 V232" class="s-bad flow-dash" marker-end="url(#delegation-arrow-bad)"/>
+        <text x="520" y="224" class="t-bad" style="font-size:12px">아니오</text>
+        <path d="M601 155 H648" class="s-accent flow-dash" marker-end="url(#delegation-arrow)"/>
+        <text x="624" y="146" text-anchor="middle" class="t-ok" style="font-size:12px">예</text>
+        <rect x="652" y="124" width="190" height="62" rx="10" class="f-violet-soft"/>
+        <text x="747" y="150" text-anchor="middle" class="t t-bold">VS 모드</text>
+        <text x="747" y="171" text-anchor="middle" class="t-faint">V는 1 그대로 · vs* 기록</text>
+        <text x="418" y="258" text-anchor="end" class="t-faint">hedeleg 읽기 전용 0 비트:</text>
+        <text x="418" y="276" text-anchor="end" class="t-faint">9·10·11·16·20·21·22·23 → VS로 못 간다</text>
+      </svg></div>
+      <figcaption><b>그림 21-8.</b> V=1에서 일어난 동기 예외의 처리 위치. 인터럽트는 같은 구조를 <code>mideleg</code>·<code>hideleg</code>로 판단한다. VS 수준 인터럽트(2·6·10)는 H 확장이 있으면 <code>mideleg</code>의 해당 비트가 읽기 전용 1이라 언제나 M을 건너뛴다.</figcaption>
+    </figure>
+
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>받는 모드</th><th>V 변화</th><th>하드웨어가 기록하는 것</th></tr></thead>
+      <tbody>
+        <tr><td><b>M</b></td><td>V ← 0</td><td><code>mepc</code>, <code>mcause</code>, <code>mtval</code>, <code>mtval2</code>, <code>mtinst</code>, <code>mstatus</code>의 MPV(RV64 비트 39)·MPP·GVA(비트 38)·MPIE·MIE. RV32는 MPV·GVA가 <code>mstatush</code> 비트 7·6.</td></tr>
+        <tr><td><b>HS</b></td><td>V ← 0</td><td><code>sepc</code>, <code>scause</code>, <code>stval</code>, <code>htval</code>, <code>htinst</code>, <code>hstatus</code>의 SPV·SPVP(V=1에서 왔을 때만)·GVA, <code>sstatus</code>의 SPP·SPIE·SIE</td></tr>
+        <tr><td><b>VS</b></td><td>V는 1 유지</td><td><code>vsepc</code>, <code>vscause</code>, <code>vstval</code>, <code>vsstatus</code>의 SPP·SPIE·SIE. <code>hstatus</code>와 HS의 <code>sstatus</code>는 그대로</td></tr>
+      </tbody>
+    </table></div>
+    <p>게스트 페이지 폴트가 HS로 오면 <code>stval</code>에는 평소처럼 <b>게스트 가상 주소</b>가, <code>htval</code>에는 실패한 <b>게스트 물리 주소를 오른쪽으로 2비트 민 값</b>(또는 0)이 들어간다. 2비트를 미는 이유는 RV32에서도 34비트 GPA를 담기 위해서이고, PMP 주소 레지스터와 PTE가 물리 주소를 담는 방식과 같다. 폴트가 VS 페이지 테이블을 읽다가 났다면 <code>htval</code>은 그 PTE의 GPA이고, <code>htinst</code>에는 특별한 의사 명령 값 <code>0x00003000</code>(RV64, VS-stage 변환용 64비트 읽기)이나 <code>0x00003020</code>(A/D 갱신용 쓰기)이 들어가 이 상황을 알려 준다. RV32 게스트라면 <code>0x00002000</code>·<code>0x00002020</code>이다.</p>
+
+    <div class="sim" id="trap-routing-sim">
+      <div class="sim-head"><span class="sim-tag">SIMULATOR</span><h3>트랩 경로 시뮬레이터</h3></div>
+      <div class="sim-pad">
+        <div class="scroll-x"><svg viewBox="0 0 860 300" id="trap-routing-svg" role="img" aria-label="트랩이 어느 모드로 가는지 보여 주는 그림" style="min-width:600px; display:block; width:100%; height:auto">
+          <defs>
+            <marker id="trap-route-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent-2)"/></marker>
+          </defs>
+          <rect id="trap-lane-M" x="10" y="12" width="840" height="62" rx="10" class="trap-lane"/>
+          <rect id="trap-lane-HS" x="10" y="84" width="840" height="62" rx="10" class="trap-lane"/>
+          <rect id="trap-lane-VS" x="10" y="156" width="840" height="62" rx="10" class="trap-lane is-virtual"/>
+          <rect id="trap-lane-VU" x="10" y="228" width="840" height="62" rx="10" class="trap-lane is-virtual"/>
+          <text x="26" y="40" class="t t-bold">M 모드</text><text x="26" y="60" class="t-faint">펌웨어 · V = 0</text>
+          <text x="26" y="112" class="t t-bold">HS 모드</text><text x="26" y="132" class="t-faint">하이퍼바이저 · V = 0</text>
+          <text x="26" y="184" class="t t-bold">VS 모드</text><text x="26" y="204" class="t-faint">게스트 커널 · V = 1</text>
+          <text x="26" y="256" class="t t-bold">VU 모드</text><text x="26" y="276" class="t-faint">게스트 앱 · V = 1</text>
+          <path id="trap-route-path" d="M300 187 C 450 187, 450 115, 600 115" class="s-gold s-dashed" marker-end="url(#trap-route-arrow)"/>
+          <circle id="trap-origin-marker" cx="300" cy="187" r="9" class="f-accent"/>
+          <text id="trap-origin-label" x="300" y="170" text-anchor="middle" class="t-dim">출발</text>
+          <circle id="trap-route-dot" cx="300" cy="187" r="7" fill="var(--accent-2)"/>
+          <text id="trap-handler-label" x="616" y="120" class="t-gold">scause</text>
+        </svg></div>
+      </div>
+      <div class="step-description" id="trap-description">사건을 고르고 <b>트랩 발생</b>을 눌러 보자.</div>
+      <div class="sim-controls trap-controls">
+        <label class="control"><span>사건</span>
+          <select id="trap-event-select">
+            <option value="ecall-from-virtual-user">VU에서 ecall (게스트 앱의 시스템 호출)</option>
+            <option value="ecall-from-virtual-supervisor">VS에서 ecall (게스트 커널의 SBI 호출)</option>
+            <option value="page-fault">VU에서 load page fault (VS-stage 매핑 없음)</option>
+            <option value="guest-page-fault" selected>VS에서 load guest-page fault (G-stage 매핑 없음)</option>
+            <option value="virtual-instruction">VS에서 csrr a0, hgatp (가상 명령)</option>
+            <option value="illegal-instruction">VU에서 불법 명령</option>
+            <option value="guest-timer">게스트 타이머 인터럽트 (VSTI)</option>
+          </select>
+        </label>
+        <div class="control"><span>위임 설정</span>
+          <div class="delegation-boxes">
+            <label class="checkbox"><input type="checkbox" id="trap-first-checkbox"> <span id="trap-first-label">medeleg[21]</span></label>
+            <label class="checkbox"><input type="checkbox" id="trap-second-checkbox"> <span id="trap-second-label">hedeleg[21]</span></label>
+            <span class="read-only-note" id="trap-read-only-note"></span>
+          </div>
+        </div>
+        <div class="control"><span>실행</span><div class="button-row"><button class="button primary" id="trap-fire-button">트랩 발생</button><button class="button" id="trap-default-button">흔한 위임값으로</button></div></div>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">처리하는 모드</span><span class="value" id="trap-readout-handler">—</span></div>
+        <div class="stat"><span class="key">트랩 뒤 V</span><span class="value" id="trap-readout-virtualization">—</span></div>
+        <div class="stat"><span class="key">원인 레지스터</span><span class="value" id="trap-readout-cause">—</span></div>
+      </div>
+      <div class="sim-note">“흔한 위임값”은 펌웨어가 게스트 관련 예외(10·20·21·22·23)를 HS로 넘기고, 하이퍼바이저가 게스트 앱의 시스템 호출과 페이지 폴트(8·12·13·15)를 게스트에게 넘기는 설정이다. 게스트 페이지 폴트에서 <code>hedeleg</code>를 켜려 해 보자. 왜 막혀 있을까? 타이머 인터럽트에서 <code>hideleg[6]</code>을 켜고 끄며 원인 코드가 6에서 5로 바뀌는 것도 확인하자.</div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="instructions">
+    <h2>하이퍼바이저 명령과 월드 스위치</h2>
+    <h3>HLV · HLVX · HSV: 게스트의 눈으로 메모리 읽기</h3>
+    <p>하이퍼바이저는 종종 게스트의 가상 주소로 메모리를 읽어야 한다. 게스트가 SBI 호출로 넘긴 버퍼 주소를 따라가거나, MMIO 폴트를 일으킨 게스트 명령어를 가져와 해독할 때다. 소프트웨어로 두 단계 페이지 테이블을 걸어가는 대신 <span class="term">가상 머신 로드·스토어</span><span class="english">(virtual-machine load/store)</span> 명령을 쓴다. 이 명령들은 V=0인 HS(또는 M, HU=1이면 U)에서 실행되지만, 메모리 접근만은 <b>V=1이고 권한이 hstatus.SPVP인 것처럼</b> 2단계 변환을 거친다.</p>
+    <div class="table-wrap"><table class="instruction-table compact">
+      <thead><tr><th>명령</th><th>인코딩 (funct7 · rs2 · funct3=100 · opcode=1110011)</th><th>설명</th></tr></thead>
+      <tbody>
+        <tr><td>HLV.B / HLV.BU</td><td><code>0110000</code> · <code>00000</code> / <code>00001</code></td><td>게스트 주소에서 바이트 읽기 (부호 / 0 확장)</td></tr>
+        <tr><td>HLV.H / HLV.HU</td><td><code>0110010</code> · <code>00000</code> / <code>00001</code></td><td>하프워드 읽기</td></tr>
+        <tr><td>HLVX.HU</td><td><code>0110010</code> · <code>00011</code></td><td>읽기 권한 대신 <b>실행 권한</b>으로 검사하는 하프워드 읽기</td></tr>
+        <tr><td>HLV.W / HLV.WU</td><td><code>0110100</code> · <code>00000</code> / <code>00001</code></td><td>워드 읽기 (HLV.WU는 RV64 전용)</td></tr>
+        <tr><td>HLVX.WU</td><td><code>0110100</code> · <code>00011</code></td><td>실행 권한으로 검사하는 워드 읽기 (RV32에서도 유효)</td></tr>
+        <tr><td>HLV.D</td><td><code>0110110</code> · <code>00000</code></td><td>더블워드 읽기 (RV64 전용)</td></tr>
+        <tr><td>HSV.B/H/W/D</td><td><code>0110001</code>/<code>0110011</code>/<code>0110101</code>/<code>0110111</code> · rs2</td><td>게스트 주소에 쓰기 (rd 자리는 0, HSV.D는 RV64 전용)</td></tr>
+      </tbody>
+    </table></div>
+    <p>HLVX는 게스트의 명령어를 가져오는 일을 흉내 내려고 만들었다. 실행만 되고 읽기는 안 되는 페이지에서도 명령어를 읽을 수 있어야 하기 때문이다. 그래도 예외는 명령 인출 예외가 아니라 일반 로드 예외로 보고된다. V=1에서 이 명령들을 실행하면 가상 명령 예외, HU=0인 U 모드에서 실행하면 불법 명령 예외다.</p>
+
+    <h3>HFENCE.VVMA와 HFENCE.GVMA</h3>
+    <div class="table-wrap"><table class="instruction-table compact">
+      <thead><tr><th>명령</th><th>인코딩</th><th>무엇을 비우나</th></tr></thead>
+      <tbody>
+        <tr><td>HFENCE.VVMA rs1, rs2</td><td><code>0010001 rs2 rs1 000 00000 1110011</code></td><td>지금 <code>hgatp.VMID</code> 가상 머신의 <b>VS-stage</b> 변환. rs1 = 게스트 가상 주소, rs2 = 게스트 ASID. “잠깐 VS 모드에 들어가 SFENCE.VMA를 한 것”과 같다.</td></tr>
+        <tr><td>HFENCE.GVMA rs1, rs2</td><td><code>0110001 rs2 rs1 000 00000 1110011</code></td><td><b>G-stage</b> 변환. rs1 = 게스트 물리 주소 ≫ 2, rs2 = VMID. HS에서는 <code>mstatus.TVM=0</code>일 때만 실행된다.</td></tr>
+      </tbody>
+    </table></div>
+    <p>V=1에서 <code>sfence.vma</code>를 실행하면 그 인자는 게스트 가상 주소와 게스트 ASID로 해석되고, 현재 VMID의 VS-stage 변환에만 적용된다. 게스트 커널은 평소대로 <code>sfence.vma</code>를 쓰면 되고, G-stage는 건드릴 수 없다. G-stage 테이블을 고친 하이퍼바이저는 <code>hfence.gvma</code>로 정리해야 한다.</p>
+
+    <h3>월드 스위치</h3>
+    <p>하이퍼바이저가 게스트 A를 멈추고 게스트 B를 돌리는 일을 <span class="term">월드 스위치</span><span class="english">(world switch)</span>라 한다. VS CSR 덕분에 저장할 것이 분명하다. 게스트의 정수 레지스터와 함께 vs* CSR을 메모리에 저장하고 B의 값을 넣으면 된다. 주의할 점은 <code>vsatp</code>와 <code>hgatp</code>를 한꺼번에 바꿀 방법이 없다는 것이다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 330" role="img" aria-label="게스트 A에서 게스트 B로 넘어가는 월드 스위치 단계">
+        <defs>
+          <path id="world-switch-path" d="M145 120 L93 206 L763 206 L715 120"/>
+        </defs>
+        <rect x="20" y="20" width="250" height="100" rx="12" class="f-violet-soft"/>
+        <text x="145" y="46" text-anchor="middle" class="t t-bold">게스트 A (V = 1)</text>
+        <text x="145" y="72" text-anchor="middle" class="t-mono" style="font-size:12px">vsatp · vsepc · vsstatus …</text>
+        <text x="145" y="96" text-anchor="middle" class="t-mono" style="font-size:12px">hgatp.VMID = 1</text>
+        <rect x="590" y="20" width="250" height="100" rx="12" class="f-teal-soft"/>
+        <text x="715" y="46" text-anchor="middle" class="t t-bold">게스트 B (V = 1)</text>
+        <text x="715" y="72" text-anchor="middle" class="t-mono" style="font-size:12px">vsatp · vsepc · vsstatus …</text>
+        <text x="715" y="96" text-anchor="middle" class="t-mono" style="font-size:12px">hgatp.VMID = 2</text>
+        <text x="430" y="62" text-anchor="middle" class="t-dim">타이머 인터럽트 등으로</text>
+        <text x="430" y="82" text-anchor="middle" class="t-dim">A의 시간 조각이 끝났다</text>
+        <rect x="20" y="180" width="820" height="134" rx="12" class="f-gold-soft"/>
+        <use href="#world-switch-path" class="s-gold flow-dash"/>
+        <text x="110" y="160" text-anchor="end" class="t-bad" style="font-size:13px">트랩</text>
+        <text x="748" y="160" class="t-ok" style="font-size:13px">sret</text>
+        <g>
+          <rect x="30" y="216" width="126" height="58" rx="9" class="f-elev"/><rect x="30" y="216" width="126" height="58" rx="9" class="world-switch-glow" style="animation-delay:-5.66s"/>
+          <text x="93" y="240" text-anchor="middle" class="t t-bold" style="font-size:13px">① 트랩 진입</text><text x="93" y="261" text-anchor="middle" class="t-faint">V ← 0, SPV ← 1</text>
+          <rect x="164" y="216" width="126" height="58" rx="9" class="f-elev"/><rect x="164" y="216" width="126" height="58" rx="9" class="world-switch-glow" style="animation-delay:-4.73s"/>
+          <text x="227" y="240" text-anchor="middle" class="t t-bold" style="font-size:13px">② A 저장</text><text x="227" y="261" text-anchor="middle" class="t-faint">vs* CSR → 메모리</text>
+          <rect x="298" y="216" width="126" height="58" rx="9" class="f-elev"/><rect x="298" y="216" width="126" height="58" rx="9" class="world-switch-glow" style="animation-delay:-3.81s"/>
+          <text x="361" y="240" text-anchor="middle" class="t t-bold" style="font-size:13px">③ vsatp ← 0</text><text x="361" y="261" text-anchor="middle" class="t-faint">VS 변환 끄기</text>
+          <rect x="432" y="216" width="126" height="58" rx="9" class="f-elev"/><rect x="432" y="216" width="126" height="58" rx="9" class="world-switch-glow" style="animation-delay:-2.88s"/>
+          <text x="495" y="240" text-anchor="middle" class="t t-bold" style="font-size:13px">④ hgatp ← B</text><text x="495" y="261" text-anchor="middle" class="t-faint">B의 VMID · 루트</text>
+          <rect x="566" y="216" width="126" height="58" rx="9" class="f-elev"/><rect x="566" y="216" width="126" height="58" rx="9" class="world-switch-glow" style="animation-delay:-1.96s"/>
+          <text x="629" y="240" text-anchor="middle" class="t t-bold" style="font-size:13px">⑤ B 복원</text><text x="629" y="261" text-anchor="middle" class="t-faint">vs* CSR, 끝으로 vsatp</text>
+          <rect x="700" y="216" width="126" height="58" rx="9" class="f-elev"/><rect x="700" y="216" width="126" height="58" rx="9" class="world-switch-glow" style="animation-delay:-1.03s"/>
+          <text x="763" y="240" text-anchor="middle" class="t t-bold" style="font-size:13px">⑥ sret</text><text x="763" y="261" text-anchor="middle" class="t-faint">V ← SPV = 1</text>
+        </g>
+        <text x="36" y="302" class="t-gold" style="font-size:13px">HS 모드 · 하이퍼바이저의 월드 스위치 (V = 0)</text>
+        <circle r="7" fill="var(--accent-2)"><animateMotion dur="6s" begin="-6s" repeatCount="indefinite" calcMode="linear"><mpath href="#world-switch-path"/></animateMotion></circle>
+      </svg></div>
+      <figcaption><b>그림 21-9.</b> 월드 스위치. 금색 점이 지나가는 단계가 차례로 밝아진다. 단계 ③–⑤의 순서(<code>vsatp</code>를 0으로 → <code>hgatp</code> 교체 → 새 <code>vsatp</code>)는 규격이 직접 권하는 순서다. 그래야 추측 실행이 A의 VS 변환을 B의 VMID로 TLB에 넣는 일이 없다.</figcaption>
+    </figure>
+
+    <div class="codebox" data-title="world_switch.S — 게스트 A → 게스트 B (HS 모드, V=0, 요점만)"><span class="comment"># ② A의 VS CSR 저장 (vsstatus, vsie, vstvec, vsscratch, vsepc, vscause, vstval, vsip, vsatp …)</span>
+<span class="keyword">csrr</span>  <span class="register">t0</span>, vsepc
+<span class="keyword">sd</span>    <span class="register">t0</span>, VCPU_VSEPC(<span class="register">s0</span>)          <span class="comment"># s0 = 게스트 A의 vCPU 구조체</span>
+<span class="comment"># ③ VS-stage를 먼저 끈다</span>
+<span class="keyword">csrw</span>  vsatp, <span class="register">zero</span>
+<span class="comment"># ④ G-stage와 VMID를 B의 것으로</span>
+<span class="keyword">ld</span>    <span class="register">t1</span>, VCPU_HGATP(<span class="register">s1</span>)          <span class="comment"># s1 = 게스트 B의 vCPU 구조체</span>
+<span class="keyword">csrw</span>  hgatp, <span class="register">t1</span>
+<span class="comment"># ⑤ B의 VS CSR 복원, vsatp는 맨 마지막에</span>
+<span class="keyword">ld</span>    <span class="register">t2</span>, VCPU_VSATP(<span class="register">s1</span>)
+<span class="keyword">csrw</span>  vsatp, <span class="register">t2</span>
+<span class="keyword">ld</span>    <span class="register">t3</span>, VCPU_PC(<span class="register">s1</span>)
+<span class="keyword">csrw</span>  sepc, <span class="register">t3</span>                    <span class="comment"># B가 멈췄던 pc</span>
+<span class="comment"># ⑥ hstatus.SPV(비트 7)=1, sstatus.SPP(비트 8)=1 → sret이 VS 모드로 돌아간다</span>
+<span class="keyword">li</span>    <span class="register">t0</span>, <span class="number">0x80</span>
+<span class="keyword">csrs</span>  hstatus, <span class="register">t0</span>
+<span class="keyword">li</span>    <span class="register">t0</span>, <span class="number">0x100</span>
+<span class="keyword">csrs</span>  sstatus, <span class="register">t0</span>
+<span class="keyword">sret</span>                               <span class="comment"># V ← 1, 게스트 B 재개</span></div>
+    <div class="callout spec"><strong>규격 원문에서</strong>
+      <blockquote>“No mechanism is provided to atomically change vsatp and hgatp together. Hence, to prevent speculative execution causing one guest’s VS-stage translations to be cached under another guest’s VMID, world-switch code should zero vsatp, then swap hgatp, then finally write the new vsatp value.”</blockquote>
+      <p><a href="https://docs.riscv.org/reference/isa/v20260120/priv/hypervisor.html" target="_blank" rel="noopener">Volume II, “H” Extension — Memory-Management Fences</a></p></div>
+    <p>시간도 가상화해야 한다. 게스트가 <code>time</code>을 읽으면 하드웨어가 <code>htimedelta</code>를 더한 값을 돌려준다. 게스트를 다른 하트로 옮기거나 잠시 멈췄다 다시 돌릴 때 게스트가 보는 시간이 매끄럽게 이어지게 하려는 것이다. Sstc가 있으면 게스트 커널은 <code>stimecmp</code>(실제로는 <code>vstimecmp</code>)에 직접 써서 타이머를 맞출 수 있고, 비교 기준은 <code>time + htimedelta</code>다.</p>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="interrupts">
+    <h2>게스트에게 인터럽트 전달하기</h2>
+    <p>게스트 커널이 보는 인터럽트는 S 수준 인터럽트(소프트웨어 1, 타이머 5, 외부 9)다. 하지만 하드웨어에서 이들은 <b>VS 수준 인터럽트</b>(2, 6, 10)로 존재한다. <code>hideleg</code>의 비트 2·6·10을 켜 두면, VS 수준 인터럽트가 게스트에게 위임되면서 자동으로 S 수준 번호로 번역된다. 게스트의 <code>vscause</code>에는 9·5·1이 기록된다. 수정하지 않은 커널이 자기 인터럽트를 그대로 알아보게 하려는 장치다.</p>
+    <p>VS 수준 인터럽트가 걸리는 길은 세 가지다.</p>
+    <ul>
+      <li><b>소프트웨어 주입</b>: 하이퍼바이저가 <code>hvip</code>의 VSEIP(10)·VSTIP(6)·VSSIP(2)를 쓴다. 에뮬레이션한 장치의 인터럽트를 게스트에 넣을 때 쓴다.</li>
+      <li><b>게스트 타이머</b>: Sstc의 <code>vstimecmp</code>가 만료되면 <code>hip.VSTIP</code>가 켜진다.</li>
+      <li><b>게스트 외부 인터럽트</b>: 장치를 게스트에 직접 붙여 준(pass-through) 경우, 인터럽트 컨트롤러가 가상 하트 몫의 인터럽트를 따로 모아 <code>hgeip</code>의 비트로 알린다. <code>hstatus.VGEIN</code>이 고른 비트가 곧 게스트의 외부 인터럽트(VSEIP)가 된다.</li>
+    </ul>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 330" role="img" aria-label="IMSIC 게스트 인터럽트 파일에서 게스트 커널까지 인터럽트가 전달되는 경로">
+        <defs>
+          <marker id="interrupt-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker>
+          <marker id="interrupt-arrow-gold" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent-2)"/></marker>
+          <path id="interrupt-msi-path" d="M220 39 H252 V247 H210"/>
+        </defs>
+        <rect x="20" y="16" width="200" height="46" rx="10" class="f-elev"/>
+        <text x="120" y="44" text-anchor="middle" class="t t-bold">패스스루 장치</text>
+        <rect x="20" y="90" width="200" height="226" rx="12" class="f-surface"/>
+        <text x="120" y="112" text-anchor="middle" class="t t-bold">IMSIC (하트 0)</text>
+        <rect x="36" y="124" width="168" height="30" rx="7" class="f-elev"/><text x="120" y="144" text-anchor="middle" class="t-dim">M 수준 파일</text>
+        <rect x="36" y="160" width="168" height="30" rx="7" class="f-elev"/><text x="120" y="180" text-anchor="middle" class="t-dim">S 수준 파일</text>
+        <rect x="36" y="196" width="168" height="30" rx="7" class="f-elev"/><text x="120" y="216" text-anchor="middle" class="t-dim">게스트 파일 1</text>
+        <rect x="36" y="232" width="168" height="30" rx="7" class="f-gold-soft blink-highlight"/><text x="120" y="252" text-anchor="middle" class="t t-bold" style="font-size:13px">게스트 파일 2</text>
+        <rect x="36" y="268" width="168" height="30" rx="7" class="f-elev"/><text x="120" y="288" text-anchor="middle" class="t-dim">게스트 파일 3</text>
+        <use href="#interrupt-msi-path" class="s-gold flow-dash" marker-end="url(#interrupt-arrow-gold)"/>
+        <circle r="6" fill="var(--accent-2)"><animateMotion dur="2.4s" begin="-0.5s" repeatCount="indefinite"><mpath href="#interrupt-msi-path"/></animateMotion></circle>
+        <text x="262" y="132" class="t-gold" style="font-size:13px">MSI 쓰기</text>
+
+        <rect x="330" y="96" width="200" height="72" rx="10" class="f-elev"/>
+        <text x="430" y="118" text-anchor="middle" class="t-mono t-bold">hgeip</text>
+        <rect x="358" y="132" width="40" height="24" rx="5" class="f-surface"/><text x="378" y="149" text-anchor="middle" class="t-mono">3</text>
+        <rect x="410" y="132" width="40" height="24" rx="5" class="f-gold-soft"/><text x="430" y="149" text-anchor="middle" class="t-mono">2</text>
+        <rect x="462" y="132" width="40" height="24" rx="5" class="f-surface"/><text x="482" y="149" text-anchor="middle" class="t-mono">1</text>
+        <path d="M206 262 C 300 262 300 172 404 158" class="s-accent" marker-end="url(#interrupt-arrow)"/>
+        <rect x="350" y="196" width="160" height="40" rx="9" class="f-teal-soft"/>
+        <text x="430" y="221" text-anchor="middle" class="t-mono" style="font-size:12px">hstatus.VGEIN = 2</text>
+        <path d="M430 168 V192" class="s-accent flow-dash" marker-end="url(#interrupt-arrow)"/>
+        <rect x="330" y="262" width="200" height="52" rx="10" class="f-elev"/>
+        <text x="430" y="284" text-anchor="middle" class="t-mono">hvip.VSEIP</text>
+        <text x="430" y="303" text-anchor="middle" class="t-faint">하이퍼바이저가 직접 주입</text>
+        <circle cx="592" cy="242" r="20" class="f-accent-soft"/>
+        <text x="592" y="247" text-anchor="middle" class="t-accent" style="font-size:12px">OR</text>
+        <path d="M512 216 L572 234" class="s-accent flow-dash" marker-end="url(#interrupt-arrow)"/>
+        <path d="M532 287 L574 254" class="s-accent" marker-end="url(#interrupt-arrow)"/>
+        <rect x="640" y="206" width="200" height="52" rx="10" class="f-elev"/>
+        <text x="740" y="228" text-anchor="middle" class="t-mono">hip.VSEIP</text>
+        <text x="740" y="247" text-anchor="middle" class="t-faint">VS 외부 인터럽트 대기</text>
+        <path d="M612 238 L636 234" class="s-accent flow-dash" marker-end="url(#interrupt-arrow)"/>
+        <rect x="640" y="114" width="200" height="52" rx="10" class="f-violet-soft"/>
+        <text x="740" y="136" text-anchor="middle" class="t-mono">hideleg[10] = 1</text>
+        <text x="740" y="155" text-anchor="middle" class="t-faint">게스트에게 넘김</text>
+        <path d="M740 204 V170" class="s-accent flow-dash" marker-end="url(#interrupt-arrow)"/>
+        <rect x="640" y="16" width="200" height="62" rx="10" class="f-violet-soft"/>
+        <text x="740" y="40" text-anchor="middle" class="t t-bold">게스트 커널 (VS)</text>
+        <text x="740" y="62" text-anchor="middle" class="t-mono" style="font-size:12px">vscause = 인터럽트 9</text>
+        <path d="M740 112 V82" class="s-accent flow-dash" marker-end="url(#interrupt-arrow)"/>
+        <text x="430" y="40" text-anchor="middle" class="t-dim">하이퍼바이저를 거치지 않는 길</text>
+        <text x="430" y="62" text-anchor="middle" class="t-faint">hgeie는 HS에 알리는 SGEI만 거른다</text>
+      </svg></div>
+      <figcaption><b>그림 21-10.</b> 게스트 외부 인터럽트의 길. 장치가 MSI로 IMSIC의 <b>게스트 인터럽트 파일 2</b>에 쓰면 <code>hgeip</code> 비트 2가 켜지고, <code>hstatus.VGEIN=2</code>이므로 그대로 <code>hip.VSEIP</code>가 된다. <code>hideleg[10]=1</code>이면 게스트 커널은 하이퍼바이저의 개입 없이 외부 인터럽트(코드 9)를 받는다.</figcaption>
+    </figure>
+    <p>AIA 규격(<a href="platform.html">22장</a>)의 IMSIC는 H 확장을 가진 하트에 대해 <b>게스트 인터럽트 파일</b>을 둘 수 있고, 그 개수는 정확히 GEILEN개다. 게스트 커널이 <code>vsiselect</code>·<code>vsireg</code>로 접근하는 인터럽트 파일은 <code>hstatus.VGEIN</code>이 고른 게스트 파일이다. 그래서 게스트는 자기 인터럽트 파일을 진짜 S 수준 파일처럼 다루고, 장치는 MSI를 그 파일에 바로 쓴다. 하이퍼바이저는 가상 하트를 다른 물리 하트로 옮길 때만 VGEIN과 IOMMU의 MSI 변환을 고치면 된다. GEILEN은 구현마다 다르며 RV64에서 최대 63, RV32에서 최대 31이다. 그보다 많은 가상 하트는 <code>hvip</code>로 흉내 내면 된다.</p>
+    <div class="callout tip"><strong>인터럽트 우선순위</strong><p>HS로 향하는 여러 인터럽트가 동시에 걸리면 SEI, SSI, STI, SGEI, VSEI, VSSI, VSTI, LCOFI 순으로 처리한다. VS 수준 인터럽트는 V=0(HS 실행 중)일 때도 <code>hip</code>에 대기 상태로 남아 있다가, 위임되어 있으면 게스트로 돌아간 뒤에 게스트에게 전달된다.</p></div>
+  </section>
+
+  <section class="keypoints" id="summary">
+    <h2>핵심 정리</h2>
+    <ol>
+      <li>H 확장 v1.0은 가상화 모드 비트 <b>V</b>를 더해 M·HS·U(V=0)와 VS·VU(V=1)의 다섯 모드를 만든다. 일반 S 모드 OS는 고치지 않고 HS에서도, VS 게스트로도 돈다.</li>
+      <li>V=1이면 S CSR 접근이 <b>VS CSR</b>(<code>0x2xx</code>)로 바꿔치기된다. 하이퍼바이저 CSR(<code>0x6xx</code>)과 VS CSR을 이름 그대로 쓰려 하면 <b>가상 명령 예외(22)</b>가 난다.</li>
+      <li>메모리는 <b>VS-stage(vsatp)</b>와 <b>G-stage(hgatp)</b> 두 번 변환된다. Sv39x4·Sv48x4·Sv57x4는 주소를 2비트 넓히고 루트 테이블만 16 KiB로 키운다. G-stage 접근은 U 모드 접근으로 검사한다.</li>
+      <li>TLB가 모두 빗나가면 페이지 테이블 읽기는 <b>n·m + n + m = (n+1)(m+1) − 1</b>번이다. Sv39/Sv39x4는 15번, Sv48/Sv48x4는 24번. TLB와 VMID가 이 비용을 숨긴다.</li>
+      <li>게스트 페이지 폴트(20·21·23)와 가상 명령 예외(22), VS ecall(10)은 VS로 위임할 수 없다. 트랩은 <code>medeleg</code> → <code>hedeleg</code> 순으로 M → HS → VS로 내려간다. <code>htval</code>은 GPA ≫ 2를 담는다.</li>
+      <li>HLV·HLVX·HSV는 하이퍼바이저가 게스트 주소로 메모리에 접근하게 하고, HFENCE.VVMA·HFENCE.GVMA는 각 단계의 변환 캐시를 정리한다. 월드 스위치는 vsatp=0 → hgatp → vsatp 순서로 한다.</li>
+      <li>VS 수준 인터럽트(2·6·10)는 위임되면 S 수준 번호(1·5·9)로 번역된다. <code>hvip</code> 주입, <code>vstimecmp</code>, IMSIC 게스트 인터럽트 파일 + <code>VGEIN</code>이 게스트에 인터럽트를 전한다.</li>
+    </ol>
+  </section>
+
+  <section id="quiz">
+    <h2>확인 퀴즈</h2>
+    <div class="quiz">
+      <div class="quiz-question"><p>V=1인 게스트 커널이 <code>csrr a0, sepc</code>를 실행하면 무엇을 읽는가?</p><div class="options">
+        <button class="option">HS 모드의 <code>sepc</code></button>
+        <button class="option" data-correct><code>vsepc</code></button>
+        <button class="option"><code>mepc</code></button>
+        <button class="option">가상 명령 예외가 난다</button>
+      </div><div class="quiz-explanation">V=1이면 S CSR 주소에 대한 접근이 짝이 되는 VS CSR로 바뀐다. 가상 명령 예외는 <code>vsepc</code>를 자기 주소(<code>0x241</code>)로 직접 읽으려 할 때 난다.</div></div>
+      <div class="quiz-question"><p>게스트 커널이 읽은 주소의 GPA가 G-stage에 매핑되어 있지 않을 때 나는 예외와 코드는?</p><div class="options">
+        <button class="option">Load page fault, 13</button>
+        <button class="option" data-correct>Load guest-page fault, 21</button>
+        <button class="option">Virtual instruction, 22</button>
+        <button class="option">Load access fault, 5</button>
+      </div><div class="quiz-explanation">G-stage의 실패는 게스트 페이지 폴트다. 명령 인출 20, 읽기 21, 쓰기·AMO 23이다. VS-stage의 실패라면 보통의 페이지 폴트(13)가 난다.</div></div>
+      <div class="quiz-question"><p>Sv39 게스트가 Sv39x4 G-stage 위에서 돌 때, TLB가 모두 빗나가면 데이터 접근 전에 페이지 테이블을 최대 몇 번 읽는가?</p><div class="options">
+        <button class="option">6번</button>
+        <button class="option">9번</button>
+        <button class="option" data-correct>15번</button>
+        <button class="option">16번</button>
+      </div><div class="quiz-explanation">게스트 단계마다 G-stage 3번 + PTE 1번 = 4번, 세 단계면 12번. 마지막 GPA 변환에 3번을 더해 15번이다. 데이터 접근까지 세면 16번의 메모리 접근이 된다.</div></div>
+      <div class="quiz-question"><p>Sv39x4의 G-stage 루트 페이지 테이블이 16 KiB인 이유는?</p><div class="options">
+        <button class="option">PTE가 32바이트로 커지기 때문에</button>
+        <button class="option" data-correct>게스트 물리 주소가 2비트 넓어져 VPN[2]가 11비트가 되기 때문에</button>
+        <button class="option">VMID를 루트 테이블에 저장하기 때문에</button>
+        <button class="option">게스트 페이지가 16 KiB이기 때문에</button>
+      </div><div class="quiz-explanation">41비트 GPA의 VPN[2]는 11비트라 2048개 PTE × 8바이트 = 16 KiB가 된다. 루트 테이블만 커지고 나머지 단계와 PTE 형식은 Sv39와 같다.</div></div>
+      <div class="quiz-question"><p>게스트 커널의 <code>ecall</code>(VS 모드, 코드 10)을 <code>hedeleg</code>로 게스트 자신에게 위임할 수 있는가?</p><div class="options">
+        <button class="option">있다. hedeleg[10]을 켜면 된다</button>
+        <button class="option" data-correct>없다. hedeleg[10]은 읽기 전용 0이라 HS(또는 M)가 처리한다</button>
+        <button class="option">없다. VS 모드에서는 ecall을 실행할 수 없다</button>
+        <button class="option">있다. 단, mideleg[10]도 켜야 한다</button>
+      </div><div class="quiz-explanation">게스트 커널의 ecall은 보통 SBI 호출이고, 규격은 HS 하이퍼바이저가 게스트를 위해 SBI를 구현하리라 기대한다. 그래서 VS로 위임할 수 없다.</div></div>
+      <div class="quiz-question"><p><code>hideleg[6]=1</code>일 때 VS 타이머 인터럽트를 받은 게스트의 <code>vscause</code>에 기록되는 인터럽트 코드는?</p><div class="options">
+        <button class="option">6</button>
+        <button class="option" data-correct>5</button>
+        <button class="option">7</button>
+        <button class="option">12</button>
+      </div><div class="quiz-explanation">VS 수준 인터럽트는 위임될 때 S 수준 번호로 번역된다. 10→9, 6→5, 2→1. 게스트 커널은 평소의 S 타이머 인터럽트(5)로 알아본다.</div></div>
+      <div class="quiz-question"><p>월드 스위치에서 규격이 권하는 CSR 쓰기 순서는?</p><div class="options">
+        <button class="option">새 vsatp → 새 hgatp</button>
+        <button class="option">새 hgatp → 새 vsatp → HFENCE.GVMA</button>
+        <button class="option" data-correct>vsatp ← 0 → 새 hgatp → 새 vsatp</button>
+        <button class="option">vsatp와 hgatp를 한 명령으로 동시에</button>
+      </div><div class="quiz-explanation">두 CSR을 원자적으로 바꿀 방법이 없으므로, VS-stage를 먼저 꺼서 추측 실행이 한 게스트의 VS 변환을 다른 게스트의 VMID로 캐시하지 못하게 한다.</div></div>
+      <div class="quiz-question"><p>HLVX.WU가 일반 HLV.WU와 다른 점은?</p><div class="options">
+        <button class="option">쓰기 명령이다</button>
+        <button class="option">1단계 변환만 거친다</button>
+        <button class="option" data-correct>읽기 권한 대신 실행 권한을 검사한다</button>
+        <button class="option">M 모드에서만 실행된다</button>
+      </div><div class="quiz-explanation">HLVX는 게스트의 명령어 인출을 흉내 내려고 만들었다. 실행만 허용된 페이지에서도 명령어를 읽을 수 있지만, 예외는 일반 로드 예외로 보고된다.</div></div>
+    </div>
+  </section>
+
+  <section id="references">
+    <h2>더 읽을거리</h2>
+    <ul class="references">
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/priv/hypervisor.html" target="_blank" rel="noopener">The RISC-V Instruction Set Manual, Volume II — “H” Extension for Hypervisor Support, Version 1.0</a> (v20260120)</li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/priv/priv-csrs.html" target="_blank" rel="noopener">Volume II — Control and Status Registers (CSR 주소 목록)</a></li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/priv/priv-insns.html" target="_blank" rel="noopener">Volume II — RISC-V Privileged Instruction Set Listings</a> (HLV·HSV·HFENCE 인코딩)</li>
+      <li><a href="https://docs.riscv.org/reference/aia/v1.0/IMSIC.html" target="_blank" rel="noopener">RISC-V Advanced Interrupt Architecture v1.0 — IMSIC</a> (게스트 인터럽트 파일)</li>
+      <li>Gerald J. Popek, Robert P. Goldberg, “Formal Requirements for Virtualizable Third Generation Architectures”, <i>Communications of the ACM</i> 17(7), 1974</li>
+      <li>Ravi Bhargava, Benjamin Serebrin, Francesco Spadini, Srilatha Manne, “Accelerating Two-Dimensional Page Walks for Virtualized Systems”, ASPLOS 2008 — 중첩 페이지 워크 24회 분석</li>
+      <li>이 책의 <a href="trap.html">18장(트랩)</a>, <a href="virtual-memory.html">19장(가상 메모리)</a>, <a href="platform.html">22장(SBI·AIA)</a></li>
+    </ul>
+  </section>
+</main>
+
+<script>
+/* ---------------------------------------------------------------------------
+   CSR 바꿔치기 탐색기: V 비트와 hstatus.VTVM, henvcfg.STCE 에 따라
+   csrr 명령이 실제로 어느 CSR 에 닿는지 보여 준다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const VIRTUAL_INSTRUCTION_CODE = 22;
+  // 짝이 있는 S CSR 은 VS 사본으로 바뀐다. 짝이 없는 것(senvcfg, scounteren)은 그대로 쓰인다.
+  const SUPERVISOR_CSRS = [
+    { name: "sstatus", address: 0x100, virtualName: "vsstatus", virtualAddress: 0x200 },
+    { name: "sie", address: 0x104, virtualName: "vsie", virtualAddress: 0x204 },
+    { name: "stvec", address: 0x105, virtualName: "vstvec", virtualAddress: 0x205 },
+    { name: "scounteren", address: 0x106, virtualName: null, virtualAddress: null },
+    { name: "senvcfg", address: 0x10a, virtualName: null, virtualAddress: null },
+    { name: "sscratch", address: 0x140, virtualName: "vsscratch", virtualAddress: 0x240 },
+    { name: "sepc", address: 0x141, virtualName: "vsepc", virtualAddress: 0x241 },
+    { name: "scause", address: 0x142, virtualName: "vscause", virtualAddress: 0x242 },
+    { name: "stval", address: 0x143, virtualName: "vstval", virtualAddress: 0x243 },
+    { name: "sip", address: 0x144, virtualName: "vsip", virtualAddress: 0x244 },
+    { name: "stimecmp", address: 0x14d, virtualName: "vstimecmp", virtualAddress: 0x24d },
+    { name: "satp", address: 0x180, virtualName: "vsatp", virtualAddress: 0x280 },
+  ];
+  const HYPERVISOR_CSRS = [
+    { name: "hstatus", address: 0x600 },
+    { name: "hedeleg", address: 0x602 },
+    { name: "hideleg", address: 0x603 },
+    { name: "hvip", address: 0x645 },
+    { name: "htval", address: 0x643 },
+    { name: "hgatp", address: 0x680 },
+  ];
+  // 사용자가 고를 수 있는 이름: S CSR 전부 + 이름 그대로 접근해 보는 몇 개
+  const SELECTABLE_NAMES = SUPERVISOR_CSRS.map((csr) => csr.name).concat(["hstatus", "hgatp", "vsstatus", "vsatp"]);
+
+  const formatAddress = (address) => "0x" + address.toString(16).toUpperCase().padStart(3, "0");
+
+  function findAddressOf(name) {
+    const supervisor = SUPERVISOR_CSRS.find((csr) => csr.name === name);
+    if (supervisor) return supervisor.address;
+    const virtual = SUPERVISOR_CSRS.find((csr) => csr.virtualName === name);
+    if (virtual) return virtual.virtualAddress;
+    const hypervisor = HYPERVISOR_CSRS.find((csr) => csr.name === name);
+    return hypervisor ? hypervisor.address : null;
+  }
+
+  /** 규격의 바꿔치기 규칙을 그대로 옮긴 함수. 결과에 실제 대상 또는 예외를 담는다. */
+  function resolveCsrAccess(name, isVirtualized, isVirtualTrapVirtualMemorySet, isTimerCompareEnabled) {
+    const requestedAddress = findAddressOf(name);
+    const supervisor = SUPERVISOR_CSRS.find((csr) => csr.name === name);
+    if (!isVirtualized) {
+      return { targetName: name, targetAddress: requestedAddress, requestedAddress, isException: false,
+        explanation: "V=0인 HS 모드에서는 모든 CSR이 이름 그대로 접근된다. VS CSR도 HS 모드라면 자기 주소로 직접 읽고 쓸 수 있다. 하이퍼바이저가 월드 스위치에서 게스트 상태를 저장·복원할 때 이렇게 한다." };
+    }
+    if (supervisor) {
+      if (!supervisor.virtualName) {
+        return { targetName: name, targetAddress: requestedAddress, requestedAddress, isException: false,
+          explanation: "<code>" + name + "</code>에는 VS 사본이 없다. V=1에서도 같은 레지스터가 쓰이므로 하이퍼바이저가 게스트를 바꿀 때 직접 저장·복원해야 한다." };
+      }
+      if (name === "satp" && isVirtualTrapVirtualMemorySet) {
+        return { targetName: null, targetAddress: null, requestedAddress, isException: true,
+          explanation: "<code>hstatus.VTVM=1</code>이면 VS 모드의 <code>satp</code> 접근과 SFENCE.VMA가 <b>가상 명령 예외(22)</b>로 하이퍼바이저에 넘어간다. 섀도 페이지 테이블 같은 기법으로 게스트의 주소 공간 교체를 지켜보고 싶을 때 쓴다." };
+      }
+      if (name === "stimecmp" && !isTimerCompareEnabled) {
+        return { targetName: null, targetAddress: null, requestedAddress, isException: true,
+          explanation: "<code>henvcfg.STCE=0</code>이면 V=1에서 <code>stimecmp</code>(실제로는 vstimecmp) 접근이 <b>가상 명령 예외(22)</b>가 된다. 하이퍼바이저가 게스트 타이머를 SBI로 흉내 내겠다는 뜻이다." };
+      }
+      return { targetName: supervisor.virtualName, targetAddress: supervisor.virtualAddress, requestedAddress, isException: false,
+        explanation: "V=1이므로 주소 <code>" + formatAddress(supervisor.address) + "</code>에 대한 접근이 <b><code>" + supervisor.virtualName + "</code></b>(<code>" + formatAddress(supervisor.virtualAddress) + "</code>)로 바뀐다. HS의 <code>" + name + "</code>은 값을 지킨 채 쉬고 있다." };
+    }
+    return { targetName: null, targetAddress: null, requestedAddress, isException: true,
+      explanation: "VS 모드에서 하이퍼바이저 CSR이나 VS CSR을 <b>자기 주소로 직접</b> 건드리면 <b>가상 명령 예외(22)</b>가 난다. HS였다면 허용되는(HS-qualified) 접근이기 때문에 불법 명령 예외가 아니라 가상 명령 예외다." };
+  }
+
+  const supervisorBank = document.getElementById("csr-supervisor-bank");
+  const virtualBank = document.getElementById("csr-virtual-bank");
+  const hypervisorBank = document.getElementById("csr-hypervisor-bank");
+  const nameSegmented = document.getElementById("csr-name-segmented");
+  const vtvmCheckbox = document.getElementById("csr-vtvm-checkbox");
+  const stceCheckbox = document.getElementById("csr-stce-checkbox");
+  let selectedName = "sepc";
+  let isVirtualized = false;
+
+  nameSegmented.innerHTML = SELECTABLE_NAMES.map((name) => '<button data-value="' + name + '"' + (name === selectedName ? ' class="on"' : "") + ">" + name + "</button>").join("");
+
+  function cellHtml(name, address, classNames) {
+    return '<div class="cell ' + classNames + '" data-name="' + name + '"><div class="cell-name"><span>' + formatAddress(address) + '</span></div><div class="cell-value">' + name + "</div></div>";
+  }
+
+  function render() {
+    const result = resolveCsrAccess(selectedName, isVirtualized, vtvmCheckbox.checked, stceCheckbox.checked);
+    const classFor = (name) => {
+      const classNames = [];
+      if (name === result.targetName) classNames.push("active");
+      else if (name === selectedName) classNames.push(result.isException ? "is-exception" : "is-ignored");
+      return classNames.join(" ");
+    };
+    supervisorBank.innerHTML = SUPERVISOR_CSRS.map((csr) => cellHtml(csr.name, csr.address, classFor(csr.name))).join("");
+    virtualBank.innerHTML = SUPERVISOR_CSRS.filter((csr) => csr.virtualName).map((csr) => cellHtml(csr.virtualName, csr.virtualAddress, classFor(csr.virtualName))).join("");
+    hypervisorBank.innerHTML = HYPERVISOR_CSRS.map((csr) => cellHtml(csr.name, csr.address, classFor(csr.name))).join("");
+
+    document.getElementById("csr-instruction-text").textContent = "csrr a0, " + selectedName;
+    const targetText = document.getElementById("csr-target-text");
+    if (result.isException) {
+      targetText.textContent = "가상 명령 예외 (" + VIRTUAL_INSTRUCTION_CODE + ")";
+      targetText.classList.add("is-exception");
+    } else {
+      targetText.textContent = result.targetName + " (" + formatAddress(result.targetAddress) + ")";
+      targetText.classList.remove("is-exception");
+    }
+    document.getElementById("csr-readout-requested").textContent = formatAddress(result.requestedAddress);
+    document.getElementById("csr-readout-target").textContent = result.isException ? "—" : result.targetName;
+    document.getElementById("csr-readout-result").textContent = result.isException ? "예외 " + VIRTUAL_INSTRUCTION_CODE : "정상";
+    document.getElementById("csr-description").innerHTML = result.explanation;
+  }
+
+  const nameControl = book.segmented(nameSegmented, (value) => { selectedName = value; render(); });
+  book.segmented("csr-mode-segmented", (value) => { isVirtualized = value === "1"; render(); });
+  vtvmCheckbox.addEventListener("change", render);
+  stceCheckbox.addEventListener("change", render);
+  // 칸을 눌러도 그 CSR 을 고를 수 있게 한다 (선택 가능한 이름일 때만)
+  [supervisorBank, virtualBank, hypervisorBank].forEach((bank) => {
+    bank.addEventListener("click", (event) => {
+      const cell = event.target.closest(".cell");
+      if (cell && SELECTABLE_NAMES.includes(cell.dataset.name)) nameControl.set(cell.dataset.name);
+    });
+  });
+  render();
+})();
+
+/* ---------------------------------------------------------------------------
+   2차원 페이지 워크 계수기: 게스트 n 단계 × G-stage m 단계의 메모리 접근을
+   한 칸씩 밝히며 센다. 칸 (행, 열) — 행 = 게스트 단계(+ 마지막 데이터 행),
+   열 = G-stage 단계(+ 마지막 "게스트 PTE 읽기" 열).
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const GUEST_LEVELS_BY_MODE = { sv39: 3, sv48: 4, sv57: 5 };
+  const HOST_LEVELS_BY_MODE = { bare: 0, sv39x4: 3, sv48x4: 4, sv57x4: 5 };
+  const GUEST_MODE_NAMES = { sv39: "Sv39", sv48: "Sv48", sv57: "Sv57" };
+  const HOST_MODE_NAMES = { bare: "Bare", sv39x4: "Sv39x4", sv48x4: "Sv48x4", sv57x4: "Sv57x4" };
+  const SECONDS_PER_AUTO_STEP = 0.7;
+  const SECONDS_PER_TOKEN_MOVE = 0.32;
+  const NARROW_WIDTH = 520;
+
+  /** 접근 순서를 만든다. 데이터 접근은 마지막 한 칸이며 페이지 테이블 읽기 수에 넣지 않는다. */
+  function buildWalkSteps(guestLevels, hostLevels) {
+    const steps = [];
+    let tableReadCount = 0;
+    for (let row = 0; row <= guestLevels; row += 1) {
+      const isFinalRow = row === guestLevels;
+      const guestLevel = guestLevels - 1 - row;
+      for (let column = 0; column < hostLevels; column += 1) {
+        tableReadCount += 1;
+        steps.push({ row, column, kind: "gstage", number: tableReadCount, guestLevel, hostLevel: hostLevels - 1 - column, isFinalRow });
+      }
+      if (isFinalRow) {
+        steps.push({ row, column: hostLevels, kind: "data", number: tableReadCount, guestLevel, hostLevel: -1, isFinalRow });
+      } else {
+        tableReadCount += 1;
+        steps.push({ row, column: hostLevels, kind: "guestPte", number: tableReadCount, guestLevel, hostLevel: -1, isFinalRow });
+      }
+    }
+    return steps;
+  }
+  const totalTableReads = (guestLevels, hostLevels) => guestLevels * hostLevels + guestLevels + hostLevels;
+
+  function describeStep(step, guestLevels, hostLevels) {
+    const total = totalTableReads(guestLevels, hostLevels);
+    if (step.kind === "data") {
+      return "마침내 SPA로 <b>데이터</b>에 접근한다. 페이지 테이블을 <b>" + total + "번</b> 읽은 뒤의 한 번이다.";
+    }
+    if (step.kind === "guestPte") {
+      let text = "<b>" + step.number + "번째 읽기</b> · ";
+      if (hostLevels === 0) text += "G-stage가 Bare라 GPA가 곧 SPA다. 곧바로 ";
+      else text += "SPA를 알았으니 이제 ";
+      text += "<b>VS 레벨 " + step.guestLevel + " PTE</b> 자체를 읽는다. ";
+      if (step.guestLevel === 0) text += "리프 PTE다. 데이터가 있는 페이지의 <b>GPA</b>가 나왔다.";
+      else text += "그 안의 PPN이 다음 테이블의 <b>GPA</b>다.";
+      return text;
+    }
+    let text = "<b>" + step.number + "번째 읽기</b> · ";
+    if (step.column === 0) {
+      if (step.isFinalRow) {
+        text += "리프가 준 데이터의 GPA도 SPA로 바꿔야 한다. 다시 hgatp 루트부터 ";
+      } else if (step.row === 0) {
+        text += "게스트 워크의 시작점 <code>vsatp.PPN×4096 + VPN[" + step.guestLevel + "]×8</code>은 GPA다. 이 PTE를 읽으려면 먼저 hgatp 루트(16 KiB) 테이블부터 ";
+      } else {
+        text += "앞 PTE의 PPN으로 만든 VS 레벨 " + step.guestLevel + " PTE 주소도 GPA다. 다시 hgatp 루트부터 ";
+      }
+      text += "<b>G-stage 레벨 " + step.hostLevel + "</b> PTE를 읽는다.";
+    } else {
+      text += "G-stage 다음 단계, <b>레벨 " + step.hostLevel + "</b> PTE를 읽는다.";
+      if (step.hostLevel === 0) text += " 이제 이 GPA의 SPA를 안다.";
+    }
+    return text;
+  }
+
+  const canvas = document.getElementById("nested-walk-canvas");
+  const description = document.getElementById("nested-walk-description");
+  const playButton = document.getElementById("nested-walk-play");
+  let guestMode = "sv39";
+  let hostMode = "sv39x4";
+  let steps = [];
+  let currentStepIndex = -1;
+  let isPlaying = false;
+  let autoStepTimer = 0;
+  let tokenProgress = 1;
+  let pulsePhase = 0;
+  let lastLayout = null;
+
+  function computeLayout(width, height) {
+    const guestLevels = GUEST_LEVELS_BY_MODE[guestMode];
+    const hostLevels = HOST_LEVELS_BY_MODE[hostMode];
+    const isNarrow = width < NARROW_WIDTH;
+    const padding = isNarrow ? 8 : 14;
+    const labelWidth = book.clamp(width * 0.17, 54, 132);
+    const headerHeight = isNarrow ? 26 : 32;
+    const gap = isNarrow ? 4 : 8;
+    const columnCount = hostLevels + 1;
+    const rowCount = guestLevels + 1;
+    const gridLeft = padding + labelWidth;
+    const gridTop = padding + headerHeight;
+    const cellWidth = (width - gridLeft - padding - gap * (columnCount - 1)) / columnCount;
+    const cellHeight = (height - gridTop - padding - gap * (rowCount - 1)) / rowCount;
+    return { guestLevels, hostLevels, isNarrow, padding, labelWidth, headerHeight, gap, columnCount, rowCount, gridLeft, gridTop, cellWidth, cellHeight };
+  }
+
+  function cellCenter(layout, row, column) {
+    return {
+      x: layout.gridLeft + column * (layout.cellWidth + layout.gap) + layout.cellWidth / 2,
+      y: layout.gridTop + row * (layout.cellHeight + layout.gap) + layout.cellHeight / 2,
+    };
+  }
+
+  function draw(context, width, height, colors) {
+    const layout = computeLayout(width, height);
+    lastLayout = layout;
+    const fontSize = layout.isNarrow ? 11 : 13;
+    // 열 머리글
+    for (let column = 0; column < layout.columnCount; column += 1) {
+      const center = cellCenter(layout, 0, column);
+      let label;
+      if (column < layout.hostLevels) {
+        const hostLevel = layout.hostLevels - 1 - column;
+        label = layout.isNarrow ? "G" + hostLevel : "G-stage L" + hostLevel;
+      } else if (layout.hostLevels === 0) {
+        label = layout.isNarrow ? "읽기" : "PTE 읽기 (GPA = SPA)";
+      } else {
+        label = layout.isNarrow ? "읽기" : "게스트 PTE 읽기";
+      }
+      book.drawText(context, label, center.x, layout.padding + layout.headerHeight / 2, { size: fontSize, color: colors.dim, align: "center", bold: true });
+    }
+    // 행 머리글
+    for (let row = 0; row < layout.rowCount; row += 1) {
+      const center = cellCenter(layout, row, 0);
+      let label;
+      if (row === layout.guestLevels) label = layout.isNarrow ? "데이터" : "데이터 GPA";
+      else {
+        const guestLevel = layout.guestLevels - 1 - row;
+        label = layout.isNarrow ? "VS L" + guestLevel : "VS 레벨 " + guestLevel;
+      }
+      book.drawText(context, label, layout.padding, center.y, { size: fontSize, color: colors.text, bold: true });
+    }
+    // 지나온 길을 옅은 선으로 잇는다
+    if (currentStepIndex > 0) {
+      context.save();
+      context.strokeStyle = colors.accent;
+      context.globalAlpha = 0.35;
+      context.lineWidth = 2;
+      context.setLineDash([5, 5]);
+      context.beginPath();
+      for (let index = 0; index <= currentStepIndex; index += 1) {
+        const center = cellCenter(layout, steps[index].row, steps[index].column);
+        if (index === 0) context.moveTo(center.x, center.y);
+        else context.lineTo(center.x, center.y);
+      }
+      context.stroke();
+      context.restore();
+    }
+    // 칸
+    steps.forEach((step, index) => {
+      const center = cellCenter(layout, step.row, step.column);
+      const left = center.x - layout.cellWidth / 2;
+      const top = center.y - layout.cellHeight / 2;
+      const isDone = index <= currentStepIndex;
+      const isCurrent = index === currentStepIndex;
+      let fill = colors.surface;
+      let stroke = colors.border;
+      if (isDone) {
+        if (step.kind === "gstage") { fill = colors.tealSoft; stroke = colors.teal; }
+        else if (step.kind === "guestPte") { fill = colors.violetSoft; stroke = colors.violet; }
+        else { fill = colors.goldSoft; stroke = colors.gold; }
+      }
+      book.roundedRectangle(context, left, top, layout.cellWidth, layout.cellHeight, 8);
+      // 옅은 색은 반투명이라 아래의 경로 선이 비친다. 불투명한 바탕을 먼저 칠한다.
+      context.fillStyle = colors.elevated;
+      context.fill();
+      context.fillStyle = fill;
+      context.fill();
+      context.lineWidth = isCurrent ? 3 : 1.2;
+      context.strokeStyle = isCurrent ? colors.gold : stroke;
+      if (isCurrent) context.globalAlpha = 0.65 + 0.35 * Math.sin(pulsePhase * 5);
+      context.stroke();
+      context.globalAlpha = 1;
+      const textColor = isDone ? colors.text : colors.faint;
+      const numberText = step.kind === "data" ? "D" : String(step.number);
+      const hasRoomForLabel = layout.cellHeight >= 46 && layout.cellWidth >= 64;
+      const numberSize = Math.round(book.clamp(Math.min(layout.cellWidth, layout.cellHeight) * 0.34, 12, 20));
+      book.drawText(context, numberText, center.x, hasRoomForLabel ? center.y - 7 : center.y, { size: numberSize, bold: true, color: textColor, align: "center", mono: true });
+      if (hasRoomForLabel) {
+        let kindLabel = "G-stage";
+        if (step.kind === "guestPte") kindLabel = "VS PTE";
+        if (step.kind === "data") kindLabel = "데이터";
+        book.drawText(context, kindLabel, center.x, center.y + 13, { size: 11, color: isDone ? colors.dim : colors.faint, align: "center" });
+      }
+    });
+    // 움직이는 토큰: 앞 칸에서 지금 칸으로 미끄러진다
+    if (currentStepIndex >= 0) {
+      const target = cellCenter(layout, steps[currentStepIndex].row, steps[currentStepIndex].column);
+      let origin = target;
+      if (currentStepIndex > 0) origin = cellCenter(layout, steps[currentStepIndex - 1].row, steps[currentStepIndex - 1].column);
+      const fraction = book.easeInOut(book.clamp(tokenProgress, 0, 1));
+      const tokenX = book.linearInterpolate(origin.x, target.x, fraction);
+      const tokenY = book.linearInterpolate(origin.y, target.y, fraction);
+      context.beginPath();
+      context.arc(tokenX, tokenY + layout.cellHeight * 0.32, layout.isNarrow ? 4 : 6, 0, Math.PI * 2);
+      context.fillStyle = colors.gold;
+      context.fill();
+    }
+  }
+
+  const drawing = book.createCanvas(canvas, draw, { aspectRatio: 0.56, minimumHeight: 330, maximumHeight: 500 });
+
+  function updateReadout() {
+    const guestLevels = GUEST_LEVELS_BY_MODE[guestMode];
+    const hostLevels = HOST_LEVELS_BY_MODE[hostMode];
+    const total = totalTableReads(guestLevels, hostLevels);
+    let done = 0;
+    if (currentStepIndex >= 0) done = steps[currentStepIndex].number;
+    document.getElementById("nested-walk-count").textContent = done + " / " + total;
+    document.getElementById("nested-walk-formula").textContent = guestLevels + "·" + hostLevels + "+" + guestLevels + "+" + hostLevels + " = " + total;
+    document.getElementById("nested-walk-native").textContent = String(guestLevels);
+    document.getElementById("nested-walk-ratio").textContent = (total / guestLevels).toFixed(1) + "×";
+  }
+
+  function reset() {
+    steps = buildWalkSteps(GUEST_LEVELS_BY_MODE[guestMode], HOST_LEVELS_BY_MODE[hostMode]);
+    currentStepIndex = -1;
+    tokenProgress = 1;
+    setPlaying(false);
+    description.innerHTML = GUEST_MODE_NAMES[guestMode] + " 게스트 × " + HOST_MODE_NAMES[hostMode] + " G-stage. TLB가 모두 빗나갔다고 하자. <b>한 단계</b>를 누르면 첫 메모리 접근이 일어난다.";
+    updateReadout();
+    drawing.redraw();
+  }
+
+  function step() {
+    if (currentStepIndex >= steps.length - 1) { setPlaying(false); return; }
+    currentStepIndex += 1;
+    // 동작 줄이기 설정 등으로 반복이 멈춰 있으면 토큰을 바로 목적지에 둔다
+    tokenProgress = loop.isRunning() ? 0 : 1;
+    const guestLevels = GUEST_LEVELS_BY_MODE[guestMode];
+    const hostLevels = HOST_LEVELS_BY_MODE[hostMode];
+    description.innerHTML = describeStep(steps[currentStepIndex], guestLevels, hostLevels);
+    updateReadout();
+    drawing.redraw();
+    if (currentStepIndex >= steps.length - 1) setPlaying(false);
+  }
+
+  function setPlaying(shouldPlay) {
+    isPlaying = shouldPlay;
+    autoStepTimer = 0;
+    playButton.textContent = isPlaying ? "멈춤" : "자동 재생";
+    if (isPlaying && !loop.isRunning()) loop.start();
+  }
+
+  const loop = book.animationLoop(canvas, (deltaSeconds) => {
+    pulsePhase += deltaSeconds;
+    if (tokenProgress < 1) tokenProgress = Math.min(1, tokenProgress + deltaSeconds / SECONDS_PER_TOKEN_MOVE);
+    if (isPlaying) {
+      autoStepTimer += deltaSeconds;
+      if (autoStepTimer >= SECONDS_PER_AUTO_STEP) { autoStepTimer = 0; step(); }
+    }
+    drawing.redraw();
+  });
+
+  document.getElementById("nested-walk-step").addEventListener("click", () => { setPlaying(false); step(); });
+  playButton.addEventListener("click", () => {
+    if (isPlaying) { setPlaying(false); return; }
+    if (currentStepIndex >= steps.length - 1) reset();
+    setPlaying(true);
+  });
+  document.getElementById("nested-walk-reset").addEventListener("click", reset);
+  book.segmented("nested-walk-guest", (value) => { guestMode = value; reset(); });
+  book.segmented("nested-walk-host", (value) => { hostMode = value; reset(); });
+  if (lastLayout === null) drawing.redraw();
+})();
+
+/* ---------------------------------------------------------------------------
+   트랩 경로 시뮬레이터: 사건과 medeleg/hedeleg(또는 mideleg/hideleg) 설정으로
+   어느 모드가 트랩을 받고 어떤 CSR 이 쓰이는지 보여 준다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const LANE_CENTER_Y = { M: 43, HS: 115, VS: 187, VU: 259 };
+  const ORIGIN_X = 300;
+  const HANDLER_X = 600;
+  const ROUTE_ANIMATION_MILLISECONDS = 900;
+  const CURVE_PULL = 150;
+  const VIRTUAL_SUPERVISOR_TIMER_INTERRUPT = 6;
+  const SUPERVISOR_TIMER_INTERRUPT = 5;
+  // hedeleg 에서 읽기 전용 0 인 비트: VS 로 내려 보낼 수 없는 예외
+  const HEDELEG_READ_ONLY_ZERO = new Set([9, 10, 11, 16, 20, 21, 22, 23]);
+  // 흔한 설정: 펌웨어는 게스트 관련 예외를 HS 로, 하이퍼바이저는 게스트 앱의 호출·페이지 폴트를 게스트로
+  const COMMON_MEDELEG = [0, 3, 8, 10, 12, 13, 15, 20, 21, 22, 23];
+  const COMMON_HEDELEG = [0, 3, 8, 12, 13, 15];
+  const EXAMPLE_GUEST_VIRTUAL_ADDRESS = "0xffffffc000801238";
+  const EXAMPLE_GUEST_PHYSICAL_ADDRESS = 0x80801238;
+  const EXAMPLE_USER_VIRTUAL_ADDRESS = "0x0000000000400010";
+  const CSRR_HGATP_ENCODING = "0x68002573";
+
+  const EVENTS = {
+    "ecall-from-virtual-user": { origin: "VU", isInterrupt: false, code: 8, name: "Environment call from U/VU-mode", trapValue: "0", hasGuestVirtualAddress: false, story: "게스트 앱이 게스트 커널에 시스템 호출을 했다." },
+    "ecall-from-virtual-supervisor": { origin: "VS", isInterrupt: false, code: 10, name: "Environment call from VS-mode", trapValue: "0", hasGuestVirtualAddress: false, story: "게스트 커널이 SBI 호출(예: 타이머 설정, 콘솔 출력)을 했다. 게스트의 SBI는 하이퍼바이저가 흉내 낸다." },
+    "page-fault": { origin: "VU", isInterrupt: false, code: 13, name: "Load page fault", trapValue: EXAMPLE_USER_VIRTUAL_ADDRESS, hasGuestVirtualAddress: true, story: "게스트 앱이 게스트 커널이 아직 매핑하지 않은 주소를 읽었다. VS-stage의 문제이므로 게스트 커널이 고칠 수 있다." },
+    "guest-page-fault": { origin: "VS", isInterrupt: false, code: 21, name: "Load guest-page fault", trapValue: EXAMPLE_GUEST_VIRTUAL_ADDRESS, hasGuestVirtualAddress: true, guestPhysicalAddress: EXAMPLE_GUEST_PHYSICAL_ADDRESS, story: "게스트 커널이 읽은 주소의 GPA(0x80801238)가 G-stage에 매핑되어 있지 않다. 하이퍼바이저가 아직 실제 메모리를 주지 않은 것이다." },
+    "virtual-instruction": { origin: "VS", isInterrupt: false, code: 22, name: "Virtual instruction", trapValue: CSRR_HGATP_ENCODING + " (명령어 비트) 또는 0", hasGuestVirtualAddress: false, story: "게스트 커널이 하이퍼바이저 CSR <code>hgatp</code>를 읽으려 했다. HS였다면 허용될 명령이므로 가상 명령 예외다." },
+    "illegal-instruction": { origin: "VU", isInterrupt: false, code: 2, name: "Illegal instruction", trapValue: "명령어 비트 또는 0", hasGuestVirtualAddress: false, story: "게스트 앱이 정의되지 않은 명령을 실행했다." },
+    "guest-timer": { origin: "VS", isInterrupt: true, code: VIRTUAL_SUPERVISOR_TIMER_INTERRUPT, name: "Virtual supervisor timer interrupt", trapValue: "0", hasGuestVirtualAddress: false, story: "vstimecmp가 만료되었거나 하이퍼바이저가 hvip.VSTIP를 켰다. VS 수준 인터럽트는 mideleg 비트가 읽기 전용 1이라 언제나 M을 건너뛴다." },
+  };
+
+  const medelegBits = new Set(COMMON_MEDELEG);
+  const hedelegBits = new Set(COMMON_HEDELEG);
+  let isGuestTimerDelegated = true;
+
+  /** 규격의 위임 규칙. 반환: 처리 모드와 보고되는 원인 코드 */
+  function routeTrap(event, medeleg, hedeleg, isHidelegSet) {
+    if (event.isInterrupt) {
+      // mideleg[6] 은 H 확장에서 읽기 전용 1 → 적어도 HS 까지는 내려온다
+      if (isHidelegSet) return { handler: "VS", reportedCode: SUPERVISOR_TIMER_INTERRUPT };
+      return { handler: "HS", reportedCode: event.code };
+    }
+    if (!medeleg.has(event.code)) return { handler: "M", reportedCode: event.code };
+    const isVirtualOrigin = event.origin === "VS" || event.origin === "VU";
+    if (isVirtualOrigin && !HEDELEG_READ_ONLY_ZERO.has(event.code) && hedeleg.has(event.code)) {
+      return { handler: "VS", reportedCode: event.code };
+    }
+    return { handler: "HS", reportedCode: event.code };
+  }
+
+  function causeText(event, reportedCode) {
+    if (event.isInterrupt) return "인터럽트 " + reportedCode;
+    return String(reportedCode);
+  }
+
+  function listCsrWrites(event, route) {
+    const previousPrivilege = event.origin === "VS" ? "1 (VS)" : "0 (VU)";
+    const gvaBit = event.hasGuestVirtualAddress ? "1" : "0";
+    const cause = "<b>" + causeText(event, route.reportedCode) + "</b>" + (event.isInterrupt ? " (최상위 비트 = 1)" : " · " + event.name);
+    let secondaryValue = "0";
+    if (event.guestPhysicalAddress) {
+      secondaryValue = "0x" + (event.guestPhysicalAddress >>> 2).toString(16) + " (= GPA ≫ 2) 또는 0";
+    }
+    let instructionValue = "0";
+    if (event.guestPhysicalAddress) instructionValue = "변환된 load 명령 또는 0";
+    if (route.handler === "M") {
+      return ["<code>mepc</code> ← 트랩 난 명령의 pc", "<code>mcause</code> ← " + cause, "<code>mtval</code> ← " + event.trapValue, "<code>mtval2</code> ← " + secondaryValue, "<code>mtinst</code> ← " + instructionValue,
+        "<code>mstatus.MPV</code> ← 1, <code>MPP</code> ← " + previousPrivilege + ", <code>GVA</code> ← " + gvaBit, "<code>MPIE</code> ← MIE, <code>MIE</code> ← 0", "V ← 0, pc ← <code>mtvec</code>"];
+    }
+    if (route.handler === "HS") {
+      return ["<code>sepc</code> ← 트랩 난 명령의 pc", "<code>scause</code> ← " + cause, "<code>stval</code> ← " + event.trapValue, "<code>htval</code> ← " + secondaryValue, "<code>htinst</code> ← " + instructionValue,
+        "<code>hstatus.SPV</code> ← 1, <code>SPVP</code> ← " + previousPrivilege + ", <code>GVA</code> ← " + gvaBit, "<code>sstatus.SPP</code> ← " + previousPrivilege + ", <code>SPIE</code> ← SIE, <code>SIE</code> ← 0", "V ← 0, pc ← <code>stvec</code>"];
+    }
+    return ["<code>vsepc</code> ← 트랩 난 명령의 pc", "<code>vscause</code> ← " + cause, "<code>vstval</code> ← " + event.trapValue,
+      "<code>vsstatus.SPP</code> ← " + previousPrivilege + ", <code>SPIE</code> ← SIE, <code>SIE</code> ← 0", "V는 1 그대로, pc ← <code>vstvec</code>", "<code>hstatus</code>와 HS의 <code>sstatus</code>는 바뀌지 않는다"];
+  }
+
+  const eventSelect = document.getElementById("trap-event-select");
+  const firstCheckbox = document.getElementById("trap-first-checkbox");
+  const secondCheckbox = document.getElementById("trap-second-checkbox");
+  const firstLabel = document.getElementById("trap-first-label");
+  const secondLabel = document.getElementById("trap-second-label");
+  const readOnlyNote = document.getElementById("trap-read-only-note");
+  const routePath = document.getElementById("trap-route-path");
+  const routeDot = document.getElementById("trap-route-dot");
+  const originMarker = document.getElementById("trap-origin-marker");
+  const originLabel = document.getElementById("trap-origin-label");
+  const handlerLabel = document.getElementById("trap-handler-label");
+  const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  let animationFrameRequest = 0;
+
+  const currentEvent = () => EVENTS[eventSelect.value];
+
+  // 사건이 바뀌면 그 사건에 해당하는 위임 비트로 체크 상자를 맞춘다
+  function syncCheckboxes() {
+    const event = currentEvent();
+    if (event.isInterrupt) {
+      firstLabel.textContent = "mideleg[6] = 1 (읽기 전용 1)";
+      firstCheckbox.checked = true;
+      firstCheckbox.disabled = true;
+      secondLabel.textContent = "hideleg[6]";
+      secondCheckbox.checked = isGuestTimerDelegated;
+      secondCheckbox.disabled = false;
+      readOnlyNote.textContent = "";
+      return;
+    }
+    firstLabel.textContent = "medeleg[" + event.code + "]";
+    firstCheckbox.disabled = false;
+    firstCheckbox.checked = medelegBits.has(event.code);
+    secondLabel.textContent = "hedeleg[" + event.code + "]";
+    if (HEDELEG_READ_ONLY_ZERO.has(event.code)) {
+      secondCheckbox.checked = false;
+      secondCheckbox.disabled = true;
+      readOnlyNote.textContent = "hedeleg[" + event.code + "]는 읽기 전용 0 — 게스트에게 위임할 수 없다";
+    } else {
+      secondCheckbox.disabled = false;
+      secondCheckbox.checked = hedelegBits.has(event.code);
+      readOnlyNote.textContent = "";
+    }
+  }
+
+  function setLaneClasses(origin, handler) {
+    Object.keys(LANE_CENTER_Y).forEach((lane) => {
+      const classNames = ["trap-lane"];
+      if (lane === "VS" || lane === "VU") classNames.push("is-virtual");
+      if (lane === origin) classNames.push("is-origin");
+      if (lane === handler) classNames.push("is-handler");
+      document.getElementById("trap-lane-" + lane).setAttribute("class", classNames.join(" "));
+    });
+  }
+
+  function placeRoute(origin, handler) {
+    const startY = LANE_CENTER_Y[origin];
+    const endY = LANE_CENTER_Y[handler];
+    routePath.setAttribute("d", "M" + ORIGIN_X + " " + startY + " C " + (ORIGIN_X + CURVE_PULL) + " " + startY + ", " + (HANDLER_X - CURVE_PULL) + " " + endY + ", " + (HANDLER_X - 8) + " " + endY);
+    originMarker.setAttribute("cy", startY);
+    originLabel.setAttribute("y", startY - 15);
+    handlerLabel.setAttribute("y", endY + 5);
+  }
+
+  function moveDot(fraction) {
+    const length = routePath.getTotalLength();
+    const point = routePath.getPointAtLength(length * fraction);
+    routeDot.setAttribute("cx", point.x);
+    routeDot.setAttribute("cy", point.y);
+  }
+
+  /** 본문 글꼴은 숫자 사이의 x를 곱셈 기호처럼 그리므로, code 밖의 16진수를 고정폭 code로 감싼다. */
+  function wrapHexInCode(html) {
+    return html.split(/(<code>.*?<\/code>)/).map((piece) => {
+      if (piece.startsWith("<code>")) return piece;
+      return piece.replace(/\b0x[0-9a-fA-F]+\b/g, (hexText) => "<code>" + hexText + "</code>");
+    }).join("");
+  }
+  function fire() {
+    const event = currentEvent();
+    const route = routeTrap(event, medelegBits, hedelegBits, isGuestTimerDelegated);
+    setLaneClasses(event.origin, route.handler);
+    placeRoute(event.origin, route.handler);
+    originLabel.textContent = event.isInterrupt ? "인터럽트" : "예외 " + event.code;
+    let causeRegister = "vscause";
+    if (route.handler === "M") causeRegister = "mcause";
+    if (route.handler === "HS") causeRegister = "scause";
+    handlerLabel.textContent = causeRegister + " = " + causeText(event, route.reportedCode);
+
+    if (animationFrameRequest) cancelAnimationFrame(animationFrameRequest);
+    if (prefersReducedMotion) {
+      moveDot(1);
+    } else {
+      const startTime = performance.now();
+      const animate = (time) => {
+        const fraction = Math.min(1, (time - startTime) / ROUTE_ANIMATION_MILLISECONDS);
+        moveDot(window.RiscvBook.easeInOut(fraction));
+        animationFrameRequest = fraction < 1 ? requestAnimationFrame(animate) : 0;
+      };
+      animationFrameRequest = requestAnimationFrame(animate);
+    }
+
+    const handlerNames = { M: "M 모드 (펌웨어)", HS: "HS 모드 (하이퍼바이저)", VS: "VS 모드 (게스트 커널)" };
+    document.getElementById("trap-readout-handler").textContent = route.handler;
+    document.getElementById("trap-readout-virtualization").textContent = route.handler === "VS" ? "1" : "0";
+    document.getElementById("trap-readout-cause").textContent = causeRegister + " = " + causeText(event, route.reportedCode);
+    let why;
+    if (event.isInterrupt) {
+      why = isGuestTimerDelegated ? "hideleg[6]=1 이므로 게스트에게 간다. 이때 코드 6이 S 타이머 인터럽트 <b>5</b>로 번역된다." : "hideleg[6]=0 이므로 하이퍼바이저가 받는다. 코드는 VS 타이머 인터럽트 6 그대로다.";
+    } else if (route.handler === "M") {
+      why = "medeleg[" + event.code + "]=0 이라 위임되지 않았다. 모든 트랩의 기본 목적지는 M이다.";
+    } else if (route.handler === "HS") {
+      why = HEDELEG_READ_ONLY_ZERO.has(event.code) ? "medeleg로 HS까지 내려왔지만 hedeleg[" + event.code + "]는 읽기 전용 0이라 여기서 멈춘다." : "medeleg[" + event.code + "]=1 로 HS까지 왔고, hedeleg[" + event.code + "]=0 이라 게스트로는 가지 않는다.";
+    } else {
+      why = "medeleg와 hedeleg 둘 다 켜져 있고 V=1에서 일어난 트랩이므로 게스트 커널이 직접 받는다. 하이퍼바이저는 아무것도 모른다.";
+    }
+    const descriptionHtml = "<b>" + handlerNames[route.handler] + "</b>가 받는다. " + event.story + " " + why +
+      '<ul class="trap-write-list">' + listCsrWrites(event, route).map((line) => "<li>" + line + "</li>").join("") + "</ul>";
+    document.getElementById("trap-description").innerHTML = wrapHexInCode(descriptionHtml);
+  }
+
+  eventSelect.addEventListener("change", () => { syncCheckboxes(); fire(); });
+  firstCheckbox.addEventListener("change", () => {
+    const event = currentEvent();
+    if (event.isInterrupt) return;
+    if (firstCheckbox.checked) medelegBits.add(event.code); else medelegBits.delete(event.code);
+    fire();
+  });
+  secondCheckbox.addEventListener("change", () => {
+    const event = currentEvent();
+    if (event.isInterrupt) isGuestTimerDelegated = secondCheckbox.checked;
+    else if (secondCheckbox.checked) hedelegBits.add(event.code);
+    else hedelegBits.delete(event.code);
+    fire();
+  });
+  document.getElementById("trap-fire-button").addEventListener("click", fire);
+  document.getElementById("trap-default-button").addEventListener("click", () => {
+    medelegBits.clear(); COMMON_MEDELEG.forEach((code) => medelegBits.add(code));
+    hedelegBits.clear(); COMMON_HEDELEG.forEach((code) => hedelegBits.add(code));
+    isGuestTimerDelegated = true;
+    syncCheckboxes();
+    fire();
+  });
+  syncCheckboxes();
+  fire();
+})();
+</script>
+</body>
+</html>

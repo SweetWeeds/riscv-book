@@ -1,0 +1,1582 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>02 모듈식 ISA: 베이스와 확장 · RISC-V Book</title>
+<meta name="description" content="RISC-V는 작은 베이스 ISA 위에 표준 확장을 골라 쌓는다. RV64GC 같은 ISA 문자열의 문법, Z·S·X 확장 이름 규칙, 확장 사이의 의존 관계, 명령어 길이 인코딩과 주 opcode 지도를 그림과 시뮬레이터로 해독한다.">
+<link rel="icon" href="../assets/img/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/style.css">
+<script src="../assets/js/book.js"></script>
+<style>
+  /* ISA 문자열 도구 */
+  .isa-input-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .isa-input-row input[type="text"] { flex: 1 1 260px; min-width: 0; font-family: var(--mono); font-size: 16px; color: var(--text); background: var(--canvas-bg); border: 1px solid var(--border); border-radius: 9px; padding: 9px 12px; }
+  .isa-input-row input[type="text"]:focus { outline: 2px solid var(--accent); outline-offset: 0; }
+  .chip-group { margin-top: 14px; }
+  .chip-group > span { display: block; font-size: 12.5px; font-weight: 700; color: var(--text-faint); margin-bottom: 6px; letter-spacing: 0.04em; }
+  .chip-row { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { font: inherit; font-family: var(--mono); font-size: 13px; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--border); background: var(--bg); color: var(--text-dim); cursor: pointer; }
+  .chip:hover { border-color: var(--accent); }
+  .chip.on { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 700; }
+  .chip.implied { border-style: dashed; border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+  .isa-output { display: grid; gap: 10px; margin-top: 16px; }
+  .isa-output .line { border: 1px solid var(--border); border-radius: 10px; padding: 8px 12px; background: var(--canvas-bg); min-width: 0; }
+  .isa-output .line .key { display: block; font-size: 12px; font-weight: 700; color: var(--text-faint); }
+  .isa-output .line .value { font-family: var(--mono); font-size: 14.5px; overflow-wrap: anywhere; color: var(--text); }
+  .message-list { list-style: none; padding: 0 !important; margin: 10px 0 0 !important; font-size: 14.5px; }
+  .message-list li { padding: 6px 10px; border-radius: 8px; margin: 4px 0; }
+  .message-list li.error { background: var(--bad-soft); color: var(--bad); }
+  .message-list li.warning { background: var(--warn-soft); color: var(--warn); }
+  .message-list li.good { background: var(--ok-soft); color: var(--ok); }
+  .message-list li.info { background: var(--surface); color: var(--text-dim); }
+  .profile-grid { display: grid; gap: 8px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); margin-top: 12px; }
+  .profile-card { border: 1px solid var(--border); border-radius: 10px; padding: 8px 12px; font-size: 13.5px; min-width: 0; }
+  .profile-card b { font-family: var(--mono); display: block; }
+  .profile-card.is-compatible { background: var(--ok-soft); border-color: var(--ok); }
+  .profile-card.is-incompatible { background: var(--surface); }
+  .profile-card .missing { color: var(--text-dim); font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; }
+  /* 명령어 길이 해독기 */
+  .parcel-bits .bit { width: 30px; }
+  .bit-index-row { display: flex; flex-wrap: wrap; gap: 3px; justify-content: center; font-family: var(--mono); font-size: 10.5px; color: var(--text-faint); }
+  .bit-index-row span { width: 30px; text-align: center; }
+  .bit-index-row span.gap, .parcel-bits .bit.gap { margin-left: 8px; }
+  .parcel-strip { display: flex; flex-wrap: wrap; gap: 4px; justify-content: center; margin-top: 16px; }
+  .parcel { min-width: 58px; padding: 6px 8px; border-radius: 8px; text-align: center; font-family: var(--mono); font-size: 12.5px; border: 1px solid var(--border); background: var(--surface); color: var(--text-dim); }
+  .parcel.first { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 700; }
+  .parcel.rest { background: var(--accent-2-soft); border-color: var(--accent-2); color: var(--text); }
+  .parcel.unknown { border-style: dashed; }
+  /* 주 opcode 지도 */
+  .map-scroll { overflow-x: auto; }
+  .opcode-map { display: grid; grid-template-columns: 64px repeat(8, minmax(74px, 1fr)); gap: 4px; min-width: 690px; font-size: 12.5px; }
+  .opcode-map .axis { display: flex; align-items: center; justify-content: center; font-family: var(--mono); font-size: 11.5px; color: var(--text-faint); text-align: center; line-height: 1.3; }
+  .opcode-cell { font: inherit; font-family: var(--mono); font-size: 12px; font-weight: 700; min-height: 48px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); cursor: pointer; padding: 4px; line-height: 1.25; }
+  .opcode-cell small { display: block; font-weight: 400; font-size: 10.5px; color: var(--text-faint); }
+  .opcode-cell.kind-base { background: var(--accent-soft); border-color: var(--accent); }
+  .opcode-cell.kind-extension { background: var(--teal-soft); border-color: var(--teal); }
+  .opcode-cell.kind-custom { background: var(--accent-2-soft); border-color: var(--accent-2); }
+  .opcode-cell.kind-reserved { background: var(--surface); color: var(--text-faint); border-style: dashed; }
+  .opcode-cell.kind-long { background: var(--violet-soft); border-color: var(--violet); color: var(--violet); border-style: dashed; }
+  .opcode-cell.selected { outline: 3px solid var(--accent-2); outline-offset: 1px; }
+  .opcode-detail { padding: 14px 18px; border-top: 1px solid var(--border); font-size: 15px; min-height: 120px; }
+  .opcode-detail h4 { margin: 0 0 4px; font-size: 17px; font-family: var(--mono); }
+  .opcode-detail p { margin: 6px 0; color: var(--text-dim); }
+  .map-legend { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+</style>
+</head>
+<body data-chapter="modular">
+<main class="chapter">
+  <header class="chapter-hero">
+    <div class="eyebrow">Chapter 02</div>
+    <h1>모듈식 ISA: 베이스와 확장</h1>
+    <p class="lead">RISC-V 칩의 설명서에는 <code>RV32IMAC</code>, <code>RV64GC</code>, <code>rv64imafdcv_zba_zbb_zicond</code> 같은 알쏭달쏭한 이름이 붙어 있다. 이것은 암호가 아니라 <strong>“어떤 블록을 쌓았는가”를 적은 목록</strong>이다. RISC-V는 반드시 있어야 하는 작은 <b>베이스 ISA</b> 위에 필요한 <b>확장</b>만 골라 쌓는 모듈식 ISA다. 이 장에서는 그 이름 규칙을 해독하고, 확장 사이의 의존 관계와 명령어 인코딩 공간이 어떻게 나뉘어 있는지 살펴본다.</p>
+    <ul class="objectives">
+      <li>네 가지 베이스 ISA(RV32I·RV64I·RV32E·RV64E)의 차이와 RV128I의 현재 위치를 안다.</li>
+      <li>M·A·F·D·Q·C·B·V·H 같은 단일 문자 확장과 G의 뜻을 안다.</li>
+      <li>Z·S·X로 시작하는 여러 글자 확장의 이름 규칙(분류 문자, 순서, 밑줄)을 적용한다.</li>
+      <li><code>rv64i2p1</code> 같은 버전 표기와 정규 순서를 읽고 직접 만들어 본다.</li>
+      <li>D→F→Zicsr 같은 확장 의존 관계와 Zcmp↔Zcd 같은 충돌을 설명한다.</li>
+      <li>명령어 하위 비트로 길이를 판정하는 방법과 주 opcode 지도, custom-0~3 공간을 이해한다.</li>
+    </ul>
+    <div class="spec-meta">
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/unpriv/naming.html" target="_blank" rel="noopener">Unpriv · ISA Extension Naming Conventions</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/unpriv/intro.html" target="_blank" rel="noopener">Unpriv · Introduction</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32e.html" target="_blank" rel="noopener">Unpriv · RV32E/RV64E</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/unpriv/rv-32-64g.html" target="_blank" rel="noopener">Unpriv · RV32/64G Listings</a>
+    </div>
+  </header>
+
+  <!-- ============================================================ -->
+  <section id="why-modular">
+    <h2>레고처럼 쌓는 ISA</h2>
+    <p>x86과 Arm 같은 기존 ISA는 세대가 바뀔 때마다 명령어가 <b>덧붙어</b> 왔다. 새 칩은 옛 명령을 모두 지원해야 하고, 그 결과 ISA는 하나의 거대한 덩어리가 되었다. RISC-V는 반대로 접근했다. 컴파일러와 운영체제를 돌리기에 딱 충분한 <span class="term">베이스 정수 ISA</span><span class="english">(base integer ISA)</span>를 정해 두고, 나머지는 모두 <span class="term">확장</span><span class="english">(extension)</span>으로 떼어 냈다. 구현자는 필요한 블록만 골라 쌓는다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 820 380" role="img" aria-label="베이스 ISA 위에 확장 블록이 하나씩 내려와 쌓이는 애니메이션">
+        <text x="410" y="28" text-anchor="middle" class="t t-bold">필요한 블록만 골라 쌓는다</text>
+        <text x="410" y="52" text-anchor="middle" class="t-mono" style="font-size:15px">rv64imafdcbv_zicond_zfa_xvendor</text>
+        <!-- 2층: 늦게 내려오는 확장들 -->
+        <g>
+          <animateTransform attributeName="transform" type="translate" dur="9s" repeatCount="indefinite" values="0,-260; 0,-260; 0,0; 0,0" keyTimes="0; 0.42; 0.5; 1"/>
+          <rect x="40" y="170" width="170" height="52" rx="6" class="f-violet-soft"/>
+          <rect x="62" y="162" width="26" height="9" rx="3" class="f-violet-soft"/><rect x="162" y="162" width="26" height="9" rx="3" class="f-violet-soft"/>
+          <text x="125" y="202" text-anchor="middle" class="t t-bold">V · 벡터</text>
+        </g>
+        <g>
+          <animateTransform attributeName="transform" type="translate" dur="9s" repeatCount="indefinite" values="0,-260; 0,-260; 0,0; 0,0" keyTimes="0; 0.5; 0.58; 1"/>
+          <rect x="220" y="170" width="110" height="52" rx="6" class="f-teal-soft"/>
+          <rect x="242" y="162" width="26" height="9" rx="3" class="f-teal-soft"/><rect x="282" y="162" width="26" height="9" rx="3" class="f-teal-soft"/>
+          <text x="275" y="202" text-anchor="middle" class="t t-bold">B · 비트</text>
+        </g>
+        <g>
+          <animateTransform attributeName="transform" type="translate" dur="9s" repeatCount="indefinite" values="0,-260; 0,-260; 0,0; 0,0" keyTimes="0; 0.58; 0.66; 1"/>
+          <rect x="340" y="170" width="150" height="52" rx="6" class="f-ok-soft"/>
+          <rect x="362" y="162" width="26" height="9" rx="3" class="f-ok-soft"/><rect x="442" y="162" width="26" height="9" rx="3" class="f-ok-soft"/>
+          <text x="415" y="202" text-anchor="middle" class="t t-bold">Zicond</text>
+        </g>
+        <g>
+          <animateTransform attributeName="transform" type="translate" dur="9s" repeatCount="indefinite" values="0,-260; 0,-260; 0,0; 0,0" keyTimes="0; 0.66; 0.74; 1"/>
+          <rect x="500" y="170" width="110" height="52" rx="6" class="f-ok-soft"/>
+          <rect x="522" y="162" width="26" height="9" rx="3" class="f-ok-soft"/><rect x="562" y="162" width="26" height="9" rx="3" class="f-ok-soft"/>
+          <text x="555" y="202" text-anchor="middle" class="t t-bold">Zfa</text>
+        </g>
+        <g>
+          <animateTransform attributeName="transform" type="translate" dur="9s" repeatCount="indefinite" values="0,-260; 0,-260; 0,0; 0,0" keyTimes="0; 0.74; 0.82; 1"/>
+          <rect x="620" y="170" width="160" height="52" rx="6" class="f-gold-soft" stroke-dasharray="6 4"/>
+          <rect x="642" y="162" width="26" height="9" rx="3" class="f-gold-soft"/><rect x="732" y="162" width="26" height="9" rx="3" class="f-gold-soft"/>
+          <text x="700" y="202" text-anchor="middle" class="t t-bold">X… 회사 전용</text>
+        </g>
+        <!-- 1층: 일반 목적 확장들 -->
+        <g>
+          <animateTransform attributeName="transform" type="translate" dur="9s" repeatCount="indefinite" values="0,-260; 0,-260; 0,0; 0,0" keyTimes="0; 0.02; 0.1; 1"/>
+          <rect x="40" y="230" width="140" height="52" rx="6" class="f-accent-soft"/>
+          <rect x="60" y="222" width="26" height="9" rx="3" class="f-accent-soft"/><rect x="134" y="222" width="26" height="9" rx="3" class="f-accent-soft"/>
+          <text x="110" y="262" text-anchor="middle" class="t t-bold">M · 곱셈</text>
+        </g>
+        <g>
+          <animateTransform attributeName="transform" type="translate" dur="9s" repeatCount="indefinite" values="0,-260; 0,-260; 0,0; 0,0" keyTimes="0; 0.1; 0.18; 1"/>
+          <rect x="190" y="230" width="140" height="52" rx="6" class="f-accent-soft"/>
+          <rect x="210" y="222" width="26" height="9" rx="3" class="f-accent-soft"/><rect x="284" y="222" width="26" height="9" rx="3" class="f-accent-soft"/>
+          <text x="260" y="262" text-anchor="middle" class="t t-bold">A · 원자적</text>
+        </g>
+        <g>
+          <animateTransform attributeName="transform" type="translate" dur="9s" repeatCount="indefinite" values="0,-260; 0,-260; 0,0; 0,0" keyTimes="0; 0.18; 0.26; 1"/>
+          <rect x="340" y="230" width="140" height="52" rx="6" class="f-accent-soft"/>
+          <rect x="360" y="222" width="26" height="9" rx="3" class="f-accent-soft"/><rect x="434" y="222" width="26" height="9" rx="3" class="f-accent-soft"/>
+          <text x="410" y="262" text-anchor="middle" class="t t-bold">F · 단정밀도</text>
+        </g>
+        <g>
+          <animateTransform attributeName="transform" type="translate" dur="9s" repeatCount="indefinite" values="0,-260; 0,-260; 0,0; 0,0" keyTimes="0; 0.26; 0.34; 1"/>
+          <rect x="490" y="230" width="140" height="52" rx="6" class="f-accent-soft"/>
+          <rect x="510" y="222" width="26" height="9" rx="3" class="f-accent-soft"/><rect x="584" y="222" width="26" height="9" rx="3" class="f-accent-soft"/>
+          <text x="560" y="262" text-anchor="middle" class="t t-bold">D · 배정밀도</text>
+        </g>
+        <g>
+          <animateTransform attributeName="transform" type="translate" dur="9s" repeatCount="indefinite" values="0,-260; 0,-260; 0,0; 0,0" keyTimes="0; 0.34; 0.42; 1"/>
+          <rect x="640" y="230" width="140" height="52" rx="6" class="f-accent-soft"/>
+          <rect x="660" y="222" width="26" height="9" rx="3" class="f-accent-soft"/><rect x="734" y="222" width="26" height="9" rx="3" class="f-accent-soft"/>
+          <text x="710" y="262" text-anchor="middle" class="t t-bold">C · 압축</text>
+        </g>
+        <!-- 베이스 -->
+        <rect x="40" y="290" width="740" height="56" rx="8" class="f-accent"/>
+        <g class="f-accent"><rect x="70" y="282" width="30" height="10" rx="3"/><rect x="220" y="282" width="30" height="10" rx="3"/><rect x="370" y="282" width="30" height="10" rx="3"/><rect x="520" y="282" width="30" height="10" rx="3"/><rect x="670" y="282" width="30" height="10" rx="3"/></g>
+        <text x="410" y="316" text-anchor="middle" class="t-on-accent" style="font-size:16px">RV64I 베이스 정수 ISA (반드시 하나)</text>
+        <text x="410" y="335" text-anchor="middle" class="t-on-accent" style="font-size:12px;font-weight:400">정수 연산 · 적재/저장 · 분기 · 점프 · ecall/ebreak · fence</text>
+        <text x="410" y="370" text-anchor="middle" class="t-faint">아래층부터 차례로 쌓이며, 위층으로 갈수록 특정 분야용 확장이다</text>
+      </svg></div>
+      <figcaption><b>그림 2-1.</b> 모듈식 ISA. 맨 아래의 베이스는 반드시 하나 있어야 하고, 그 위의 블록은 모두 선택이다. 같은 RV64I 베이스 위에 마이크로컨트롤러는 M과 C만, 서버 칩은 수십 개의 확장을 쌓는다. 블록 이름을 정해진 순서로 이어 붙인 것이 맨 위의 <b>ISA 문자열</b>이다.</figcaption>
+    </figure>
+
+    <p>규격 서론은 이 방식을 다른 ISA와 대비해 이렇게 설명한다. 다른 아키텍처는 ISA를 한 덩어리로 다루며 버전이 오를 때마다 명령이 늘어나지만, RISC-V는 <b>베이스와 각 표준 확장을 시간이 지나도 바꾸지 않고</b>, 새 명령은 또 다른 선택적 확장으로 얹는다. 그래서 베이스 ISA만으로도 언제까지나 독립된 ISA로 쓸 수 있다.</p>
+    <div class="callout spec"><strong>규격 원문에서</strong>
+      <blockquote>“RISC-V will endeavor to keep the base and each standard extension constant over time, and instead layer new instructions as further optional extensions. For example, the base integer ISAs will continue as fully supported standalone ISAs, regardless of any subsequent extensions.”</blockquote>
+      <p><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/intro.html" target="_blank" rel="noopener">Volume I, Introduction — RISC-V ISA Overview</a></p></div>
+
+    <div class="table-wrap"><table>
+      <thead><tr><th></th><th>덧붙이는 ISA (x86 등)</th><th>모듈식 ISA (RISC-V)</th></tr></thead>
+      <tbody>
+        <tr><td><b>새 기능</b></td><td>다음 세대 ISA 버전에 추가</td><td>새 이름의 선택 확장으로 추가</td></tr>
+        <tr><td><b>작은 칩</b></td><td>쓰지 않는 옛 명령도 구현해야 함</td><td>베이스 + 필요한 확장만</td></tr>
+        <tr><td><b>소프트웨어가 아는 방법</b></td><td>CPUID 같은 기능 비트</td><td>ISA 문자열·프로파일·<code>misa</code> CSR·장치 트리</td></tr>
+        <tr><td><b>단점</b></td><td>ISA가 계속 비대해짐</td><td>조합이 너무 많아짐 → <a href="profiles.html">23장</a>의 프로파일로 묶음</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="base-isa">
+    <h2>네 가지 베이스 ISA</h2>
+    <p>베이스 ISA는 정수 레지스터의 <b>폭(XLEN)</b>과 <b>개수</b>로 구별된다. 현재 규격에는 네 가지가 있다. 폭이 32비트인 RV32I와 64비트인 RV64I가 주된 두 갈래이고, 각각에서 레지스터 수를 32개에서 16개로 줄인 RV32E와 RV64E가 있다. 규격은 이 넷을 <b>서로 다른 별개의 ISA</b>로 취급한다. RV32I는 RV64I의 부분집합이 아니다. 예컨대 같은 <code>add</code> 인코딩이 RV32I에서는 32비트 덧셈, RV64I에서는 64비트 덧셈이다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 820 330" role="img" aria-label="다섯 가지 베이스 ISA의 레지스터 개수와 폭 비교">
+        <g id="base-rv32i" transform="translate(15,20)">
+          <rect width="150" height="290" rx="12" class="f-accent-soft"/>
+          <text x="75" y="28" text-anchor="middle" class="t t-bold">RV32I</text>
+          <text x="75" y="48" text-anchor="middle" class="t-dim">XLEN 32 · x0–x31</text>
+          <g transform="translate(50,62)" class="f-accent">
+            <rect y="0" width="50" height="3"/><rect y="4" width="50" height="3"/><rect y="8" width="50" height="3"/><rect y="12" width="50" height="3"/><rect y="16" width="50" height="3"/><rect y="20" width="50" height="3"/><rect y="24" width="50" height="3"/><rect y="28" width="50" height="3"/>
+            <rect y="32" width="50" height="3"/><rect y="36" width="50" height="3"/><rect y="40" width="50" height="3"/><rect y="44" width="50" height="3"/><rect y="48" width="50" height="3"/><rect y="52" width="50" height="3"/><rect y="56" width="50" height="3"/><rect y="60" width="50" height="3"/>
+            <rect y="64" width="50" height="3"/><rect y="68" width="50" height="3"/><rect y="72" width="50" height="3"/><rect y="76" width="50" height="3"/><rect y="80" width="50" height="3"/><rect y="84" width="50" height="3"/><rect y="88" width="50" height="3"/><rect y="92" width="50" height="3"/>
+            <rect y="96" width="50" height="3"/><rect y="100" width="50" height="3"/><rect y="104" width="50" height="3"/><rect y="108" width="50" height="3"/><rect y="112" width="50" height="3"/><rect y="116" width="50" height="3"/><rect y="120" width="50" height="3"/><rect y="124" width="50" height="3"/>
+          </g>
+          <text x="75" y="220" text-anchor="middle" class="t-ok">v2.1 · 비준</text>
+          <text x="75" y="244" text-anchor="middle" class="t-faint">마이크로컨트롤러부터</text>
+          <text x="75" y="262" text-anchor="middle" class="t-faint">32비트 응용까지</text>
+        </g>
+        <g transform="translate(175,20)">
+          <rect width="150" height="290" rx="12" class="f-accent-soft"/>
+          <text x="75" y="28" text-anchor="middle" class="t t-bold">RV64I</text>
+          <text x="75" y="48" text-anchor="middle" class="t-dim">XLEN 64 · x0–x31</text>
+          <g transform="translate(25,62)" class="f-accent">
+            <rect y="0" width="100" height="3"/><rect y="4" width="100" height="3"/><rect y="8" width="100" height="3"/><rect y="12" width="100" height="3"/><rect y="16" width="100" height="3"/><rect y="20" width="100" height="3"/><rect y="24" width="100" height="3"/><rect y="28" width="100" height="3"/>
+            <rect y="32" width="100" height="3"/><rect y="36" width="100" height="3"/><rect y="40" width="100" height="3"/><rect y="44" width="100" height="3"/><rect y="48" width="100" height="3"/><rect y="52" width="100" height="3"/><rect y="56" width="100" height="3"/><rect y="60" width="100" height="3"/>
+            <rect y="64" width="100" height="3"/><rect y="68" width="100" height="3"/><rect y="72" width="100" height="3"/><rect y="76" width="100" height="3"/><rect y="80" width="100" height="3"/><rect y="84" width="100" height="3"/><rect y="88" width="100" height="3"/><rect y="92" width="100" height="3"/>
+            <rect y="96" width="100" height="3"/><rect y="100" width="100" height="3"/><rect y="104" width="100" height="3"/><rect y="108" width="100" height="3"/><rect y="112" width="100" height="3"/><rect y="116" width="100" height="3"/><rect y="120" width="100" height="3"/><rect y="124" width="100" height="3"/>
+          </g>
+          <text x="75" y="220" text-anchor="middle" class="t-ok">v2.1 · 비준</text>
+          <text x="75" y="244" text-anchor="middle" class="t-faint">리눅스 응용 프로세서</text>
+          <text x="75" y="262" text-anchor="middle" class="t-faint">서버의 기본</text>
+        </g>
+        <g transform="translate(335,20)">
+          <rect width="150" height="290" rx="12" class="f-teal-soft"/>
+          <text x="75" y="28" text-anchor="middle" class="t t-bold">RV32E</text>
+          <text x="75" y="48" text-anchor="middle" class="t-dim">XLEN 32 · x0–x15</text>
+          <g transform="translate(50,62)" class="f-accent">
+            <rect y="0" width="50" height="3"/><rect y="4" width="50" height="3"/><rect y="8" width="50" height="3"/><rect y="12" width="50" height="3"/><rect y="16" width="50" height="3"/><rect y="20" width="50" height="3"/><rect y="24" width="50" height="3"/><rect y="28" width="50" height="3"/>
+            <rect y="32" width="50" height="3"/><rect y="36" width="50" height="3"/><rect y="40" width="50" height="3"/><rect y="44" width="50" height="3"/><rect y="48" width="50" height="3"/><rect y="52" width="50" height="3"/><rect y="56" width="50" height="3"/><rect y="60" width="50" height="3"/>
+          </g>
+          <rect x="50" y="128" width="50" height="62" rx="3" fill="none" stroke="var(--text-faint)" stroke-dasharray="4 3"/>
+          <text x="75" y="163" text-anchor="middle" class="t-faint">x16–x31 없음</text>
+          <text x="75" y="220" text-anchor="middle" class="t-ok">v2.0 · 비준</text>
+          <text x="75" y="244" text-anchor="middle" class="t-faint">코어 면적 약 25% 절감</text>
+          <text x="75" y="262" text-anchor="middle" class="t-faint">초소형 임베디드</text>
+        </g>
+        <g transform="translate(495,20)">
+          <rect width="150" height="290" rx="12" class="f-teal-soft"/>
+          <text x="75" y="28" text-anchor="middle" class="t t-bold">RV64E</text>
+          <text x="75" y="48" text-anchor="middle" class="t-dim">XLEN 64 · x0–x15</text>
+          <g transform="translate(25,62)" class="f-accent">
+            <rect y="0" width="100" height="3"/><rect y="4" width="100" height="3"/><rect y="8" width="100" height="3"/><rect y="12" width="100" height="3"/><rect y="16" width="100" height="3"/><rect y="20" width="100" height="3"/><rect y="24" width="100" height="3"/><rect y="28" width="100" height="3"/>
+            <rect y="32" width="100" height="3"/><rect y="36" width="100" height="3"/><rect y="40" width="100" height="3"/><rect y="44" width="100" height="3"/><rect y="48" width="100" height="3"/><rect y="52" width="100" height="3"/><rect y="56" width="100" height="3"/><rect y="60" width="100" height="3"/>
+          </g>
+          <rect x="25" y="128" width="100" height="62" rx="3" fill="none" stroke="var(--text-faint)" stroke-dasharray="4 3"/>
+          <text x="75" y="163" text-anchor="middle" class="t-faint">x16–x31 없음</text>
+          <text x="75" y="220" text-anchor="middle" class="t-ok">v2.0 · 비준</text>
+          <text x="75" y="244" text-anchor="middle" class="t-faint">큰 SoC 속 64비트 MCU</text>
+          <text x="75" y="262" text-anchor="middle" class="t-faint">문맥 상태 줄이기</text>
+        </g>
+        <g transform="translate(655,20)">
+          <rect width="150" height="290" rx="12" fill="none" stroke="var(--text-faint)" stroke-width="1.5" stroke-dasharray="7 5"/>
+          <text x="75" y="28" text-anchor="middle" class="t-dim t-bold">RV128I</text>
+          <text x="75" y="48" text-anchor="middle" class="t-faint">XLEN 128</text>
+          <text x="75" y="110" text-anchor="middle" class="t-faint">현행 매뉴얼에</text>
+          <text x="75" y="128" text-anchor="middle" class="t-faint">정의 없음</text>
+          <text x="75" y="220" text-anchor="middle" class="t-warn">초안 스케치 삭제</text>
+          <text x="75" y="244" text-anchor="middle" class="t-faint">“필요해지면 같은 틀 안에서</text>
+          <text x="75" y="262" text-anchor="middle" class="t-faint">새 베이스로” (서론)</text>
+        </g>
+      </svg></div>
+      <figcaption><b>그림 2-2.</b> 베이스 ISA 가족. 막대 하나가 정수 레지스터 하나이고, 막대 길이가 XLEN이다. E 변형은 x16–x31을 없앴다. 규격은 작은 RV32I 코어에서 위쪽 16개 레지스터가 메모리를 뺀 코어 면적의 약 4분의 1을 차지한다고 적는다. RV128I 스케치는 최근 개정에서 비준되지 않은 내용을 걷어 낼 때 삭제되었다.</figcaption>
+    </figure>
+
+    <div class="table-wrap"><table>
+      <thead><tr><th>베이스</th><th>XLEN</th><th>정수 레지스터</th><th>주소 공간</th><th>현행 버전 · 상태</th></tr></thead>
+      <tbody>
+        <tr><td><code>RV32I</code></td><td>32</td><td>32개 (x0–x31)</td><td>2<sup>32</sup> 바이트</td><td>2.1 · Ratified</td></tr>
+        <tr><td><code>RV64I</code></td><td>64</td><td>32개 (x0–x31)</td><td>2<sup>64</sup> 바이트</td><td>2.1 · Ratified</td></tr>
+        <tr><td><code>RV32E</code></td><td>32</td><td>16개 (x0–x15)</td><td>2<sup>32</sup> 바이트</td><td>2.0 · Ratified</td></tr>
+        <tr><td><code>RV64E</code></td><td>64</td><td>16개 (x0–x15)</td><td>2<sup>64</sup> 바이트</td><td>2.0 · Ratified</td></tr>
+        <tr><td><code>RV128I</code></td><td>128</td><td>—</td><td>—</td><td>현행 매뉴얼에 없음 (2019년판까지 Draft 1.7)</td></tr>
+      </tbody>
+    </table></div>
+    <p>E 변형은 레지스터만 16개로 줄었을 뿐 인코딩은 I와 같다. x16–x31을 가리키는 인코딩은 모두 <b>예약(reserved)</b>으로 남겨 두었다. 이전 초안은 이 인코딩을 custom 용도로 풀어 주었지만, 비준된 2.0은 나중에 custom 공간이나 새 표준 인코딩 어느 쪽으로든 쓸 수 있도록 더 보수적으로 예약해 두었다. 또 규격은 “특별히 언급하지 않는 한 RV32I·RV64I와 호환되는 표준 확장은 RV32E·RV64E와도 호환된다”고 적는다. 예외로 H 확장은 레지스터 32개짜리 I 베이스를 요구한다. 레지스터 모델은 <a href="registers.html">3장</a>, 64비트로 넓어질 때의 차이는 <a href="rv64.html">6장</a>에서 자세히 본다.</p>
+    <div class="callout history"><strong>RV128I는 어디로 갔나</strong><p>2019년판 매뉴얼까지는 128비트 주소 공간을 위한 RV128I가 “Draft 1.7”로 실려 있었고, <code>misa.MXL=3</code>도 XLEN 128을 뜻했다. 최근 개정에서 비준되지 않은 내용을 걷어 내면서 RV128I 스케치가 삭제되었고, 현행 특권 규격에서 <code>MXL=3</code>은 Reserved다. 서론은 여전히 “128비트 평면 주소 공간이 언젠가 필요해지면 기존 RISC-V 틀 안에서 새 RV128I 베이스로 수용할 수 있다”고만 적어 둔다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="standard-extensions">
+    <h2>단일 문자 표준 확장과 G</h2>
+    <p>가장 기본적인 표준 확장은 <b>알파벳 한 글자</b>로 이름 붙인다. 정수 곱셈·나눗셈은 M, 원자적 메모리 연산은 A, 단정밀도 부동소수점은 F, 배정밀도는 D 하는 식이다. 규격의 표 1은 이 글자들을 나열하는 동시에, ISA 문자열에서 글자가 나와야 하는 <b>정규 순서</b>까지 정한다. 표의 위에서 아래로가 문자열의 앞에서 뒤로다.</p>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>순서</th><th>이름</th><th>내용</th><th>암시하는 것</th><th>현행 버전</th><th>이 책</th></tr></thead>
+      <tbody>
+        <tr><td>1</td><td><code>I</code> / <code>E</code></td><td>베이스 정수 (32개 / 16개 레지스터)</td><td></td><td>2.1 / 2.0</td><td><a href="rv32i.html">5장</a></td></tr>
+        <tr><td>2</td><td><code>M</code></td><td>정수 곱셈·나눗셈</td><td>Zmmul</td><td>2.0</td><td><a href="multiply.html">9장</a></td></tr>
+        <tr><td>3</td><td><code>A</code></td><td>원자적 연산 (= Zaamo + Zalrsc)</td><td></td><td>2.1</td><td><a href="atomic.html">10장</a></td></tr>
+        <tr><td>4</td><td><code>F</code></td><td>단정밀도 부동소수점</td><td>Zicsr</td><td>2.2</td><td><a href="floating-point.html">12장</a></td></tr>
+        <tr><td>5</td><td><code>D</code></td><td>배정밀도 부동소수점</td><td>F</td><td>2.2</td><td><a href="floating-point.html">12장</a></td></tr>
+        <tr><td>6</td><td><code>G</code></td><td>일반 목적 묶음 = IMAFD + Zicsr + Zifencei</td><td>IMAFDZicsr_Zifencei</td><td>—</td><td>이 장</td></tr>
+        <tr><td>7</td><td><code>Q</code></td><td>4배정밀도 부동소수점</td><td>D</td><td>2.2</td><td><a href="floating-point.html">12장</a></td></tr>
+        <tr><td>8</td><td><code>C</code></td><td>16비트 압축 명령</td><td></td><td>2.0</td><td><a href="compressed.html">13장</a></td></tr>
+        <tr><td>9</td><td><code>B</code></td><td>비트 조작 (= Zba + Zbb + Zbs)</td><td></td><td>1.0</td><td><a href="bit-manipulation.html">14장</a></td></tr>
+        <tr><td>10</td><td><code>P</code></td><td>Packed-SIMD</td><td></td><td>미비준</td><td>—</td></tr>
+        <tr><td>11</td><td><code>V</code></td><td>벡터</td><td>D</td><td>1.0</td><td><a href="vector.html">15장</a></td></tr>
+        <tr><td>12</td><td><code>H</code></td><td>하이퍼바이저</td><td></td><td>1.0 (특권 규격)</td><td><a href="hypervisor.html">21장</a></td></tr>
+      </tbody>
+    </table></div>
+    <p>따라서 <code>RV32IMACV</code>는 올바른 이름이지만 <code>RV32IMAVC</code>는 그렇지 않다(규격이 직접 드는 예다). 맨 위의 <b>G</b>는 확장이 아니라 줄임말이다. 규격은 “표준 범용 ISA”를 나타내려고 <code>G</code> = <code>IMAFDZicsr_Zifencei</code>로 정했다. 그래서 리눅스 배포판이 흔히 쓰는 <code>RV64GC</code>를 풀어 쓰면 <code>RV64IMAFDC_Zicsr_Zifencei</code>가 된다.</p>
+    <div class="callout tip"><strong>대소문자는 상관없다</strong><p>규격은 “ISA 이름 문자열은 대소문자를 구별하지 않는다”고 정한다. 문서에서는 <code>RV64GC</code>처럼 대문자를, 툴체인 옵션에서는 <code>rv64gc</code>처럼 소문자를 주로 쓴다. 이 책의 시뮬레이터도 소문자로 정규화한다.</p></div>
+    <div class="callout deep"><strong>Zicsr와 Zifencei는 왜 G에 따로 적혀 있나</strong><p>초기 매뉴얼에서는 CSR 명령과 <code>FENCE.I</code>가 베이스 I에 들어 있었다. 2019년 개정에서 이 둘을 베이스 밖으로 빼내 각각 <code>Zicsr</code>, <code>Zifencei</code>라는 확장으로 만들었고, 베이스 버전을 2.1로 올렸다. <code>FENCE.I</code>는 명령어 캐시와 데이터 캐시가 서로 일관되지 않은 큰 구현에서 다루기 까다로웠고 리눅스 사용자 ABI에서도 빠졌기 때문이다. G가 예전과 같은 뜻을 유지하도록 두 이름을 G의 정의에 명시해 넣은 것이다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="multi-letter">
+    <h2>Z·S·X: 여러 글자 확장의 이름</h2>
+    <p>알파벳은 26자뿐이고, 작은 확장은 수십 개다. 그래서 규격은 <b>여러 글자로 된 이름</b>을 쓰는 세 가지 접두어를 정했다.</p>
+    <ul>
+      <li><b>Z</b> + 이름 — 표준 <b>비특권</b> 확장. 예: <code>Zicsr</code>, <code>Zba</code>, <code>Zfh</code>, <code>Zvbb</code>.</li>
+      <li><b>S</b> + 이름 — 표준 <b>특권</b> 확장. 감독자 수준 가상 메모리는 <code>Sv</code>(예: <code>Svnapot</code>), 그 밖의 감독자 수준은 <code>Ss</code>(예: <code>Sstc</code>), 하이퍼바이저 수준은 <code>Sh</code>, 머신 수준은 <code>Sm</code>(예: <code>Smepmp</code>).</li>
+      <li><b>X</b> + 이름 — <b>비표준</b> 확장. 회사나 연구실이 스스로 정의한다. 예: 규격이 드는 <code>Xhwacha</code>.</li>
+    </ul>
+    <p>Z 이름에는 숨은 규칙이 하나 더 있다. <b>Z 바로 뒤의 글자는 가장 가까운 단일 문자 확장의 분류</b>를 나타낸다. <code>Zfa</code>의 f는 F(부동소수점)와 관련 있다는 뜻이고, <code>Zicsr</code>의 i는 베이스 I와 관련 있다는 뜻이다. 분류 문자의 순서는 규격이 <code>IMAFDQLCBKJTPVH</code>로 정해 두었다. 여러 Z 확장을 나열할 때는 <b>먼저 분류 순서로, 같은 분류 안에서는 알파벳 순서로</b> 적는다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 820 330" role="img" aria-label="Z 확장의 분류 문자 표">
+        <text x="20" y="26" class="t t-bold">Z + <tspan class="t-gold">분류 문자</tspan> + 나머지 이름</text>
+        <text x="800" y="26" text-anchor="end" class="t-faint">분류 순서: I M A F D Q L C B K J T P V H</text>
+        <g transform="translate(20,46)">
+          <rect width="34" height="26" rx="6" class="f-accent-soft"/><text x="17" y="18" text-anchor="middle" class="t-accent">I</text>
+          <text x="46" y="18" class="t-mono">Zicsr · Zifencei · Zicntr · Zicond · Zimop</text>
+        </g>
+        <g transform="translate(20,80)">
+          <rect width="34" height="26" rx="6" class="f-accent-soft"/><text x="17" y="18" text-anchor="middle" class="t-accent">M</text>
+          <text x="46" y="18" class="t-mono">Zmmul</text>
+        </g>
+        <g transform="translate(20,114)">
+          <rect width="34" height="26" rx="6" class="f-accent-soft"/><text x="17" y="18" text-anchor="middle" class="t-accent">A</text>
+          <text x="46" y="18" class="t-mono">Zaamo · Zalrsc · Zacas · Zabha · Zawrs</text>
+        </g>
+        <g transform="translate(20,148)">
+          <rect width="34" height="26" rx="6" class="f-accent-soft"/><text x="17" y="18" text-anchor="middle" class="t-accent">F</text>
+          <text x="46" y="18" class="t-mono">Zfh · Zfhmin · Zfa · Zfinx · Zfbfmin</text>
+        </g>
+        <g transform="translate(20,182)">
+          <rect width="34" height="26" rx="6" class="f-accent-soft"/><text x="17" y="18" text-anchor="middle" class="t-accent">D</text>
+          <text x="46" y="18" class="t-mono">Zdinx</text>
+        </g>
+        <g transform="translate(20,216)">
+          <rect width="34" height="26" rx="6" class="f-surface"/><text x="17" y="18" text-anchor="middle" class="t-dim">Q</text>
+          <rect x="40" width="34" height="26" rx="6" class="f-surface"/><text x="57" y="18" text-anchor="middle" class="t-dim">L</text>
+          <text x="86" y="18" class="t-faint">(아직 해당 Z 확장 없음)</text>
+        </g>
+        <g transform="translate(20,250)">
+          <rect width="34" height="26" rx="6" class="f-accent-soft"/><text x="17" y="18" text-anchor="middle" class="t-accent">C</text>
+          <text x="46" y="18" class="t-mono">Zca · Zcb · Zcd · Zcf · Zcmp · Zcmt · Zcmop</text>
+        </g>
+        <g transform="translate(430,46)">
+          <rect width="34" height="26" rx="6" class="f-accent-soft"/><text x="17" y="18" text-anchor="middle" class="t-accent">B</text>
+          <text x="46" y="18" class="t-mono">Zba · Zbb · Zbs · Zbc · Zbkb · Zbkc · Zbkx</text>
+        </g>
+        <g transform="translate(430,80)">
+          <rect width="34" height="26" rx="6" class="f-accent-soft"/><text x="17" y="18" text-anchor="middle" class="t-accent">K</text>
+          <text x="46" y="18" class="t-mono">Zk · Zkn · Zks · Zkr · Zkt (스칼라 암호)</text>
+        </g>
+        <g transform="translate(430,114)">
+          <rect width="34" height="26" rx="6" class="f-surface"/><text x="17" y="18" text-anchor="middle" class="t-dim">J</text>
+          <text x="46" y="18" class="t-faint">(아직 해당 Z 확장 없음)</text>
+        </g>
+        <g transform="translate(430,148)">
+          <rect width="34" height="26" rx="6" class="f-accent-soft"/><text x="17" y="18" text-anchor="middle" class="t-accent">T</text>
+          <text x="46" y="18" class="t-mono">Ztso</text>
+        </g>
+        <g transform="translate(430,182)">
+          <rect width="34" height="26" rx="6" class="f-surface"/><text x="17" y="18" text-anchor="middle" class="t-dim">P</text>
+          <text x="46" y="18" class="t-faint">(Packed-SIMD, 미비준)</text>
+        </g>
+        <g transform="translate(430,216)">
+          <rect width="34" height="26" rx="6" class="f-accent-soft"/><text x="17" y="18" text-anchor="middle" class="t-accent">V</text>
+          <text x="46" y="18" class="t-mono">Zve32x · Zve64d · Zvl128b · Zvbb · Zvkt</text>
+        </g>
+        <g transform="translate(430,250)">
+          <rect width="34" height="26" rx="6" class="f-surface"/><text x="17" y="18" text-anchor="middle" class="t-dim">H</text>
+          <text x="46" y="18" class="t-faint">(하이퍼바이저 분류)</text>
+        </g>
+        <text x="410" y="312" text-anchor="middle" class="t-dim">예) Zicsr_Zifencei_Ztso: I 분류 둘(알파벳 순) → T 분류 순서로 적는다</text>
+      </svg></div>
+      <figcaption><b>그림 2-3.</b> Z 확장의 두 번째 글자는 분류 문자다. 분류 순서 <code>IMAFDQLCBKJTPVH</code>는 단일 문자 확장 순서에서 E·G를 빼고, 지금의 단일 문자 표에는 없는 L·K·J·T를 끼워 넣은 모양이다. 규격은 이것을 “관례적으로(conventionally)” 따르는 규칙이라 부른다.</figcaption>
+    </figure>
+
+    <p>여러 글자 이름에도 형식 제약이 있다. 이름은 <b>영문자로 끝나야</b> 하고, 마지막 글자가 p라면 그 앞 글자는 숫자일 수 없다. 이름 끝의 숫자나 “숫자+p”는 버전 번호로 읽히기 때문이다(다음 절). 그래서 <code>Zvl128b</code>처럼 숫자가 이름 가운데 들어가는 것은 괜찮다. 규격은 <code>sv32</code>, <code>sv39</code>, <code>sv48</code>이 이 규칙이 생기기 전에 정해진 예외라고 밝힌다.</p>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>접두어</th><th>뜻</th><th>문자열 안 위치</th><th>예</th></tr></thead>
+      <tbody>
+        <tr><td><code>Z</code></td><td>표준 비특권 확장</td><td>단일 문자 뒤, 분류 순 → 알파벳 순</td><td><code>Zicond</code>, <code>Zba</code>, <code>Zvbb</code></td></tr>
+        <tr><td><code>Ss</code> · <code>Sv</code></td><td>표준 감독자 수준 확장</td><td>Z 뒤, 알파벳 순</td><td><code>Sstc</code>, <code>Svinval</code>, <code>Svnapot</code></td></tr>
+        <tr><td><code>Sh</code></td><td>표준 하이퍼바이저 수준 확장</td><td>감독자 수준 뒤, 알파벳 순</td><td>(감독자 쪽에서 안 보이는 소수만)</td></tr>
+        <tr><td><code>Sm</code></td><td>표준 머신 수준 확장</td><td>덜 특권적인 확장들 뒤, 알파벳 순</td><td><code>Smepmp</code>, <code>Smstateen</code></td></tr>
+        <tr><td><code>X</code></td><td>비표준 확장</td><td>모든 표준 확장 뒤, 알파벳 순</td><td><code>Xhwacha</code></td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="isa-string">
+    <h2>ISA 문자열의 문법: 순서·밑줄·버전</h2>
+    <p>이제 조각을 모아 ISA 문자열 하나를 해부해 보자. 문자열은 <b>XLEN → 베이스 → 단일 문자 → Z → S → X</b>의 순서를 따르고, 여러 글자 확장끼리는 반드시 밑줄 <code>_</code>로 구분한다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 260" role="img" aria-label="ISA 문자열 rv64imafdc_zicsr_zifencei_zba_sstc_xvendorx 해부도">
+        <g style="font-size:20px">
+          <rect x="40" y="40" width="40" height="40" rx="6" class="f-surface"/><text x="60" y="67" text-anchor="middle" class="t-mono" style="font-size:20px">rv</text>
+          <rect x="84" y="40" width="40" height="40" rx="6" class="f-gold-soft"/><text x="104" y="67" text-anchor="middle" class="t-mono" style="font-size:20px">64</text>
+          <rect x="128" y="40" width="28" height="40" rx="6" class="f-accent"/><text x="142" y="67" text-anchor="middle" class="t-on-accent" style="font-size:20px;font-family:var(--mono)">i</text>
+          <rect x="160" y="40" width="80" height="40" rx="6" class="f-accent-soft"/><text x="200" y="67" text-anchor="middle" class="t-mono" style="font-size:20px">mafdc</text>
+          <rect x="244" y="40" width="92" height="40" rx="6" class="f-teal-soft"/><text x="290" y="67" text-anchor="middle" class="t-mono" style="font-size:20px">_zicsr</text>
+          <rect x="340" y="40" width="130" height="40" rx="6" class="f-teal-soft"/><text x="405" y="67" text-anchor="middle" class="t-mono" style="font-size:20px">_zifencei</text>
+          <rect x="474" y="40" width="68" height="40" rx="6" class="f-teal-soft"/><text x="508" y="67" text-anchor="middle" class="t-mono" style="font-size:20px">_zba</text>
+          <rect x="546" y="40" width="80" height="40" rx="6" class="f-violet-soft"/><text x="586" y="67" text-anchor="middle" class="t-mono" style="font-size:20px">_sstc</text>
+          <rect x="630" y="40" width="190" height="40" rx="6" class="f-gold-soft" stroke-dasharray="5 3"/><text x="725" y="67" text-anchor="middle" class="t-mono" style="font-size:20px">_xvendorx</text>
+        </g>
+        <!-- 괄호와 설명 -->
+        <path d="M84 90 v8 h40 v-8" class="s-line"/><text x="104" y="116" text-anchor="middle" class="t-gold">XLEN</text>
+        <path d="M128 90 v8 h28 v-8" class="s-line"/><text x="142" y="138" text-anchor="middle" class="t-accent">베이스</text>
+        <path d="M142 98 V122" class="s-line"/>
+        <path d="M160 90 v8 h80 v-8" class="s-line"/><text x="200" y="116" text-anchor="middle" class="t-dim">단일 문자</text><text x="200" y="134" text-anchor="middle" class="t-faint">정해진 순서</text>
+        <path d="M244 90 v8 h298 v-8" class="s-line"/><text x="393" y="116" text-anchor="middle" class="t-teal">Z 확장: 분류 순 (I, I, B) → 알파벳 순</text>
+        <text x="393" y="134" text-anchor="middle" class="t-faint">zicsr &lt; zifencei 는 알파벳 순, zba 는 B 분류라 뒤</text>
+        <path d="M546 90 v8 h80 v-8" class="s-line"/><text x="586" y="116" text-anchor="middle" class="t-violet">S 확장</text>
+        <path d="M630 90 v8 h190 v-8" class="s-line"/><text x="725" y="116" text-anchor="middle" class="t-gold">X 확장: 맨 끝</text>
+        <!-- 버전 예시 -->
+        <rect x="40" y="168" width="780" height="76" rx="10" class="f-elev"/>
+        <text x="60" y="194" class="t t-bold">버전을 붙이면</text>
+        <text x="60" y="224" class="t-mono" style="font-size:16px">rv64i<tspan class="t-gold" style="font-size:16px">2p1</tspan>_m<tspan class="t-gold" style="font-size:16px">2p0</tspan>_a<tspan class="t-gold" style="font-size:16px">2p1</tspan>_f<tspan class="t-gold" style="font-size:16px">2p2</tspan>_d<tspan class="t-gold" style="font-size:16px">2p2</tspan>_c<tspan class="t-gold" style="font-size:16px">2p0</tspan>_zicsr<tspan class="t-gold" style="font-size:16px">2p0</tspan>_zifencei<tspan class="t-gold" style="font-size:16px">2p0</tspan></text>
+        <text x="800" y="194" text-anchor="end" class="t-faint">주버전 p 부버전 · p0 은 생략 가능</text>
+      </svg></div>
+      <figcaption><b>그림 2-4.</b> ISA 문자열 해부. <code>xvendorx</code>는 가상의 비표준 확장 이름이다. 아래 줄처럼 확장 이름 뒤에 <code>주버전 p 부버전</code>을 붙일 수 있다. 버전을 붙이면 글자 경계가 모호해지므로 툴체인은 보통 모든 확장 사이에 밑줄을 넣는다.</figcaption>
+    </figure>
+
+    <h3>버전 번호</h3>
+    <p>확장 이름 바로 뒤의 숫자는 버전이다. 주버전과 부버전 사이에 <code>p</code>를 넣고, 부버전이 0이면 <code>p0</code>을 생략해도 된다. 따라서 <code>rv32i2p1</code>은 “RV32I 버전 2.1”이다. <b>주버전이 바뀌면 하위 호환이 깨질 수 있고, 부버전만 바뀌면 반드시 하위 호환</b>이어야 한다. 버전을 적지 않으면 버전 번호 체계가 도입된 두 번째 판 당시의 버전이 기본값이어서, <code>RV32I</code>는 <code>RV32I2</code>와 같다.</p>
+    <div class="callout warn"><strong>P 확장의 함정</strong><p>Packed-SIMD 확장의 이름이 하필 <code>P</code>라서 버전 구분자와 헷갈린다. 규격은 버전이 붙은 확장 뒤에 P가 오면 <b>반드시 밑줄을 넣으라</b>고 한다. <code>rv32i2p2</code>는 “RV32I 버전 2.2”이고, <code>rv32i2_p2</code>는 “RV32I 버전 2.0 + P 버전 2.0”이다.</p></div>
+    <div class="callout spec"><strong>규격 원문에서</strong>
+      <blockquote>“If multiple "Z" extensions are named, they should be ordered first by category, then alphabetically within a category—for example, "Zicsr_Zifencei_Ztso".”</blockquote>
+      <p><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/naming.html" target="_blank" rel="noopener">Volume I, ISA Extension Naming Conventions</a></p></div>
+
+    <div class="sim" id="isa-string-sim">
+      <div class="sim-head"><span class="sim-tag">SIMULATOR</span><h3>ISA 문자열 해독기 · 조립기</h3></div>
+      <div class="sim-pad">
+        <div class="isa-input-row">
+          <input type="text" id="isa-input" value="rv64gc_zba_zbb_zbs" spellcheck="false" autocomplete="off" aria-label="ISA 문자열 입력">
+          <button class="button primary" id="isa-parse-button">해독</button>
+        </div>
+        <div class="chip-group"><span>예시 불러오기</span>
+          <div class="chip-row" id="isa-preset-row">
+            <button class="chip" data-preset="rv32i">rv32i</button>
+            <button class="chip" data-preset="rv32imac">rv32imac</button>
+            <button class="chip" data-preset="rv32emc">rv32emc</button>
+            <button class="chip" data-preset="rv64gc">rv64gc</button>
+            <button class="chip" data-preset="rv32imavc">rv32imavc (순서 틀림)</button>
+            <button class="chip" data-preset="rv32imafdc_zcmp">rv32imafdc_zcmp (충돌)</button>
+            <button class="chip" data-preset="rv64i2p1_m2p0_a2p1_f2p2_d2p2_c2p0_zicsr2p0_zifencei2p0">버전 표기</button>
+            <button class="chip" data-preset="rv64imafdcbv_zicond_zimop_zcmop_zcb_zfa_zfhmin_zawrs_zihintpause_zihintntl_zicntr_zihpm_zicbom_zicbop_zicboz_zkt_zvfhmin_zvbb_zvkt_supm">RVA23U64 수준</button>
+          </div>
+        </div>
+        <div class="chip-group"><span>확장 켜고 끄기 (점선 = 다른 확장 때문에 저절로 포함됨)</span>
+          <div class="chip-row" id="isa-toggle-row"></div>
+        </div>
+        <div class="isa-output">
+          <div class="line"><span class="key">정규화한 이름 (입력한 확장만, 정규 순서)</span><span class="value" id="isa-canonical">—</span></div>
+          <div class="line"><span class="key">펼친 이름 (G를 풀고 암시된 확장까지 모두)</span><span class="value" id="isa-expanded">—</span></div>
+          <div class="line"><span class="key">버전을 붙인 이름 (이 도구가 아는 현행 버전만)</span><span class="value" id="isa-versioned">—</span></div>
+        </div>
+        <ul class="message-list" id="isa-messages"></ul>
+        <div class="chip-group"><span>프로파일과의 대략적 호환 (명령어 확장만 비교, 23장 참고)</span>
+          <div class="profile-grid" id="isa-profiles"></div>
+        </div>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">XLEN</span><span class="value" id="isa-xlen">—</span></div>
+        <div class="stat"><span class="key">정수 레지스터</span><span class="value" id="isa-register-count">—</span></div>
+        <div class="stat"><span class="key">확장 수 (펼친 뒤)</span><span class="value" id="isa-extension-count">—</span></div>
+        <div class="stat"><span class="key">misa 문자 비트 (S·U 제외)</span><span class="value" id="isa-misa">—</span></div>
+      </div>
+      <div class="sim-note"><code>rv64gc</code>를 넣고 펼친 이름에 무엇이 나타나는지 보자. 그다음 <b>D</b>를 끄면 C가 Zcd를 더 이상 포함하지 않는 것을 확인하자. <code>rv32imafdc_zcmp</code>는 왜 오류일까? 마지막으로 <b>V</b>를 켜면 Zve64d·Zvl128b 같은 하위 확장이 저절로 따라온다.</div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="dependencies">
+    <h2>확장 사이의 의존과 충돌</h2>
+    <p>확장들은 서로 독립적이지 않다. 배정밀도 D는 단정밀도 F의 레지스터와 명령을 바탕으로 하고, F는 부동소수점 상태 레지스터 <code>fcsr</code>을 읽고 쓰기 위해 Zicsr이 필요하다. 규격은 이런 의존이 “ISA 이름에 암묵적으로 들어 있을 수 있다”고 말한다. 즉 <code>RV32ID</code>는 <code>RV32IFD</code>, 그리고 <code>RV32IFDZicsr</code>와 같은 뜻이다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 420" role="img" aria-label="표준 확장 사이의 의존 관계와 충돌 그래프">
+        <defs>
+          <marker id="dependency-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--text-faint)"/></marker>
+        </defs>
+        <!-- G 묶음 -->
+        <rect x="20" y="20" width="380" height="150" rx="14" fill="none" stroke="var(--accent-2)" stroke-width="1.6" stroke-dasharray="7 5"/>
+        <text x="36" y="44" class="t-gold">G = IMAFD + Zicsr + Zifencei</text>
+        <rect x="40" y="62" width="60" height="34" rx="8" class="f-accent"/><text x="70" y="84" text-anchor="middle" class="t-on-accent">I</text>
+        <rect x="112" y="62" width="60" height="34" rx="8" class="f-accent-soft"/><text x="142" y="84" text-anchor="middle" class="t t-bold">M</text>
+        <rect x="184" y="62" width="60" height="34" rx="8" class="f-accent-soft"/><text x="214" y="84" text-anchor="middle" class="t t-bold">A</text>
+        <rect x="256" y="62" width="60" height="34" rx="8" class="f-accent-soft"/><text x="286" y="84" text-anchor="middle" class="t t-bold">F</text>
+        <rect x="328" y="62" width="60" height="34" rx="8" class="f-accent-soft"/><text x="358" y="84" text-anchor="middle" class="t t-bold">D</text>
+        <rect x="200" y="122" width="90" height="34" rx="8" class="f-teal-soft"/><text x="245" y="144" text-anchor="middle" class="t-mono">Zicsr</text>
+        <rect x="40" y="122" width="100" height="34" rx="8" class="f-teal-soft"/><text x="90" y="144" text-anchor="middle" class="t-mono">Zifencei</text>
+        <path d="M328 79 H320" class="s-line" marker-end="url(#dependency-arrow)"/>
+        <path d="M286 98 L256 120" class="s-line" marker-end="url(#dependency-arrow)"/>
+        <!-- M, A 하위 -->
+        <rect x="430" y="40" width="90" height="34" rx="8" class="f-teal-soft"/><text x="475" y="62" text-anchor="middle" class="t-mono">Zmmul</text>
+        <path d="M172 70 C 300 10, 380 30, 428 52" class="s-line" marker-end="url(#dependency-arrow)"/>
+        <rect x="540" y="40" width="90" height="34" rx="8" class="f-teal-soft"/><text x="585" y="62" text-anchor="middle" class="t-mono">Zaamo</text>
+        <rect x="650" y="40" width="90" height="34" rx="8" class="f-teal-soft"/><text x="695" y="62" text-anchor="middle" class="t-mono">Zalrsc</text>
+        <text x="640" y="96" text-anchor="middle" class="t-faint">A = Zaamo + Zalrsc</text>
+        <!-- Q -->
+        <rect x="430" y="118" width="60" height="34" rx="8" class="f-accent-soft"/><text x="460" y="140" text-anchor="middle" class="t t-bold">Q</text>
+        <path d="M430 132 C 410 120, 400 100, 390 92" class="s-line" marker-end="url(#dependency-arrow)"/>
+        <!-- C 와 Zc* -->
+        <rect x="20" y="200" width="60" height="34" rx="8" class="f-accent-soft"/><text x="50" y="222" text-anchor="middle" class="t t-bold">C</text>
+        <rect x="110" y="200" width="70" height="34" rx="8" class="f-teal-soft"/><text x="145" y="222" text-anchor="middle" class="t-mono">Zca</text>
+        <rect x="110" y="250" width="70" height="34" rx="8" class="f-teal-soft"/><text x="145" y="272" text-anchor="middle" class="t-mono">Zcf</text>
+        <rect x="110" y="300" width="70" height="34" rx="8" class="f-teal-soft"/><text x="145" y="322" text-anchor="middle" class="t-mono">Zcd</text>
+        <path d="M80 217 H106" class="s-line" marker-end="url(#dependency-arrow)"/>
+        <path d="M70 236 C 80 260, 90 266, 106 267" class="s-line s-dashed" marker-end="url(#dependency-arrow)"/>
+        <path d="M56 236 C 60 300, 80 316, 106 317" class="s-line s-dashed" marker-end="url(#dependency-arrow)"/>
+        <text x="190" y="272" class="t-faint">F가 있고 RV32일 때</text>
+        <text x="190" y="322" class="t-faint">D가 있을 때</text>
+        <rect x="110" y="364" width="70" height="34" rx="8" class="f-teal-soft"/><text x="145" y="386" text-anchor="middle" class="t-mono">Zcmp</text>
+        <path d="M145 364 V334" class="s-bad" stroke-dasharray="4 3"/>
+        <circle cx="145" cy="349" r="9" class="f-bad-soft"/><text x="145" y="354" text-anchor="middle" class="t-bad" style="font-size:13px">✕</text>
+        <text x="190" y="386" class="t-bad" style="font-size:12.5px">Zcd와 c.fsdsp 인코딩을 같이 써서 함께 못 씀</text>
+        <!-- B -->
+        <rect x="420" y="200" width="60" height="34" rx="8" class="f-accent-soft"/><text x="450" y="222" text-anchor="middle" class="t t-bold">B</text>
+        <rect x="510" y="200" width="66" height="34" rx="8" class="f-teal-soft"/><text x="543" y="222" text-anchor="middle" class="t-mono">Zba</text>
+        <rect x="586" y="200" width="66" height="34" rx="8" class="f-teal-soft"/><text x="619" y="222" text-anchor="middle" class="t-mono">Zbb</text>
+        <rect x="662" y="200" width="66" height="34" rx="8" class="f-teal-soft"/><text x="695" y="222" text-anchor="middle" class="t-mono">Zbs</text>
+        <path d="M480 217 H506" class="s-line" marker-end="url(#dependency-arrow)"/>
+        <!-- V -->
+        <rect x="420" y="276" width="60" height="34" rx="8" class="f-violet-soft"/><text x="450" y="298" text-anchor="middle" class="t t-bold">V</text>
+        <rect x="510" y="276" width="90" height="34" rx="8" class="f-teal-soft"/><text x="555" y="298" text-anchor="middle" class="t-mono">Zve64d</text>
+        <rect x="620" y="276" width="96" height="34" rx="8" class="f-teal-soft"/><text x="668" y="298" text-anchor="middle" class="t-mono">Zvl128b</text>
+        <path d="M480 293 H506" class="s-line" marker-end="url(#dependency-arrow)"/>
+        <path d="M480 286 C 540 260, 600 262, 640 274" class="s-line" marker-end="url(#dependency-arrow)"/>
+        <path d="M540 276 V252 H405 V112 L384 100" class="s-line s-dashed" marker-end="url(#dependency-arrow)"/>
+        <text x="740" y="298" class="t-faint">VLEN ≥ 128</text>
+        <rect x="510" y="340" width="90" height="34" rx="8" class="f-teal-soft"/><text x="555" y="362" text-anchor="middle" class="t-mono">Zve64f</text>
+        <rect x="620" y="340" width="96" height="34" rx="8" class="f-teal-soft"/><text x="668" y="362" text-anchor="middle" class="t-mono">Zve32x</text>
+        <path d="M555 310 V336" class="s-line" marker-end="url(#dependency-arrow)"/>
+        <path d="M600 357 H616" class="s-line" marker-end="url(#dependency-arrow)"/>
+        <text x="555" y="398" text-anchor="middle" class="t-faint">… Zve32f · Zve64x 를 거쳐 Zicsr 까지</text>
+        <!-- 범례 -->
+        <text x="840" y="404" text-anchor="end" class="t-faint">→ 의존(암시)   ✕ 충돌</text>
+      </svg></div>
+      <figcaption><b>그림 2-5.</b> 대표적인 의존과 충돌. 화살표는 “이것이 있으면 저것도 있다”는 뜻이다. C는 Zca를 늘 포함하고, F·D가 함께 있으면 부동소수점 압축 적재/저장(Zcf·Zcd)까지 포함한다. V는 Zve64d와 Zvl128b에 의존하며 Zve64d는 다시 D에 의존한다. 빨간 ✕는 같은 인코딩을 다른 뜻으로 쓰기 때문에 함께 둘 수 없는 쌍이다.</figcaption>
+    </figure>
+
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>규칙</th><th>종류</th><th>규격 근거</th></tr></thead>
+      <tbody>
+        <tr><td>D → F → Zicsr, Q → D</td><td>의존</td><td>Naming 표 1, F·D·Q 장</td></tr>
+        <tr><td>M → Zmmul (곱셈만 있는 부분집합)</td><td>포함</td><td>Naming 표 1</td></tr>
+        <tr><td>C → Zca, C+F → Zcf (RV32만), C+D → Zcd</td><td>포함</td><td>Zc* 장</td></tr>
+        <tr><td>Zcmp · Zcmt ✕ Zcd</td><td>충돌</td><td>Zc* 장 (c.fsdsp 인코딩 재사용)</td></tr>
+        <tr><td>Zcf는 RV64에 없음</td><td>제약</td><td>Zc* 장</td></tr>
+        <tr><td>V → Zve64d + Zvl128b, Zve64d → D</td><td>의존</td><td>V 장</td></tr>
+        <tr><td>H는 32개 레지스터의 I 베이스 필요 (E 불가)</td><td>제약</td><td>특권 규격 H 장</td></tr>
+        <tr><td>Zfinx 계열 ↔ F 계열: 소프트웨어 서로 비호환, 같은 명령 인코딩을 다른 레지스터로 해석</td><td>대안</td><td>Zfinx 장</td></tr>
+      </tbody>
+    </table></div>
+
+    <h3>표준, 예약, custom, 그리고 비준 상태</h3>
+    <p>규격은 인코딩 공간(그리고 CSR 같은 관련 공간)을 서로 겹치지 않는 세 범주로 나눈다. <b>standard</b>는 RISC-V International이 정의한 것, <b>reserved</b>는 아직 비어 있지만 미래 표준을 위해 남긴 것, <b>custom</b>은 표준이 절대 쓰지 않겠다고 약속한 공간이다. 표준이 아닌 확장은 모두 <b>non-standard</b>이며, custom 공간만 쓰면 <b>custom 확장</b>, 표준이나 예약 공간을 건드리면 <b>non-conforming 확장</b>이 된다.</p>
+    <p>확장 규격 자체에는 개발 단계가 있다. 2019년판 매뉴얼은 각 모듈에 <b>Ratified</b>(비준), <b>Frozen</b>(비준 전 큰 변경이 없을 것으로 예상), <b>Draft</b>(비준 전에 바뀔 것으로 예상) 상태를 표시했다. 당시 V는 Draft 0.7, RV32E는 Draft 1.9였다. 2025년 판부터는 비준되지 않은 내용을 매뉴얼에서 모두 걷어 냈기 때문에, 이 책의 기준인 v20260120에 실린 모듈은 모두 Ratified다. 비준 전 확장을 컴파일러에서 쓰려면 보통 “실험적” 옵션이 필요하다.</p>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="instruction-length">
+    <h2>명령어 길이 인코딩</h2>
+    <p>모듈식 설계를 하려면 인코딩 공간도 넉넉해야 한다. RISC-V는 처음부터 <b>가변 길이 명령어</b>를 염두에 두었다. 명령은 16비트 <span class="term">파슬</span><span class="english">(parcel)</span>의 배수 길이이고, 길이는 첫 파슬의 <b>하위 비트</b>만 보면 알 수 있다. 베이스 ISA의 32비트 명령은 모두 하위 두 비트가 <code>11</code>이다. 하위 두 비트가 <code>00</code>, <code>01</code>, <code>10</code>인 공간은 선택적인 16비트 압축 명령(C, Zc*)에 쓰인다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 420" role="img" aria-label="첫 16비트 파슬의 하위 비트로 명령어 길이를 정하는 표">
+        <text x="20" y="26" class="t t-bold">첫 파슬 비트</text>
+        <g class="t-faint" style="font-family:var(--mono)">
+          <text x="231" y="26" text-anchor="middle" class="t-faint">15</text><text x="501" y="26" text-anchor="middle" class="t-faint">6</text><text x="531" y="26" text-anchor="middle" class="t-faint">5</text><text x="561" y="26" text-anchor="middle" class="t-faint">4</text><text x="591" y="26" text-anchor="middle" class="t-faint">3</text><text x="621" y="26" text-anchor="middle" class="t-faint">2</text><text x="651" y="26" text-anchor="middle" class="t-faint">1</text><text x="681" y="26" text-anchor="middle" class="t-faint">0</text>
+        </g>
+        <!-- 행 1: 16비트 -->
+        <g transform="translate(0,40)">
+          <text x="20" y="22" class="t t-bold">16비트</text>
+          <rect x="216" y="2" width="420" height="30" rx="4" class="f-surface"/><text x="426" y="22" text-anchor="middle" class="t-mono">x x x x x x x x x x x x x x</text>
+          <rect x="636" y="2" width="60" height="30" rx="4" class="f-accent-soft"/><text x="666" y="22" text-anchor="middle" class="t-mono t-bold">aa</text>
+          <text x="710" y="22" class="t-dim">aa ≠ 11</text>
+        </g>
+        <!-- 행 2: 32비트 -->
+        <g transform="translate(0,84)">
+          <text x="20" y="22" class="t t-bold">32비트</text>
+          <rect x="216" y="2" width="330" height="30" rx="4" class="f-surface"/><text x="381" y="22" text-anchor="middle" class="t-mono">x x x x x x x x x x x</text>
+          <rect x="546" y="2" width="90" height="30" rx="4" class="f-gold-soft"/><text x="591" y="22" text-anchor="middle" class="t-mono t-bold">bbb</text>
+          <rect x="636" y="2" width="60" height="30" rx="4" class="f-accent"/><text x="666" y="22" text-anchor="middle" class="t-on-accent" style="font-family:var(--mono)">11</text>
+          <text x="710" y="22" class="t-dim">bbb ≠ 111</text>
+        </g>
+        <!-- 행 3: 32비트 초과 -->
+        <g transform="translate(0,128)">
+          <text x="20" y="22" class="t t-bold">32비트 초과</text>
+          <rect x="216" y="2" width="330" height="30" rx="4" class="f-surface"/><text x="381" y="22" text-anchor="middle" class="t-mono">x x x x x x x x x x x</text>
+          <rect x="546" y="2" width="90" height="30" rx="4" class="f-violet-soft"/><text x="591" y="22" text-anchor="middle" class="t-mono t-bold">111</text>
+          <rect x="636" y="2" width="60" height="30" rx="4" class="f-accent"/><text x="666" y="22" text-anchor="middle" class="t-on-accent" style="font-family:var(--mono)">11</text>
+          <text x="710" y="22" class="t-violet">예약 (reserved)</text>
+        </g>
+        <!-- 옛 제안 -->
+        <rect x="10" y="182" width="840" height="190" rx="12" fill="none" stroke="var(--text-faint)" stroke-dasharray="6 5"/>
+        <text x="26" y="206" class="t-dim t-bold">2019년판의 “확장 길이 인코딩” 제안 (동결되지 않음, 현행 매뉴얼에서 삭제)</text>
+        <g transform="translate(0,218)">
+          <text x="26" y="22" class="t-dim">48비트</text>
+          <rect x="216" y="2" width="300" height="30" rx="4" class="f-surface"/><text x="366" y="22" text-anchor="middle" class="t-mono">x x x x x x x x x x</text>
+          <rect x="516" y="2" width="180" height="30" rx="4" class="f-violet-soft"/><text x="606" y="22" text-anchor="middle" class="t-mono">0 1 1 1 1 1</text>
+        </g>
+        <g transform="translate(0,256)">
+          <text x="26" y="22" class="t-dim">64비트</text>
+          <rect x="216" y="2" width="270" height="30" rx="4" class="f-surface"/><text x="351" y="22" text-anchor="middle" class="t-mono">x x x x x x x x x</text>
+          <rect x="486" y="2" width="210" height="30" rx="4" class="f-violet-soft"/><text x="591" y="22" text-anchor="middle" class="t-mono">0 1 1 1 1 1 1</text>
+        </g>
+        <g transform="translate(0,294)">
+          <text x="26" y="22" class="t-dim">(80+16·nnn)비트</text>
+          <rect x="216" y="2" width="30" height="30" rx="4" class="f-surface"/><text x="231" y="22" text-anchor="middle" class="t-mono">x</text>
+          <rect x="246" y="2" width="90" height="30" rx="4" class="f-gold-soft"/><text x="291" y="22" text-anchor="middle" class="t-mono t-bold">nnn</text>
+          <rect x="336" y="2" width="150" height="30" rx="4" class="f-surface"/><text x="411" y="22" text-anchor="middle" class="t-mono">x x x x x</text>
+          <rect x="486" y="2" width="210" height="30" rx="4" class="f-violet-soft"/><text x="591" y="22" text-anchor="middle" class="t-mono">1 1 1 1 1 1 1</text>
+          <text x="710" y="22" class="t-faint">nnn ≠ 111</text>
+        </g>
+        <g transform="translate(0,332)">
+          <text x="26" y="22" class="t-dim">192비트 이상</text>
+          <rect x="216" y="2" width="30" height="30" rx="4" class="f-surface"/><text x="231" y="22" text-anchor="middle" class="t-mono">x</text>
+          <rect x="246" y="2" width="90" height="30" rx="4" class="f-gold-soft"/><text x="291" y="22" text-anchor="middle" class="t-mono t-bold">111</text>
+          <rect x="336" y="2" width="150" height="30" rx="4" class="f-surface"/><text x="411" y="22" text-anchor="middle" class="t-mono">x x x x x</text>
+          <rect x="486" y="2" width="210" height="30" rx="4" class="f-violet-soft"/><text x="591" y="22" text-anchor="middle" class="t-mono">1 1 1 1 1 1 1</text>
+          <text x="710" y="22" class="t-faint">예약</text>
+        </g>
+        <text x="430" y="402" text-anchor="middle" class="t-faint">길이를 정하는 비트는 모두 첫 파슬의 아래쪽에 있다 → 첫 16비트만 읽고 길이를 안다</text>
+      </svg></div>
+      <figcaption><b>그림 2-6.</b> 명령어 길이 인코딩. 현행 v20260120 매뉴얼이 정하는 것은 16비트(하위 두 비트 ≠ 11)와 32비트(하위 두 비트 = 11, 비트 [4:2] ≠ 111)뿐이고, 비트 [4:2] = 111인 공간은 32비트보다 긴 명령을 위해 예약해 두었다. 점선 안은 2019년판이 “아직 동결되지 않은 제안”으로 실었던 48·64·80비트 이상 규칙이다.</figcaption>
+    </figure>
+
+    <p>규격은 0으로만 된 명령과 1로만 된 명령을 일부러 <b>불법 명령</b>으로 정했다. 비트 [15:0]이 모두 0이면 불법 명령이고(16비트 확장이 있으면 16비트 길이로, 없으면 32비트 길이로 본다), 비트 [ILEN-1:0]이 모두 1인 것도 불법이다. 잘못된 점프로 0으로 채워진 메모리나 지워진 플래시(모두 1)로 뛰어들면 곧바로 트랩이 나도록 하려는 것이다.</p>
+    <p>명령어는 메모리 엔디언과 관계없이 <b>16비트 리틀 엔디언 파슬의 나열</b>로 저장된다. 낮은 주소의 파슬이 명령의 낮은 비트를 담으므로, 길이를 정하는 비트가 언제나 가장 먼저 읽힌다. 아래 그림에서 명령어 가져오기 장치가 파슬을 따라가며 길이를 판정하는 모습을 보자.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 250" role="img" aria-label="16비트와 32비트 명령이 섞인 명령어 스트림에서 길이를 판정하며 진행하는 애니메이션">
+        <defs>
+          <path id="parcel-scan-path" d="M70 200 H790"/>
+          <marker id="parcel-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker>
+        </defs>
+        <text x="30" y="30" class="t t-bold">메모리 (2바이트 파슬 단위)</text>
+        <g style="font-family:var(--mono)">
+          <!-- 주소 -->
+          <text x="70" y="58" text-anchor="middle" class="t-faint">0x00</text><text x="160" y="58" text-anchor="middle" class="t-faint">0x02</text><text x="250" y="58" text-anchor="middle" class="t-faint">0x04</text><text x="340" y="58" text-anchor="middle" class="t-faint">0x06</text><text x="430" y="58" text-anchor="middle" class="t-faint">0x08</text><text x="520" y="58" text-anchor="middle" class="t-faint">0x0a</text><text x="610" y="58" text-anchor="middle" class="t-faint">0x0c</text><text x="700" y="58" text-anchor="middle" class="t-faint">0x0e</text><text x="790" y="58" text-anchor="middle" class="t-faint">0x10</text>
+        </g>
+        <!-- 파슬 상자: 16 / 32 / 32 / 16 / 32 -->
+        <rect x="28" y="68" width="84" height="44" rx="6" class="f-accent-soft"/><text x="70" y="95" text-anchor="middle" class="t-mono">…01</text>
+        <rect x="118" y="68" width="84" height="44" rx="6" class="f-gold-soft"/><text x="160" y="95" text-anchor="middle" class="t-mono">…10011</text>
+        <rect x="208" y="68" width="84" height="44" rx="6" class="f-gold-soft"/><text x="250" y="95" text-anchor="middle" class="t-faint">상위</text>
+        <rect x="298" y="68" width="84" height="44" rx="6" class="f-gold-soft"/><text x="340" y="95" text-anchor="middle" class="t-mono">…00011</text>
+        <rect x="388" y="68" width="84" height="44" rx="6" class="f-gold-soft"/><text x="430" y="95" text-anchor="middle" class="t-faint">상위</text>
+        <rect x="478" y="68" width="84" height="44" rx="6" class="f-accent-soft"/><text x="520" y="95" text-anchor="middle" class="t-mono">…10</text>
+        <rect x="568" y="68" width="84" height="44" rx="6" class="f-gold-soft"/><text x="610" y="95" text-anchor="middle" class="t-mono">…01111</text>
+        <rect x="658" y="68" width="84" height="44" rx="6" class="f-gold-soft"/><text x="700" y="95" text-anchor="middle" class="t-faint">상위</text>
+        <rect x="748" y="68" width="84" height="44" rx="6" class="f-accent-soft"/><text x="790" y="95" text-anchor="middle" class="t-mono">…00</text>
+        <!-- 명령 경계 -->
+        <path d="M28 124 v8 h84 v-8" class="s-line"/><text x="70" y="150" text-anchor="middle" class="t-accent" style="font-size:12.5px">16비트</text>
+        <path d="M118 124 v8 h174 v-8" class="s-gold"/><text x="205" y="150" text-anchor="middle" class="t-gold" style="font-size:12.5px">32비트 (OP-IMM)</text>
+        <path d="M298 124 v8 h174 v-8" class="s-gold"/><text x="385" y="150" text-anchor="middle" class="t-gold" style="font-size:12.5px">32비트 (LOAD)</text>
+        <path d="M478 124 v8 h84 v-8" class="s-line"/><text x="520" y="150" text-anchor="middle" class="t-accent" style="font-size:12.5px">16비트</text>
+        <path d="M568 124 v8 h174 v-8" class="s-gold"/><text x="655" y="150" text-anchor="middle" class="t-gold" style="font-size:12.5px">32비트 (MISC-MEM)</text>
+        <path d="M748 124 v8 h84 v-8" class="s-line"/><text x="790" y="150" text-anchor="middle" class="t-accent" style="font-size:12.5px">16비트</text>
+        <!-- 가져오기 포인터 -->
+        <use href="#parcel-scan-path" class="s-accent flow-dash"/>
+        <text x="30" y="232" class="t-faint">가져오기 장치: 첫 파슬 하위 비트 → 길이 → 다음 명령 시작 주소</text>
+        <g>
+          <circle r="8" fill="var(--accent-2)"/>
+          <animateMotion dur="6s" begin="-0.01s" repeatCount="indefinite" calcMode="discrete" keyPoints="0;0.125;0.375;0.625;0.75;1" keyTimes="0;0.17;0.34;0.51;0.68;0.85">
+            <mpath href="#parcel-scan-path"/>
+          </animateMotion>
+        </g>
+      </svg></div>
+      <figcaption><b>그림 2-7.</b> 16비트와 32비트가 섞인 명령어 스트림. 금색 점(가져오기 장치)은 매번 명령의 첫 파슬만 보고 하위 두 비트가 <code>11</code>인지에 따라 2바이트 또는 4바이트를 건너뛴다. C 확장이 있으면 32비트 명령도 2바이트 경계에 놓일 수 있다(IALIGN = 16).</figcaption>
+    </figure>
+
+    <p>규격은 명령어 주소 정렬 단위를 <b>IALIGN</b>, 구현이 지원하는 가장 긴 명령 길이를 <b>ILEN</b>이라 부른다. 베이스만 있으면 IALIGN = 32, ILEN = 32다. C 같은 확장이 IALIGN을 16으로 완화하며, IALIGN은 16이나 32 외의 값을 가질 수 없다.</p>
+    <div class="callout deep"><strong>하위 두 비트를 11로 정한 덕분</strong><p>규격 해설에 따르면 IMAFD만 구현하는 칩은 명령어 캐시에 <b>상위 30비트만</b> 저장해도 된다(6.25% 절약). 또 베이스 RV32I는 32비트 명령어 공간의 1/8도 쓰지 않으므로, C 확장이 필요 없는 구현은 하위 두 비트가 <code>00</code>·<code>01</code>·<code>10</code>인 세 공간을 비표준(non-conforming) 30비트 명령 공간 세 개로 쓸 수도 있다.</p></div>
+
+    <div class="sim" id="length-decoder-sim">
+      <div class="sim-head"><span class="sim-tag">SIMULATOR</span><h3>명령어 길이 해독기</h3></div>
+      <div class="sim-pad">
+        <div class="bit-index-row" id="length-bit-index"></div>
+        <div class="bit-row parcel-bits" id="length-bits" style="margin-top:4px"></div>
+        <div class="parcel-strip" id="length-parcels"></div>
+      </div>
+      <div class="step-description" id="length-description"></div>
+      <div class="sim-controls">
+        <div class="control"><span>예시 첫 파슬</span>
+          <div class="button-row" id="length-presets">
+            <button class="button" data-value="0x0505">c.addi a0,1</button>
+            <button class="button" data-value="0x0533">add (하위 파슬)</button>
+            <button class="button" data-value="0x000b">custom-0</button>
+            <button class="button" data-value="0x001f">…011111</button>
+            <button class="button" data-value="0x003f">…0111111</button>
+            <button class="button" data-value="0x207f">nnn=010</button>
+            <button class="button" data-value="0x0000">0x0000</button>
+          </div>
+        </div>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">첫 파슬 값</span><span class="value" id="length-value">—</span></div>
+        <div class="stat"><span class="key">현행 규격 판정</span><span class="value" id="length-current">—</span></div>
+        <div class="stat"><span class="key">2019년판 제안</span><span class="value" id="length-legacy">—</span></div>
+      </div>
+      <div class="sim-note">비트를 눌러 하위 두 비트를 <code>11</code>로 만들었다 풀었다 해 보자. 비트 [4:2]까지 모두 1로 만들면 현행 규격에서는 “예약”이 되고, 옛 제안에서는 비트 [6:5]와 [14:12]에 따라 48·64·80비트 이상으로 갈린다. 길이를 정하는 데 필요한 비트가 모두 아래쪽에 모여 있는 점에 주목하자.</div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="opcode-map">
+    <h2>주 opcode 지도와 custom 공간</h2>
+    <p>32비트 명령의 하위 7비트가 <span class="term">주 opcode</span><span class="english">(major opcode)</span>다. 하위 두 비트는 늘 <code>11</code>이므로 실제로 고르는 것은 나머지 5비트, 즉 32칸이다. 규격은 이 32칸을 비트 [6:5]를 행, 비트 [4:2]를 열로 하는 4×8 표로 정리한다. 이 표가 RISC-V 인코딩 공간의 지도다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 820 200" role="img" aria-label="32비트 명령어의 opcode 필드를 세 부분으로 나누는 그림">
+        <g style="font-family:var(--mono)">
+          <text x="30" y="30" class="t-faint">31</text><text x="520" y="30" text-anchor="end" class="t-faint">7</text>
+          <text x="560" y="30" text-anchor="middle" class="t-faint">6 5</text><text x="660" y="30" text-anchor="middle" class="t-faint">4 3 2</text><text x="760" y="30" text-anchor="middle" class="t-faint">1 0</text>
+        </g>
+        <rect x="20" y="40" width="510" height="50" rx="6" class="f-surface"/>
+        <text x="275" y="70" text-anchor="middle" class="t-dim">나머지 필드 (rd · funct3 · rs1 · rs2 · funct7 · 즉시값 …)</text>
+        <rect x="530" y="40" width="60" height="50" rx="6" class="f-violet-soft"/><text x="560" y="70" text-anchor="middle" class="t-mono t-bold">01</text>
+        <rect x="590" y="40" width="140" height="50" rx="6" class="f-gold-soft"/><text x="660" y="70" text-anchor="middle" class="t-mono t-bold">100</text>
+        <rect x="730" y="40" width="60" height="50" rx="6" class="f-accent"/><text x="760" y="70" text-anchor="middle" class="t-on-accent" style="font-family:var(--mono)">11</text>
+        <path d="M530 100 v8 h260 v-8" class="s-accent"/>
+        <text x="660" y="128" text-anchor="middle" class="t-accent">opcode = 0110011 (0x33) → OP</text>
+        <text x="560" y="160" text-anchor="middle" class="t-violet">행 inst[6:5]</text>
+        <text x="660" y="180" text-anchor="middle" class="t-gold">열 inst[4:2]</text>
+        <text x="760" y="160" text-anchor="middle" class="t-accent">32비트 표시</text>
+        <text x="275" y="128" text-anchor="middle" class="t-faint">예: add a0, a1, a2 = 0x00c58533</text>
+      </svg></div>
+      <figcaption><b>그림 2-8.</b> 주 opcode의 세 부분. <code>add</code>의 opcode <code>0110011</code>은 행 <code>01</code>, 열 <code>100</code> 칸, 곧 아래 지도의 <b>OP</b> 칸이다. 같은 칸 안에서 어떤 연산인지는 funct3·funct7이 가른다(<a href="encoding.html">4장</a>).</figcaption>
+    </figure>
+
+    <div class="sim" id="opcode-map-sim">
+      <div class="sim-head"><span class="sim-tag">EXPLORER</span><h3>RV 주 opcode 지도 (inst[1:0] = 11)</h3></div>
+      <div class="sim-pad">
+        <div class="map-scroll"><div class="opcode-map" id="opcode-map-grid"></div></div>
+        <div class="map-legend">
+          <span class="pill accent">베이스 I</span><span class="pill" style="background:var(--teal-soft);color:var(--teal);border-color:transparent">표준 확장</span><span class="pill gold">custom (표준이 쓰지 않음)</span><span class="pill">reserved</span><span class="pill" style="background:var(--violet-soft);color:var(--violet);border-color:transparent">&gt;32비트용 예약</span>
+        </div>
+      </div>
+      <div class="opcode-detail" id="opcode-detail"></div>
+      <div class="sim-note">칸 위에 마우스를 올리거나 눌러 보자. 7비트 opcode 값, 그 칸을 쓰는 명령, 다루는 장이 나타난다. 금색 custom-0~3 네 칸이 회사 전용 확장(X 확장)을 위한 안전지대다. 맨 오른쪽 열이 통째로 비어 있는 이유는 앞 절의 길이 인코딩에서 찾을 수 있다.</div>
+    </div>
+
+    <div class="callout spec"><strong>규격 원문에서</strong>
+      <blockquote>“Opcodes marked as reserved should be avoided for custom instruction-set extensions as they might be used by future standard extensions. Major opcodes marked as custom-0 through custom-3 will be avoided by future standard extensions and are recommended for use by custom instruction-set extensions within the base 32-bit instruction format.”</blockquote>
+      <p><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/rv-32-64g.html" target="_blank" rel="noopener">Volume I, RV32/64G Instruction Set Listings</a> — 이 장의 표 1이 위 지도의 원본이다.</p></div>
+    <p>custom 칸이 넷뿐이라고 작아 보이지만, 칸 하나가 32비트 명령 공간의 1/128이다. funct3·funct7을 마음대로 쓰면 칸 하나에 수천 개 명령을 넣을 수 있다. 실제로 여러 회사가 AI 가속, DSP, 보안용 명령을 custom 공간에 넣고 <code>X</code> 이름을 붙여 배포한다. 표준이 그 공간을 침범하지 않으므로, 같은 칩이 RISC-V 표준 소프트웨어를 그대로 돌리면서 자기만의 명령도 쓸 수 있다.</p>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="toolchain">
+    <h2>이름이 쓰이는 곳: 컴파일러·ELF·misa</h2>
+    <p>ISA 문자열은 문서용 꼬리표에 그치지 않는다. 컴파일러는 <code>-march</code> 옵션으로 문자열을 받아 <b>어떤 명령을 만들어도 되는지</b> 정하고, 짝꿍인 <code>-mabi</code>로 함수 호출 규약을 정한다(<a href="abi.html">7장</a>). 결과 오브젝트 파일에는 펼친 ISA 문자열이 기록되고, 링커는 서로 맞지 않는 파일을 걸러 낸다. 실행 시에는 하드웨어가 <code>misa</code> CSR로 자기가 가진 단일 문자 확장을 알려 준다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 330" role="img" aria-label="ISA 문자열이 컴파일러, 오브젝트 파일, 링커, 하드웨어 misa로 이어지는 흐름">
+        <defs><marker id="toolchain-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker></defs>
+        <rect x="20" y="30" width="250" height="80" rx="12" class="f-elev"/>
+        <text x="145" y="56" text-anchor="middle" class="t t-bold">컴파일 명령</text>
+        <text x="145" y="80" text-anchor="middle" class="t-mono" style="font-size:12.5px">gcc -march=rv64gc_zba</text>
+        <text x="145" y="98" text-anchor="middle" class="t-mono" style="font-size:12.5px">    -mabi=lp64d  x.c</text>
+        <path d="M272 70 H318" class="s-accent flow-dash" marker-end="url(#toolchain-arrow)"/>
+        <rect x="322" y="30" width="200" height="80" rx="12" class="f-accent-soft"/>
+        <text x="422" y="56" text-anchor="middle" class="t t-bold">코드 생성</text>
+        <text x="422" y="78" text-anchor="middle" class="t-dim">Zba 있으면 sh1add 사용</text>
+        <text x="422" y="96" text-anchor="middle" class="t-dim">C 있으면 16비트 명령 섞기</text>
+        <path d="M524 70 H570" class="s-accent flow-dash" marker-end="url(#toolchain-arrow)"/>
+        <rect x="574" y="30" width="266" height="80" rx="12" class="f-elev"/>
+        <text x="707" y="56" text-anchor="middle" class="t t-bold">x.o · .riscv.attributes</text>
+        <text x="707" y="78" text-anchor="middle" class="t-mono" style="font-size:11px">Tag_RISCV_arch = "rv64i2p1_m2p0_a2p1_</text>
+        <text x="707" y="96" text-anchor="middle" class="t-mono" style="font-size:11px">f2p2_d2p2_c2p0_zicsr2p0_…_zba1p0"</text>
+        <path d="M707 112 V150" class="s-accent flow-dash" marker-end="url(#toolchain-arrow)"/>
+        <rect x="574" y="154" width="266" height="70" rx="12" class="f-gold-soft"/>
+        <text x="707" y="180" text-anchor="middle" class="t t-bold">링커</text>
+        <text x="707" y="202" text-anchor="middle" class="t-dim">ISA는 합집합으로 합치고</text>
+        <text x="707" y="218" text-anchor="middle" class="t-dim">ABI·스택 정렬이 다르면 오류</text>
+        <path d="M572 189 H462" class="s-accent flow-dash" marker-end="url(#toolchain-arrow)"/>
+        <rect x="262" y="154" width="196" height="70" rx="12" class="f-elev"/>
+        <text x="360" y="182" text-anchor="middle" class="t t-bold">실행 파일</text>
+        <text x="360" y="204" text-anchor="middle" class="t-dim">rv64gc_zba 칩을 기대</text>
+        <path d="M260 189 H170" class="s-accent flow-dash" marker-end="url(#toolchain-arrow)"/>
+        <rect x="20" y="154" width="148" height="70" rx="12" class="f-violet-soft"/>
+        <text x="94" y="182" text-anchor="middle" class="t t-bold">하드웨어</text>
+        <text x="94" y="204" text-anchor="middle" class="t-mono">misa CSR</text>
+        <!-- misa 비트 -->
+        <text x="20" y="262" class="t-dim">misa (RV64) = 0x800000000014112D 의 아래 26비트: 글자마다 한 비트</text>
+        <g transform="translate(20,272)" style="font-family:var(--mono)">
+          <rect x="0" width="30" height="34" rx="4" class="f-surface"/><text x="15" y="22" text-anchor="middle" class="t-faint">Z</text>
+          <text x="40" y="22" class="t-faint">…</text>
+          <rect x="60" width="30" height="34" rx="4" class="f-violet-soft"/><text x="75" y="22" text-anchor="middle" class="t-mono">U</text>
+          <rect x="94" width="30" height="34" rx="4" class="f-surface"/><text x="109" y="22" text-anchor="middle" class="t-faint">T</text>
+          <rect x="128" width="30" height="34" rx="4" class="f-violet-soft"/><text x="143" y="22" text-anchor="middle" class="t-mono">S</text>
+          <text x="168" y="22" class="t-faint">…</text>
+          <rect x="190" width="30" height="34" rx="4" class="f-accent-soft"/><text x="205" y="22" text-anchor="middle" class="t-mono">M</text>
+          <text x="230" y="22" class="t-faint">…</text>
+          <rect x="252" width="30" height="34" rx="4" class="f-accent-soft"/><text x="267" y="22" text-anchor="middle" class="t-mono">I</text>
+          <rect x="286" width="30" height="34" rx="4" class="f-surface"/><text x="301" y="22" text-anchor="middle" class="t-faint">H</text>
+          <rect x="320" width="30" height="34" rx="4" class="f-surface"/><text x="335" y="22" text-anchor="middle" class="t-faint">G</text>
+          <rect x="354" width="30" height="34" rx="4" class="f-accent-soft"/><text x="369" y="22" text-anchor="middle" class="t-mono">F</text>
+          <rect x="388" width="30" height="34" rx="4" class="f-surface"/><text x="403" y="22" text-anchor="middle" class="t-faint">E</text>
+          <rect x="422" width="30" height="34" rx="4" class="f-accent-soft"/><text x="437" y="22" text-anchor="middle" class="t-mono">D</text>
+          <rect x="456" width="30" height="34" rx="4" class="f-accent-soft"/><text x="471" y="22" text-anchor="middle" class="t-mono">C</text>
+          <rect x="490" width="30" height="34" rx="4" class="f-surface"/><text x="505" y="22" text-anchor="middle" class="t-faint">B</text>
+          <rect x="524" width="30" height="34" rx="4" class="f-accent-soft"/><text x="539" y="22" text-anchor="middle" class="t-mono">A</text>
+          <text x="580" y="22" class="t-dim" style="font-family:var(--font)">← 비트 0</text>
+          <text x="660" y="22" class="t-faint" style="font-family:var(--font)">MXL=2 (64비트)</text>
+        </g>
+      </svg></div>
+      <figcaption><b>그림 2-9.</b> ISA 문자열의 여정. psABI는 <code>Tag_RISCV_arch</code> 속성에 소문자, 밑줄 구분, 버전 명시, 줄임말 펼침 형태로 기록하라고 정한다. 아래는 RV64IMAFDC + S·U 모드 칩의 <code>misa</code> 값으로, 비트 0이 A, 비트 25가 Z인 글자 비트다. 여러 글자 확장은 <code>misa</code>에 나타나지 않으므로 장치 트리 같은 다른 수단으로 알린다. <code>misa</code>는 <a href="privilege.html">17장</a>에서 자세히 본다.</figcaption>
+    </figure>
+
+    <div class="callout spec"><strong>psABI 원문에서</strong>
+      <blockquote>“the architecture rv32g has to be presented as rv32i2p1_m2p0_a2p1_f2p2_d2p2_zicsr2p0_zifencei2p0 in which the abbreviation g is expanded to the imafd_zicsr_zifencei combination with default versions of the standard extensions.”</blockquote>
+      <p><a href="https://docs.riscv.org/reference/abi/index.html" target="_blank" rel="noopener">RISC-V ABIs Specification v1.0 — 8.11 Attributes</a></p></div>
+    <div class="callout warn"><strong>“rv64imafdc”와 “rv64gc”는 다르다</strong><p>Zicsr와 Zifencei가 베이스에서 분리된 뒤로, 2019년 이후 규격을 따르는 툴체인에서 <code>-march=rv64imafdc</code>에는 <code>fence.i</code>가 들어 있지 않다(F가 Zicsr를 암시하므로 CSR 명령은 쓸 수 있다). G는 정의상 둘 다 포함하므로 범용 리눅스 코드는 보통 <code>rv64gc</code>를 쓴다. 최근 GCC·LLVM은 <code>-march=rva23u64</code>처럼 프로파일 이름을 직접 받기도 한다.</p></div>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>상황</th><th>흔한 -march / -mabi</th></tr></thead>
+      <tbody>
+        <tr><td>작은 MCU (곱셈·압축)</td><td><code>-march=rv32imc -mabi=ilp32</code></td></tr>
+        <tr><td>초소형 E 코어</td><td><code>-march=rv32ec -mabi=ilp32e</code></td></tr>
+        <tr><td>단정밀도 FPU 달린 MCU</td><td><code>-march=rv32imafc -mabi=ilp32f</code></td></tr>
+        <tr><td>64비트 리눅스 (전통적 기준선)</td><td><code>-march=rv64gc -mabi=lp64d</code></td></tr>
+        <tr><td>RVA23 리눅스 배포판</td><td><code>-march=rva23u64 -mabi=lp64d</code> (프로파일 이름을 아는 툴체인)</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <section class="keypoints" id="summary">
+    <h2>핵심 정리</h2>
+    <ol>
+      <li>RISC-V ISA = <b>베이스 하나</b>(RV32I·RV64I·RV32E·RV64E) + <b>선택 확장</b>. 베이스와 비준된 확장은 시간이 지나도 바뀌지 않고, 새 기능은 새 확장으로 얹는다. RV128I 스케치는 현행 매뉴얼에서 빠졌다.</li>
+      <li>단일 문자 확장의 정규 순서는 <code>I E M A F D G Q C B P V H</code>이고, <code>G</code> = <code>IMAFDZicsr_Zifencei</code>다.</li>
+      <li>여러 글자 확장은 <b>Z</b>(비특권) → <b>Ss/Sv</b>(감독자) → <b>Sh</b>(하이퍼바이저) → <b>Sm</b>(머신) → <b>X</b>(비표준) 순서로 밑줄을 넣어 잇는다. Z는 분류 문자(<code>IMAFDQLCBKJTPVH</code>) 순, 같은 분류 안에서는 알파벳 순이다.</li>
+      <li>버전은 <code>주버전p부버전</code>(예: <code>i2p1</code>)으로 붙이며 <code>p0</code>은 생략할 수 있다. 버전이 붙은 확장 뒤의 P에는 밑줄이 필요하다.</li>
+      <li>확장은 서로 의존한다(D→F→Zicsr, V→Zve64d→D, C+D→Zcd). Zcmp·Zcmt와 Zcd처럼 인코딩이 겹쳐 함께 쓸 수 없는 쌍도 있다.</li>
+      <li>하위 두 비트가 <code>11</code>이 아니면 16비트, <code>11</code>이고 비트 [4:2]가 <code>111</code>이 아니면 32비트 명령이다. 비트 [4:2] = 111은 더 긴 명령을 위해 예약되어 있다.</li>
+      <li>주 opcode 지도의 custom-0~3은 표준이 쓰지 않기로 약속한 공간으로, 회사 전용 X 확장이 들어가는 자리다.</li>
+    </ol>
+  </section>
+
+  <section id="quiz">
+    <h2>확인 퀴즈</h2>
+    <div class="quiz">
+      <div class="quiz-question"><p>다음 중 규격의 정규 순서를 지킨 ISA 문자열은?</p><div class="options">
+        <button class="option">rv32imavc</button>
+        <button class="option" data-correct>rv32imacv</button>
+        <button class="option">rv32iamcv</button>
+        <button class="option">rv32icmav</button>
+      </div><div class="quiz-explanation">단일 문자 순서는 I E M A F D G Q C B P V H다. C가 V보다 앞에 와야 한다. 규격이 직접 드는 예가 “RV32IMACV는 올바르고 RV32IMAVC는 아니다”이다.</div></div>
+      <div class="quiz-question"><p><code>G</code>를 풀어 쓴 것으로 옳은 것은?</p><div class="options">
+        <button class="option">IMAFDC</button>
+        <button class="option">IMAFD</button>
+        <button class="option" data-correct>IMAFD_Zicsr_Zifencei</button>
+        <button class="option">IMAFDQ_Zicsr</button>
+      </div><div class="quiz-explanation">G는 IMAFDZicsr_Zifencei의 줄임말이다. C는 포함되지 않으므로 리눅스용으로는 흔히 “GC”라고 쓴다.</div></div>
+      <div class="quiz-question"><p>여러 Z 확장을 올바른 순서로 나열한 것은?</p><div class="options">
+        <button class="option">zba_zicsr_zfh</button>
+        <button class="option">zicsr_zba_zfh</button>
+        <button class="option" data-correct>zicsr_zfh_zba</button>
+        <button class="option">zfh_zicsr_zba</button>
+      </div><div class="quiz-explanation">먼저 분류 문자 순서(I M A F D Q L C B …)를 따른다. zicsr(I) → zfh(F) → zba(B)다.</div></div>
+      <div class="quiz-question"><p><code>rv32i2_p2</code>의 뜻은?</p><div class="options">
+        <button class="option">RV32I 버전 2.2</button>
+        <button class="option" data-correct>RV32I 버전 2.0과 P 확장 버전 2.0</button>
+        <button class="option">RV32I 버전 2.0, 프로파일 2</button>
+        <button class="option">잘못된 문자열</button>
+      </div><div class="quiz-explanation">밑줄이 버전 구분자 p와 P 확장을 갈라 준다. <code>rv32i2p2</code>였다면 RV32I 버전 2.2다.</div></div>
+      <div class="quiz-question"><p>첫 16비트 파슬의 하위 비트가 <code>...10111</code>일 때 이 명령의 길이는? (현행 규격)</p><div class="options">
+        <button class="option">16비트</button>
+        <button class="option" data-correct>32비트</button>
+        <button class="option">48비트</button>
+        <button class="option">예약된 더 긴 명령</button>
+      </div><div class="quiz-explanation">하위 두 비트가 11이고 비트 [4:2] = 101 ≠ 111이므로 32비트다. 0010111은 AUIPC opcode다.</div></div>
+      <div class="quiz-question"><p>회사가 자기만의 명령을 넣으려 할 때 규격이 권하는 주 opcode는?</p><div class="options">
+        <button class="option">reserved 칸 아무거나</button>
+        <button class="option">OP-IMM 칸의 남는 funct3</button>
+        <button class="option" data-correct>custom-0 ~ custom-3</button>
+        <button class="option">SYSTEM 칸</button>
+      </div><div class="quiz-explanation">reserved는 미래 표준이 쓸 수 있고, 표준 칸에 끼워 넣으면 non-conforming 확장이 된다. custom-0~3은 표준이 쓰지 않기로 약속한 공간이다.</div></div>
+      <div class="quiz-question"><p><code>rv32imafdc_zcmp</code>가 문제인 이유는?</p><div class="options">
+        <button class="option">Zcmp는 RV64 전용이라서</button>
+        <button class="option" data-correct>C+D가 Zcd를 포함하는데 Zcmp가 Zcd와 같은 인코딩을 써서</button>
+        <button class="option">Z 확장 앞에 밑줄이 없어서</button>
+        <button class="option">F와 D를 함께 쓸 수 없어서</button>
+      </div><div class="quiz-explanation">Zcmp(와 Zcmt)는 c.fsdsp 인코딩 일부를 재사용하므로 Zcd와 함께 둘 수 없다. 그래서 Zcmp는 주로 D가 없는 임베디드 코어용이다.</div></div>
+    </div>
+  </section>
+
+  <section id="references">
+    <h2>더 읽을거리</h2>
+    <ul class="references">
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/naming.html" target="_blank" rel="noopener">Volume I — ISA Extension Naming Conventions</a> (v20260120)</li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/intro.html" target="_blank" rel="noopener">Volume I — Introduction (RISC-V ISA Overview, Base Instruction-Length Encoding)</a></li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32e.html" target="_blank" rel="noopener">Volume I — RV32E and RV64E Base Integer Instruction Sets, Version 2.0</a></li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/rv-32-64g.html" target="_blank" rel="noopener">Volume I — RV32/64G Instruction Set Listings (opcode map)</a></li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/zc.html" target="_blank" rel="noopener">Volume I — Zc* 확장 (C·Zca·Zcf·Zcd·Zcmp 관계)</a></li>
+      <li><a href="https://docs.riscv.org/reference/abi/index.html" target="_blank" rel="noopener">RISC-V ABIs Specification v1.0 — Attributes (Tag_RISCV_arch)</a></li>
+      <li><a href="https://docs.riscv.org/reference/rva23/index.html" target="_blank" rel="noopener">RVA23 Profiles</a> — 시뮬레이터의 프로파일 비교 기준</li>
+    </ul>
+  </section>
+</main>
+
+<script>
+/* ---------------------------------------------------------------------------
+   ISA 문자열 해독기·조립기
+   규격의 이름 규칙(naming.html)대로 문자열을 쪼개고, 정규 순서로 다시 잇고,
+   이 도구가 아는 대표적인 의존·충돌 규칙을 적용해 경고를 보여 준다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+
+  // 규격 표 1의 위→아래 순서가 곧 문자열의 앞→뒤 순서다
+  const SINGLE_LETTER_ORDER = ["i", "e", "m", "a", "f", "d", "g", "q", "c", "b", "p", "v", "h"];
+  // Z 확장의 두 번째 글자가 속하는 분류 순서
+  const CATEGORY_ORDER = "imafdqlcbkjtpvh";
+  const G_EXPANSION = ["i", "m", "a", "f", "d", "zicsr", "zifencei"];
+  const NOT_FOUND = -1;
+  const UNKNOWN_CATEGORY_RANK = 99;
+  const MAXIMUM_MISSING_SHOWN = 6;
+  const DEFAULT_XLEN = 64;
+  const LEGACY_XLEN = 128;
+
+  // 단일 문자 확장 설명
+  const SINGLE_LETTER_INFO = {
+    i: "베이스 정수 (레지스터 32개)", e: "베이스 정수 (레지스터 16개)", m: "곱셈·나눗셈", a: "원자적 연산",
+    f: "단정밀도 FP", d: "배정밀도 FP", g: "IMAFD_Zicsr_Zifencei 줄임말", q: "4배정밀도 FP",
+    c: "압축 명령", b: "비트 조작", p: "Packed-SIMD (미비준)", v: "벡터", h: "하이퍼바이저",
+  };
+
+  // 이 도구가 아는 여러 글자 확장 (모두 비준된 것만 담았다)
+  const KNOWN_MULTI_LETTER = [
+    "zicsr", "zifencei", "zicntr", "zihpm", "zihintpause", "zihintntl", "zicond", "zimop", "zicbom", "zicbop", "zicboz",
+    "zic64b", "ziccif", "ziccrse", "ziccamoa", "zicclsm", "zicfilp", "zicfiss", "zilsd",
+    "zmmul", "zaamo", "zalrsc", "zawrs", "zacas", "zabha", "zalasr", "za64rs", "za128rs", "ztso",
+    "zfh", "zfhmin", "zfa", "zfinx", "zdinx", "zhinx", "zhinxmin", "zfbfmin",
+    "zca", "zcb", "zcd", "zcf", "zcmp", "zcmt", "zce", "zcmop", "zclsd",
+    "zba", "zbb", "zbs", "zbc", "zbkb", "zbkc", "zbkx",
+    "zk", "zkn", "zkne", "zknd", "zknh", "zkr", "zks", "zksed", "zksh", "zkt",
+    "zve32x", "zve32f", "zve64x", "zve64f", "zve64d", "zvl32b", "zvl64b", "zvl128b", "zvl256b", "zvl512b", "zvl1024b",
+    "zvfh", "zvfhmin", "zvfbfmin", "zvfbfwma", "zvbb", "zvbc", "zvkb", "zvkg", "zvkned", "zvknha", "zvknhb", "zvksed", "zvksh", "zvkt",
+    "zvkn", "zvknc", "zvkng", "zvks", "zvksc", "zvksg",
+    "sstc", "sscofpmf", "ssaia", "smaia", "smstateen", "ssstateen", "smepmp", "smrnmi", "smcntrpmf", "smcdeleg", "ssccfg",
+    "svinval", "svnapot", "svpbmt", "svadu", "svade", "svbare", "sv32", "sv39", "sv48", "sv57", "supm", "ssnpm", "smnpm", "smmpm",
+  ];
+  // 이름이 숫자로 끝나도 되는, 규칙 이전에 정해진 이름들
+  const LEGACY_NUMERIC_NAMES = ["sv32", "sv39", "sv48", "sv57"];
+
+  // 현행 규격의 버전 (v20260120 서문 표와 특권 규격 H 장)
+  const KNOWN_VERSIONS = {
+    i: "2p1", e: "2p0", m: "2p0", a: "2p1", f: "2p2", d: "2p2", q: "2p2", c: "2p0", b: "1p0", v: "1p0", h: "1p0",
+    zifencei: "2p0", zicsr: "2p0", zicntr: "2p0", zihintntl: "1p0", zihintpause: "2p0", zimop: "1p0", zicond: "1p0",
+    zilsd: "1p0", zmmul: "1p0", zawrs: "1p01", zacas: "1p0", zabha: "1p0", zalasr: "1p0", ztso: "1p0",
+    zfh: "1p0", zfhmin: "1p0", zfa: "1p0", zfinx: "1p0", zdinx: "1p0", zhinx: "1p0", zhinxmin: "1p0",
+    zce: "1p0", zclsd: "1p0", zbkb: "1p0", zbkc: "1p0", zbkx: "1p0", zk: "1p0", zks: "1p0",
+    zvbb: "1p0", zvbc: "1p0", zvkg: "1p0", zvkned: "1p0", zvknhb: "1p0", zvksed: "1p0", zvksh: "1p0", zvkt: "1p0",
+    zicfiss: "1p0", zicfilp: "1p0",
+  };
+
+  /*
+   * 의존(암시) 규칙. 함수는 지금까지 모인 집합과 XLEN을 받아, 추가로 들어와야 할 이름을 돌려준다.
+   * C 처럼 다른 확장 유무에 따라 결과가 달라지는 규칙이 있어서 함수 형태로 두었다.
+   */
+  const IMPLICATION_RULES = {
+    g: () => G_EXPANSION,
+    m: () => ["zmmul"],
+    a: () => ["zaamo", "zalrsc"],
+    f: () => ["zicsr"],
+    d: () => ["f"],
+    q: () => ["d"],
+    b: () => ["zba", "zbb", "zbs"],
+    c: (extensionSet, xlen) => {
+      const implied = ["zca"];
+      if (extensionSet.has("f") && xlen === 32) implied.push("zcf");
+      if (extensionSet.has("d")) implied.push("zcd");
+      return implied;
+    },
+    v: () => ["zve64d", "zvl128b"],
+    zve64d: () => ["zve64f", "d"],
+    zve64f: () => ["zve32f", "zve64x"],
+    zve32f: () => ["zve32x", "f"],
+    zve64x: () => ["zve32x", "zvl64b"],
+    zve32x: () => ["zicsr", "zvl32b"],
+    zvl1024b: () => ["zvl512b"], zvl512b: () => ["zvl256b"], zvl256b: () => ["zvl128b"], zvl128b: () => ["zvl64b"], zvl64b: () => ["zvl32b"],
+    zvfh: () => ["zve32f", "zfhmin"],
+    zvfhmin: () => ["zve32f"],
+    zvbb: () => ["zvkb"],
+    zvkb: () => ["zve32x"],
+    zvkt: () => [],
+    zfh: () => ["zfhmin"],
+    zfhmin: () => ["f"],
+    zfa: () => ["f"],
+    zfbfmin: () => ["f"],
+    zfinx: () => ["zicsr"],
+    zdinx: () => ["zfinx"],
+    zhinx: () => ["zhinxmin"],
+    zhinxmin: () => ["zfinx"],
+    zcb: () => ["zca"],
+    zcf: () => ["zca", "f"],
+    zcd: () => ["zca", "d"],
+    zcmp: () => ["zca"],
+    zcmt: () => ["zca", "zicsr"],
+    zcmop: () => ["zca"],
+    zclsd: () => ["zilsd", "zca"],
+    zce: (extensionSet, xlen) => {
+      const implied = ["zca", "zcb", "zcmp", "zcmt"];
+      if (extensionSet.has("f") && xlen === 32) implied.push("zcf");
+      return implied;
+    },
+    zicntr: () => ["zicsr"],
+    zihpm: () => ["zicsr"],
+    zicfilp: () => ["zicsr"],
+    zicfiss: () => ["zicsr", "zimop", "zaamo"],
+    zacas: () => ["zaamo"],
+    zabha: () => ["zaamo"],
+    zk: () => ["zkn", "zkr", "zkt"],
+    zkn: () => ["zbkb", "zbkc", "zbkx", "zkne", "zknd", "zknh"],
+    zks: () => ["zbkb", "zbkc", "zbkx", "zksed", "zksh"],
+  };
+
+  // 프로파일이 요구하는 명령어 확장 (메모리·캐시 성질을 나타내는 이름은 따로 표시만 한다)
+  const RVA20U64_REQUIRED = ["i", "m", "a", "f", "d", "c", "zicsr", "zicntr"];
+  const RVA22U64_REQUIRED = RVA20U64_REQUIRED.concat(["zihpm", "zihintpause", "zba", "zbb", "zbs", "zicbom", "zicbop", "zicboz", "zfhmin", "zkt"]);
+  const RVA23U64_REQUIRED = RVA22U64_REQUIRED.concat(["v", "zvfhmin", "zvbb", "zvkt", "zihintntl", "zicond", "zimop", "zcmop", "zcb", "zfa", "zawrs", "supm"]);
+  const PROFILES = [
+    { name: "RVI20U32", xlen: 32, required: ["i"], note: "RV32I만" },
+    { name: "RVI20U64", xlen: 64, required: ["i"], note: "RV64I만" },
+    { name: "RVA20U64", xlen: 64, required: RVA20U64_REQUIRED, note: "+ Ziccif·Ziccrse·Ziccamoa·Za128rs·Zicclsm 성질" },
+    { name: "RVA22U64", xlen: 64, required: RVA22U64_REQUIRED, note: "+ Zic64b·Za64rs 등 성질" },
+    { name: "RVA23U64", xlen: 64, required: RVA23U64_REQUIRED, note: "+ Zic64b·Za64rs 등 성질" },
+  ];
+
+  const TOGGLE_NAMES = ["m", "a", "f", "d", "q", "c", "b", "v", "h", "zicsr", "zifencei", "zicntr", "zihpm", "zicond", "zba", "zbb", "zbs", "zfh", "zfa", "zcb", "zcmp", "zfinx", "zvbb", "sstc", "svnapot"];
+
+  /* ------------------------------------------------ 문자열 → 구조 */
+  function parseIsaString(rawText) {
+    const text = String(rawText).trim().toLowerCase();
+    const result = { xlen: null, base: null, singles: [], multis: [], versions: {}, errors: [], warnings: [], infos: [] };
+    const prefixMatch = text.match(/^rv(32|64|128)/);
+    if (!prefixMatch) {
+      result.errors.push("문자열은 rv32 또는 rv64로 시작해야 한다.");
+      return result;
+    }
+    result.xlen = Number(prefixMatch[1]);
+    if (result.xlen === LEGACY_XLEN) {
+      result.errors.push("RV128은 현행 매뉴얼(v20260120)에 정의되어 있지 않다. 최근 개정에서 스케치가 삭제되었다.");
+    }
+    let position = prefixMatch[0].length;
+    const baseLetter = text.charAt(position);
+    if (baseLetter !== "i" && baseLetter !== "e" && baseLetter !== "g") {
+      result.errors.push("XLEN 바로 뒤에는 베이스 문자 i 또는 e(혹은 줄임말 g)가 와야 한다.");
+      return result;
+    }
+    result.base = baseLetter === "e" ? "e" : "i";
+    let hasSeenMultiLetter = false;
+    const seenNames = new Set();
+
+    const addName = (name, version, isMultiLetter) => {
+      if (seenNames.has(name)) {
+        result.warnings.push("‘" + name + "’가 두 번 나온다.");
+        return;
+      }
+      seenNames.add(name);
+      if (version) result.versions[name] = version;
+      if (isMultiLetter) result.multis.push(name);
+      else result.singles.push(name);
+    };
+
+    // 베이스 문자 자체에도 버전이 붙을 수 있다 (rv64i2p1)
+    position += 1;
+    const baseVersionMatch = text.slice(position).match(/^\d+(p\d+)?/);
+    if (baseLetter === "g") {
+      addName("g", null, false);
+    } else {
+      seenNames.add(result.base);
+      if (baseVersionMatch) result.versions[result.base] = baseVersionMatch[0];
+    }
+    if (baseVersionMatch) position += baseVersionMatch[0].length;
+
+    while (position < text.length) {
+      const character = text.charAt(position);
+      if (character === "_") {
+        position += 1;
+        continue;
+      }
+      if (character === "z" || character === "s" || character === "x") {
+        let endPosition = text.indexOf("_", position);
+        if (endPosition === NOT_FOUND) endPosition = text.length;
+        const token = text.slice(position, endPosition);
+        position = endPosition;
+        hasSeenMultiLetter = true;
+        let name = token;
+        let version = null;
+        if (!LEGACY_NUMERIC_NAMES.includes(token)) {
+          const versionMatch = token.match(/^(.*?[a-z])(\d+(p\d+)?)$/);
+          if (versionMatch) {
+            name = versionMatch[1];
+            version = versionMatch[2];
+          }
+        }
+        if (/[0-9]$/.test(name) && !LEGACY_NUMERIC_NAMES.includes(name)) {
+          result.errors.push("‘" + token + "’: 여러 글자 확장 이름은 영문자로 끝나야 한다.");
+        }
+        addName(name, version, true);
+        continue;
+      }
+      if (/[a-z]/.test(character)) {
+        if (hasSeenMultiLetter) {
+          result.warnings.push("단일 문자 ‘" + character + "’가 여러 글자 확장 뒤에 나온다. 단일 문자는 모두 앞쪽에 모아야 한다.");
+        }
+        position += 1;
+        const versionMatch = text.slice(position).match(/^\d+(p\d+)?/);
+        let version = null;
+        if (versionMatch) {
+          version = versionMatch[0];
+          position += version.length;
+        }
+        if (character === "i" || character === "e") {
+          result.errors.push("베이스 문자 ‘" + character + "’는 맨 앞에 한 번만 올 수 있다.");
+          continue;
+        }
+        if (!SINGLE_LETTER_ORDER.includes(character)) {
+          result.errors.push("‘" + character + "’는 규격 표 1에 있는 단일 문자 확장이 아니다.");
+          continue;
+        }
+        addName(character, version, false);
+        continue;
+      }
+      result.errors.push("알 수 없는 문자 ‘" + character + "’.");
+      position += 1;
+    }
+    return result;
+  }
+
+  /* ------------------------------------------------ 정렬 규칙 */
+  function multiLetterGroupRank(name) {
+    if (name.startsWith("z")) return 0;
+    if (name.startsWith("sh")) return 2;
+    if (name.startsWith("sm")) return 3;
+    if (name.startsWith("s")) return 1;
+    return 4;
+  }
+  function compareMultiLetter(left, right) {
+    const groupDifference = multiLetterGroupRank(left) - multiLetterGroupRank(right);
+    if (groupDifference !== 0) return groupDifference;
+    if (left.startsWith("z") && right.startsWith("z")) {
+      const leftCategory = CATEGORY_ORDER.indexOf(left.charAt(1));
+      const rightCategory = CATEGORY_ORDER.indexOf(right.charAt(1));
+      const leftRank = leftCategory === NOT_FOUND ? UNKNOWN_CATEGORY_RANK : leftCategory;
+      const rightRank = rightCategory === NOT_FOUND ? UNKNOWN_CATEGORY_RANK : rightCategory;
+      if (leftRank !== rightRank) return leftRank - rightRank;
+    }
+    if (left < right) return -1;
+    if (left > right) return 1;
+    return 0;
+  }
+  function compareSingleLetter(left, right) {
+    return SINGLE_LETTER_ORDER.indexOf(left) - SINGLE_LETTER_ORDER.indexOf(right);
+  }
+  function isSameOrder(listA, listB) {
+    return listA.length === listB.length && listA.every((value, index) => value === listB[index]);
+  }
+
+  /* ------------------------------------------------ 의존 펼치기 */
+  function expandImplications(parsed) {
+    const extensionSet = new Set([parsed.base].concat(parsed.singles, parsed.multis));
+    let hasChanged = true;
+    while (hasChanged) {
+      hasChanged = false;
+      Array.from(extensionSet).forEach((name) => {
+        const rule = IMPLICATION_RULES[name];
+        if (!rule) return;
+        rule(extensionSet, parsed.xlen).forEach((impliedName) => {
+          if (!extensionSet.has(impliedName)) {
+            extensionSet.add(impliedName);
+            hasChanged = true;
+          }
+        });
+      });
+    }
+    extensionSet.delete("g");
+    return extensionSet;
+  }
+
+  function buildName(xlen, base, singles, multis, versionFor) {
+    const versioned = (name) => name + (versionFor ? versionFor(name) : "");
+    let text = "rv" + xlen + versioned(base);
+    const singleParts = singles.map(versioned);
+    if (versionFor) {
+      // 버전이 붙으면 경계가 모호해지므로 모든 확장 사이에 밑줄을 넣는다
+      return [text].concat(singleParts, multis.map(versioned)).join("_");
+    }
+    text += singleParts.join("");
+    if (multis.length) text += "_" + multis.map(versioned).join("_");
+    return text;
+  }
+
+  /* ------------------------------------------------ 검사 */
+  function checkConflicts(parsed, extensionSet, messages) {
+    const has = (name) => extensionSet.has(name);
+    if (parsed.base === "e" && has("h")) messages.errors.push("H 확장은 32개 레지스터의 I 베이스(RV32I/RV64I)를 요구한다. E 베이스와 함께 쓸 수 없다.");
+    if (has("zcd") && (has("zcmp") || has("zcmt"))) messages.errors.push("Zcmp·Zcmt는 c.fsdsp 인코딩 일부를 재사용하므로 Zcd(C+D면 자동 포함)와 함께 쓸 수 없다.");
+    if (parsed.xlen === 64 && parsed.multis.includes("zcf")) messages.errors.push("Zcf는 RV32 전용이다. RV64에는 존재하지 않는다.");
+    if (parsed.xlen === 64 && (has("zilsd") || has("zclsd"))) messages.errors.push("Zilsd·Zclsd는 RV32 전용 적재/저장 쌍 확장이다.");
+    if (has("zclsd") && has("zcf")) messages.errors.push("Zclsd는 Zcf와 인코딩이 겹쳐 함께 쓸 수 없다.");
+    if (has("f") && has("zfinx")) messages.errors.push("Zfinx 계열은 F 계열과 같은 명령을 x 레지스터로 해석하는 대안이다. 둘을 함께 지정할 수 없다.");
+    if (parsed.singles.includes("p")) messages.warnings.push("P(Packed-SIMD)는 아직 비준되지 않았다.");
+    if (parsed.singles.includes("g")) {
+      const redundant = parsed.singles.filter((name) => ["m", "a", "f", "d"].includes(name)).concat(parsed.multis.filter((name) => name === "zicsr" || name === "zifencei"));
+      if (redundant.length) messages.infos.push("G가 이미 " + redundant.join(", ") + "를 포함한다. 적어도 틀리지는 않지만 중복이다.");
+    }
+    parsed.multis.forEach((name) => {
+      if (name.startsWith("x")) {
+        messages.infos.push("‘" + name + "’는 비표준(X) 확장이다. 규격은 이름 위치만 정하고 내용은 관여하지 않는다.");
+      } else if (!KNOWN_MULTI_LETTER.includes(name)) {
+        messages.warnings.push("‘" + name + "’는 이 도구의 목록에 없는 이름이다. 오타인지 확인하자.");
+      }
+    });
+  }
+
+  function computeMisaLetterBits(extensionSet, base) {
+    const letters = ["a", "b", "c", "d", "f", "h", "m", "q", "v"];
+    const codeOfA = "a".charCodeAt(0);
+    let value = 0;
+    letters.forEach((letter) => {
+      if (extensionSet.has(letter)) value |= 1 << (letter.charCodeAt(0) - codeOfA);
+    });
+    value |= 1 << (base.charCodeAt(0) - codeOfA);
+    return value >>> 0;
+  }
+
+  /* ------------------------------------------------ 화면 */
+  const input = document.getElementById("isa-input");
+  const toggleRow = document.getElementById("isa-toggle-row");
+  const messageList = document.getElementById("isa-messages");
+  const profileGrid = document.getElementById("isa-profiles");
+  let lastParsed = null;
+
+  TOGGLE_NAMES.forEach((name) => {
+    const chip = document.createElement("button");
+    chip.className = "chip";
+    chip.dataset.name = name;
+    chip.textContent = name.length === 1 ? name.toUpperCase() : name.charAt(0).toUpperCase() + name.slice(1);
+    chip.title = SINGLE_LETTER_INFO[name] || name;
+    chip.addEventListener("click", () => toggleExtension(name));
+    toggleRow.appendChild(chip);
+  });
+
+  function toggleExtension(name) {
+    const parsed = lastParsed && lastParsed.base ? lastParsed : parseIsaString("rv64i");
+    let singles = parsed.singles.slice();
+    let multis = parsed.multis.slice();
+    const isListed = singles.includes(name) || multis.includes(name);
+    const isCoveredByG = singles.includes("g") && G_EXPANSION.includes(name);
+    if (isCoveredByG && !isListed) {
+      // G 안에 든 확장을 끄려면 G를 개별 이름으로 풀어 쓴 다음 누른 것만 뺀다
+      singles = singles.filter((letter) => letter !== "g");
+      G_EXPANSION.forEach((item) => {
+        if (item === "i" || item === name) return;
+        const targetList = item.length === 1 ? singles : multis;
+        if (!targetList.includes(item)) targetList.push(item);
+      });
+    } else {
+      const targetList = name.length === 1 ? singles : multis;
+      const existingIndex = targetList.indexOf(name);
+      if (existingIndex === NOT_FOUND) targetList.push(name);
+      else targetList.splice(existingIndex, 1);
+    }
+    singles.sort(compareSingleLetter);
+    multis.sort(compareMultiLetter);
+    const baseText = singles.includes("g") ? "g" : parsed.base;
+    const restSingles = singles.filter((letter) => letter !== "g");
+    input.value = buildName(parsed.xlen || DEFAULT_XLEN, baseText, restSingles, multis, null);
+    update();
+  }
+
+  function renderMessages(parsed) {
+    const items = [];
+    parsed.errors.forEach((text) => items.push('<li class="error">오류 · ' + text + "</li>"));
+    parsed.warnings.forEach((text) => items.push('<li class="warning">경고 · ' + text + "</li>"));
+    parsed.infos.forEach((text) => items.push('<li class="info">참고 · ' + text + "</li>"));
+    if (!parsed.errors.length && !parsed.warnings.length) items.unshift('<li class="good">규칙에 맞는 ISA 문자열이다.</li>');
+    messageList.innerHTML = items.join("");
+  }
+
+  function update() {
+    const parsed = parseIsaString(input.value);
+    lastParsed = parsed;
+    const outputIds = ["isa-canonical", "isa-expanded", "isa-versioned", "isa-xlen", "isa-register-count", "isa-extension-count", "isa-misa"];
+    if (!parsed.base) {
+      outputIds.forEach((id) => { document.getElementById(id).textContent = "—"; });
+      renderMessages(parsed);
+      profileGrid.innerHTML = "";
+      toggleRow.querySelectorAll(".chip").forEach((chip) => chip.classList.remove("on", "implied"));
+      return;
+    }
+    const sortedSingles = parsed.singles.slice().sort(compareSingleLetter);
+    const sortedMultis = parsed.multis.slice().sort(compareMultiLetter);
+    const singlesWithoutG = sortedSingles.filter((letter) => letter !== "g");
+    if (!isSameOrder(parsed.singles, sortedSingles)) parsed.warnings.push("단일 문자 순서가 정규 순서(I E M A F D G Q C B P V H)와 다르다.");
+    if (!isSameOrder(parsed.multis, sortedMultis)) parsed.warnings.push("여러 글자 확장 순서가 정규 순서(Z 분류 순 → S → Sh → Sm → X, 같은 묶음은 알파벳 순)와 다르다.");
+
+    const extensionSet = expandImplications(parsed);
+    checkConflicts(parsed, extensionSet, parsed);
+
+    const hasG = sortedSingles.includes("g");
+    const canonicalBase = hasG ? "g" : parsed.base;
+    document.getElementById("isa-canonical").textContent = buildName(parsed.xlen, canonicalBase, singlesWithoutG, sortedMultis, null);
+
+    const expandedSingles = SINGLE_LETTER_ORDER.filter((letter) => letter !== "i" && letter !== "e" && letter !== "g" && extensionSet.has(letter));
+    const expandedMultis = Array.from(extensionSet).filter((name) => name.length > 1).sort(compareMultiLetter);
+    document.getElementById("isa-expanded").textContent = buildName(parsed.xlen, parsed.base, expandedSingles, expandedMultis, null);
+    const versionFor = (name) => parsed.versions[name] || KNOWN_VERSIONS[name] || "";
+    document.getElementById("isa-versioned").textContent = buildName(parsed.xlen, parsed.base, expandedSingles, expandedMultis, versionFor);
+
+    document.getElementById("isa-xlen").textContent = parsed.xlen;
+    document.getElementById("isa-register-count").textContent = parsed.base === "e" ? "16 (x0–x15)" : "32 (x0–x31)";
+    document.getElementById("isa-extension-count").textContent = extensionSet.size;
+    document.getElementById("isa-misa").textContent = book.toHex(computeMisaLetterBits(extensionSet, parsed.base), 28);
+
+    renderMessages(parsed);
+
+    profileGrid.innerHTML = PROFILES.map((profile) => {
+      const missing = profile.required.filter((name) => !extensionSet.has(name));
+      const isXlenMatching = parsed.xlen === profile.xlen && parsed.base === "i";
+      const isCompatible = isXlenMatching && missing.length === 0 && !parsed.errors.length;
+      let detail;
+      if (!isXlenMatching) {
+        detail = "베이스가 RV" + profile.xlen + "I가 아님";
+      } else if (missing.length === 0) {
+        detail = "명령어 확장 모두 있음 · " + profile.note;
+      } else {
+        const shown = missing.slice(0, MAXIMUM_MISSING_SHOWN).join(" ");
+        const remaining = missing.length > MAXIMUM_MISSING_SHOWN ? " 외 " + (missing.length - MAXIMUM_MISSING_SHOWN) + "개" : "";
+        detail = "부족: " + shown + remaining;
+      }
+      return '<div class="profile-card ' + (isCompatible ? "is-compatible" : "is-incompatible") + '"><b>' + (isCompatible ? "✓ " : "· ") + profile.name + '</b><span class="missing">' + detail + "</span></div>";
+    }).join("");
+
+    toggleRow.querySelectorAll(".chip").forEach((chip) => {
+      const name = chip.dataset.name;
+      const isExplicit = parsed.singles.includes(name) || parsed.multis.includes(name);
+      chip.classList.toggle("on", isExplicit);
+      chip.classList.toggle("implied", !isExplicit && extensionSet.has(name));
+    });
+  }
+
+  document.getElementById("isa-parse-button").addEventListener("click", update);
+  input.addEventListener("input", update);
+  document.querySelectorAll("#isa-preset-row .chip").forEach((chip) => {
+    chip.addEventListener("click", () => {
+      input.value = chip.dataset.preset;
+      update();
+    });
+  });
+  update();
+})();
+
+/* ---------------------------------------------------------------------------
+   명령어 길이 해독기: 첫 16비트 파슬의 비트를 눌러 길이 판정을 본다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const PARCEL_BITS = 16;
+  const LOW_TWO_BITS_MASK = 0b11;
+  const THIRTY_TWO_BIT_MARK = 0b11;
+  const BITS_FOUR_TO_TWO_ALL_ONES = 0b111;
+  const BASE_LENGTH_PARCELS_FOR_LONG = 5;
+  const RESERVED_NNN = 0b111;
+  const INITIAL_PARCEL = 0x0533;
+  const MAXIMUM_PARCELS_DRAWN = 12;
+  // 주 opcode 이름: inst[6:5] 를 행, inst[4:2] 를 열로 한 표 (rv-32-64g.html 표 1)
+  const MAJOR_OPCODE_NAMES = [
+    ["LOAD", "LOAD-FP", "custom-0", "MISC-MEM", "OP-IMM", "AUIPC", "OP-IMM-32", "(>32b)"],
+    ["STORE", "STORE-FP", "custom-1", "AMO", "OP", "LUI", "OP-32", "(>32b)"],
+    ["MADD", "MSUB", "NMSUB", "NMADD", "OP-FP", "OP-V", "custom-2", "(>32b)"],
+    ["BRANCH", "JALR", "reserved", "JAL", "SYSTEM", "OP-VE", "custom-3", "(>32b)"],
+  ];
+  const COMPRESSED_QUADRANT_NAMES = ["C0 (사분면 0)", "C1 (사분면 1)", "C2 (사분면 2)"];
+
+  const bitRow = document.getElementById("length-bits");
+  const indexRow = document.getElementById("length-bit-index");
+  const parcelStrip = document.getElementById("length-parcels");
+  const description = document.getElementById("length-description");
+  let parcelValue = INITIAL_PARCEL;
+  const bitElements = [];
+
+  for (let bitIndex = PARCEL_BITS - 1; bitIndex >= 0; bitIndex -= 1) {
+    const element = document.createElement("span");
+    element.className = "bit";
+    element.dataset.bit = bitIndex;
+    // 길이 판정에 쓰이는 묶음 경계에 틈을 둔다: [15] [14:12] [11:7] [6:5] [4:2] [1:0]
+    const hasGapBefore = bitIndex === 14 || bitIndex === 11 || bitIndex === 6 || bitIndex === 4 || bitIndex === 1;
+    if (hasGapBefore) element.classList.add("gap");
+    element.addEventListener("click", () => {
+      parcelValue ^= 1 << bitIndex;
+      render();
+    });
+    bitRow.appendChild(element);
+    bitElements.push(element);
+    const label = document.createElement("span");
+    label.textContent = bitIndex;
+    if (hasGapBefore) label.classList.add("gap");
+    indexRow.appendChild(label);
+  }
+
+  function classifyCurrent(value) {
+    if (value === 0) return { parcels: 1, text: "불법 (0)", detail: "비트 [15:0]이 모두 0인 인코딩은 불법 명령이다. 16비트 확장이 있으면 16비트 길이로 본다." };
+    const lowTwo = value & LOW_TWO_BITS_MASK;
+    if (lowTwo !== THIRTY_TWO_BIT_MARK) {
+      return { parcels: 1, text: "16비트", detail: "하위 두 비트가 " + book.toBinary(lowTwo, 2) + " ≠ 11 → 16비트 압축 명령 공간 " + COMPRESSED_QUADRANT_NAMES[lowTwo] + ". C 또는 Zca가 있어야 실행할 수 있다." };
+    }
+    const bitsFourToTwo = (value >> 2) & BITS_FOUR_TO_TWO_ALL_ONES;
+    const row = (value >> 5) & 0b11;
+    if (bitsFourToTwo !== BITS_FOUR_TO_TWO_ALL_ONES) {
+      const opcode = value & 0x7f;
+      return { parcels: 2, text: "32비트", detail: "하위 두 비트 11, 비트 [4:2] = " + book.toBinary(bitsFourToTwo, 3) + " ≠ 111 → 32비트 명령. 주 opcode " + book.toBinary(opcode, 7) + " = <b>" + MAJOR_OPCODE_NAMES[row][bitsFourToTwo] + "</b>." };
+    }
+    return { parcels: null, text: "예약 (>32b)", detail: "비트 [4:0] = 11111 → 현행 규격에서는 32비트보다 긴 명령을 위해 예약된 공간이다(주 opcode 지도의 맨 오른쪽 열)." };
+  }
+
+  function classifyLegacy(value) {
+    const lowTwo = value & LOW_TWO_BITS_MASK;
+    if (lowTwo !== THIRTY_TWO_BIT_MARK) return { parcels: 1, text: "16비트" };
+    if (((value >> 2) & BITS_FOUR_TO_TWO_ALL_ONES) !== BITS_FOUR_TO_TWO_ALL_ONES) return { parcels: 2, text: "32비트" };
+    if (((value >> 5) & 1) === 0) return { parcels: 3, text: "48비트" };
+    if (((value >> 6) & 1) === 0) return { parcels: 4, text: "64비트" };
+    const nnn = (value >> 12) & 0b111;
+    if (nnn === RESERVED_NNN) return { parcels: null, text: "≥192비트 예약" };
+    const parcels = BASE_LENGTH_PARCELS_FOR_LONG + nnn;
+    return { parcels, text: (parcels * PARCEL_BITS) + "비트" };
+  }
+
+  function drawParcels(current, legacy) {
+    const parcelCount = current.parcels !== null ? current.parcels : legacy.parcels;
+    const isUnknown = current.parcels === null;
+    let html = "";
+    const drawnCount = parcelCount === null ? 1 : Math.min(parcelCount, MAXIMUM_PARCELS_DRAWN);
+    for (let index = 0; index < drawnCount; index += 1) {
+      const kind = index === 0 ? "first" : "rest";
+      html += '<div class="parcel ' + kind + (isUnknown ? " unknown" : "") + '">파슬 ' + index + "<br>+" + (index * 2) + "B</div>";
+    }
+    if (parcelCount === null) html += '<div class="parcel unknown">? …</div>';
+    parcelStrip.innerHTML = html;
+  }
+
+  function render() {
+    bitElements.forEach((element) => {
+      const bitIndex = Number(element.dataset.bit);
+      const isOn = ((parcelValue >> bitIndex) & 1) === 1;
+      element.classList.toggle("on", isOn);
+      element.textContent = isOn ? "1" : "0";
+    });
+    const current = classifyCurrent(parcelValue);
+    const legacy = classifyLegacy(parcelValue);
+    drawParcels(current, legacy);
+    document.getElementById("length-value").textContent = book.toHex(parcelValue, PARCEL_BITS);
+    document.getElementById("length-current").textContent = current.text;
+    document.getElementById("length-legacy").textContent = legacy.text;
+    let text = current.detail;
+    if (current.parcels === null) text += " 2019년판 제안이었다면 <b>" + legacy.text + "</b> 명령으로 읽었을 것이다(점선 파슬).";
+    description.innerHTML = text;
+  }
+
+  document.querySelectorAll("#length-presets button").forEach((button) => {
+    button.addEventListener("click", () => {
+      parcelValue = Number(button.dataset.value);
+      render();
+    });
+  });
+  render();
+})();
+
+/* ---------------------------------------------------------------------------
+   주 opcode 지도 탐색기
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const ROW_COUNT = 4;
+  const COLUMN_COUNT = 8;
+  const THIRTY_TWO_BIT_LOW_BITS = 0b11;
+  const INITIAL_SELECTION = { row: 1, column: 4 };
+  // kind: base | extension | custom | reserved | long
+  const CELLS = [
+    [
+      { name: "LOAD", kind: "base", users: "lb lh lw lbu lhu (RV64: ld lwu)", chapter: "rv32i", chapterLabel: "5장" },
+      { name: "LOAD-FP", kind: "extension", users: "flw fld flq (F·D·Q), 벡터 적재 vle* (V)", chapter: "floating-point", chapterLabel: "12장 · 15장" },
+      { name: "custom-0", kind: "custom", users: "회사 전용 확장. 표준은 앞으로도 쓰지 않는다.", chapter: null },
+      { name: "MISC-MEM", kind: "base", users: "fence, fence.tso, fence.i (Zifencei), cbo.* (CMO)", chapter: "memory-model", chapterLabel: "11장 · 16장" },
+      { name: "OP-IMM", kind: "base", users: "addi slti sltiu xori ori andi slli srli srai, Zbb 즉시값 명령, prefetch 힌트", chapter: "rv32i", chapterLabel: "5장" },
+      { name: "AUIPC", kind: "base", users: "auipc — pc 기준 상위 주소 만들기", chapter: "rv32i", chapterLabel: "5장" },
+      { name: "OP-IMM-32", kind: "base", users: "addiw slliw srliw sraiw (RV64 전용 32비트 연산)", chapter: "rv64", chapterLabel: "6장" },
+      { name: ">32b", kind: "long", users: "비트 [4:2] = 111 → 32비트보다 긴 명령을 위한 예약 공간", chapter: null },
+    ],
+    [
+      { name: "STORE", kind: "base", users: "sb sh sw (RV64: sd)", chapter: "rv32i", chapterLabel: "5장" },
+      { name: "STORE-FP", kind: "extension", users: "fsw fsd fsq (F·D·Q), 벡터 저장 vse* (V)", chapter: "floating-point", chapterLabel: "12장 · 15장" },
+      { name: "custom-1", kind: "custom", users: "회사 전용 확장. 표준은 앞으로도 쓰지 않는다.", chapter: null },
+      { name: "AMO", kind: "extension", users: "lr sc amoswap amoadd … (A), amocas (Zacas), 바이트·하프워드 AMO (Zabha)", chapter: "atomic", chapterLabel: "10장" },
+      { name: "OP", kind: "base", users: "add sub sll slt sltu xor srl sra or and, mul div rem (M), Zba·Zbb·Zbs, czero (Zicond)", chapter: "rv32i", chapterLabel: "5장 · 9장 · 14장" },
+      { name: "LUI", kind: "base", users: "lui — 상위 20비트 즉시값 싣기", chapter: "rv32i", chapterLabel: "5장" },
+      { name: "OP-32", kind: "base", users: "addw subw sllw srlw sraw, mulw divw remw (RV64 전용)", chapter: "rv64", chapterLabel: "6장" },
+      { name: ">32b", kind: "long", users: "비트 [4:2] = 111 → 32비트보다 긴 명령을 위한 예약 공간", chapter: null },
+    ],
+    [
+      { name: "MADD", kind: "extension", users: "fmadd.s/d/q/h — 곱하고 더하기 (R4 형식)", chapter: "floating-point", chapterLabel: "12장" },
+      { name: "MSUB", kind: "extension", users: "fmsub.* — 곱하고 빼기", chapter: "floating-point", chapterLabel: "12장" },
+      { name: "NMSUB", kind: "extension", users: "fnmsub.* — 곱한 값을 부호 바꿔 더하기", chapter: "floating-point", chapterLabel: "12장" },
+      { name: "NMADD", kind: "extension", users: "fnmadd.* — 곱하고 더한 값의 부호 바꾸기", chapter: "floating-point", chapterLabel: "12장" },
+      { name: "OP-FP", kind: "extension", users: "fadd fsub fmul fdiv fsqrt fcvt fmv fclass … (F·D·Q·Zfh·Zfa)", chapter: "floating-point", chapterLabel: "12장" },
+      { name: "OP-V", kind: "extension", users: "vsetvli 와 벡터 산술 전부 (V, Zvbb·Zvbc 포함)", chapter: "vector", chapterLabel: "15장" },
+      { name: "custom-2", kind: "custom", users: "회사 전용 확장. 표준은 앞으로도 쓰지 않는다. (옛 판에서는 RV128 용도와 공유한다고 적혀 있었다)", chapter: null },
+      { name: ">32b", kind: "long", users: "비트 [4:2] = 111 → 32비트보다 긴 명령을 위한 예약 공간", chapter: null },
+    ],
+    [
+      { name: "BRANCH", kind: "base", users: "beq bne blt bge bltu bgeu", chapter: "rv32i", chapterLabel: "5장" },
+      { name: "JALR", kind: "base", users: "jalr — 레지스터 간접 점프, ret", chapter: "rv32i", chapterLabel: "5장" },
+      { name: "reserved", kind: "reserved", users: "미래 표준 확장을 위해 비워 둔 칸. custom 용도로 쓰지 말 것.", chapter: null },
+      { name: "JAL", kind: "base", users: "jal — pc 상대 점프와 링크", chapter: "rv32i", chapterLabel: "5장" },
+      { name: "SYSTEM", kind: "base", users: "ecall ebreak, csrr* (Zicsr), mret sret wfi sfence.vma (특권), mop.* (Zimop)", chapter: "privilege", chapterLabel: "16장 · 17장 · 18장" },
+      { name: "OP-VE", kind: "extension", users: "벡터 암호 명령 vaes* vsha2* vsm3* vsm4* vghsh … (Zvk*)", chapter: "vector", chapterLabel: "15장" },
+      { name: "custom-3", kind: "custom", users: "회사 전용 확장. 표준은 앞으로도 쓰지 않는다. (옛 판에서는 RV128 용도와 공유한다고 적혀 있었다)", chapter: null },
+      { name: ">32b", kind: "long", users: "비트 [4:2] = 111 → 32비트보다 긴 명령을 위한 예약 공간", chapter: null },
+    ],
+  ];
+  const KIND_LABELS = { base: "베이스 I", extension: "표준 확장", custom: "custom", reserved: "reserved", long: ">32비트 예약" };
+
+  const grid = document.getElementById("opcode-map-grid");
+  const detail = document.getElementById("opcode-detail");
+  const cellButtons = [];
+
+  grid.appendChild(createAxis("[6:5] ＼ [4:2]"));
+  for (let column = 0; column < COLUMN_COUNT; column += 1) grid.appendChild(createAxis(book.toBinary(column, 3)));
+  for (let row = 0; row < ROW_COUNT; row += 1) {
+    grid.appendChild(createAxis(book.toBinary(row, 2)));
+    for (let column = 0; column < COLUMN_COUNT; column += 1) {
+      const cell = CELLS[row][column];
+      const button = document.createElement("button");
+      button.className = "opcode-cell kind-" + cell.kind;
+      button.innerHTML = cell.name + "<small>" + book.toBinary(opcodeOf(row, column), 7) + "</small>";
+      button.dataset.row = row;
+      button.dataset.column = column;
+      const select = () => showDetail(row, column);
+      button.addEventListener("mouseenter", select);
+      button.addEventListener("focus", select);
+      button.addEventListener("click", select);
+      grid.appendChild(button);
+      cellButtons.push(button);
+    }
+  }
+
+  function createAxis(text) {
+    const element = document.createElement("div");
+    element.className = "axis";
+    element.textContent = text;
+    return element;
+  }
+  function opcodeOf(row, column) {
+    return (row << 5) | (column << 2) | THIRTY_TWO_BIT_LOW_BITS;
+  }
+  function showDetail(row, column) {
+    const cell = CELLS[row][column];
+    const opcode = opcodeOf(row, column);
+    cellButtons.forEach((button) => button.classList.toggle("selected", Number(button.dataset.row) === row && Number(button.dataset.column) === column));
+    let html = "<h4>" + cell.name + "</h4>";
+    html += "<p>opcode = <code>" + book.toBinary(opcode, 7) + "</code> (" + book.toHex(opcode, 8) + ") · 행 " + book.toBinary(row, 2) + " · 열 " + book.toBinary(column, 3) + ' · <span class="pill">' + KIND_LABELS[cell.kind] + "</span></p>";
+    html += "<p>" + cell.users + "</p>";
+    if (cell.chapter) html += '<p>이 책: <a href="' + cell.chapter + '.html">' + cell.chapterLabel + "</a></p>";
+    detail.innerHTML = html;
+  }
+  showDetail(INITIAL_SELECTION.row, INITIAL_SELECTION.column);
+})();
+</script>
+</body>
+</html>

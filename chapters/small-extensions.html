@@ -1,0 +1,2256 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>16 작지만 중요한 확장들 · RISC-V Book</title>
+<meta name="description" content="Zicsr·Zicntr·Zihpm·Zifencei·Zihintpause·Zihintntl·Zimop·Zicond·CMO·CFI(Zicfilp·Zicfiss)·Zilsd. 이름이 Z로 시작하는 작은 확장들이 왜 생겼고 어떻게 인코딩되는지 그림과 시뮬레이터로 살펴본다.">
+<link rel="icon" href="../assets/img/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/style.css">
+<script src="../assets/js/book.js"></script>
+<style>
+  .program-listing { font-family: var(--mono); font-size: 13px; line-height: 1.5; padding: 10px 0; background: var(--canvas-bg); overflow-x: auto; }
+  .program-listing .row { display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 8px; padding: 2px 12px; white-space: pre; }
+  .program-listing .row .address { color: var(--text-faint); }
+  .program-listing .row.current { background: var(--accent-2-soft); box-shadow: inset 3px 0 0 var(--accent-2); }
+  .program-listing .row.faulted { background: var(--bad-soft); box-shadow: inset 3px 0 0 var(--bad); }
+  .program-listing .row.skipped { opacity: 0.45; }
+  .program-listing .keyword { color: var(--accent); font-weight: 700; }
+  .program-listing .register { color: var(--teal); }
+  .program-listing .number { color: var(--accent-2); }
+  .program-listing .comment { color: var(--text-faint); font-style: italic; }
+  .program-listing .label { color: var(--violet); font-weight: 700; }
+  .listing-title { font-family: var(--font); font-size: 12px; font-weight: 700; color: var(--text-faint); letter-spacing: 0.06em; padding: 0 12px 6px; }
+  .split-view { display: grid; grid-template-columns: minmax(0, 1fr); border-bottom: 1px solid var(--border); }
+  @media (min-width: 760px) { .split-view { grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr); } }
+  .split-view > .program-listing { border-bottom: 1px solid var(--border); }
+  @media (min-width: 760px) { .split-view > .program-listing { border-bottom: 0; border-right: 1px solid var(--border); } }
+  .split-view .canvas-holder { background: var(--canvas-bg); min-width: 0; }
+  .split-view .canvas-holder canvas { display: block; width: 100%; }
+  .twin-listing { display: grid; grid-template-columns: minmax(0, 1fr); border-bottom: 1px solid var(--border); }
+  @media (min-width: 700px) { .twin-listing { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } .twin-listing > div:first-child { border-right: 1px solid var(--border); } }
+  .twin-listing > div:first-child { border-bottom: 1px solid var(--border); }
+  @media (min-width: 700px) { .twin-listing > div:first-child { border-bottom: 0; } }
+  .twin-listing .cell-grid { padding: 0 12px 12px; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); }
+  .control input.narrow-input { width: 110px; }
+  .extension-chip-row { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 18px; }
+</style>
+</head>
+<body data-chapter="small-extensions">
+<main class="chapter">
+  <header class="chapter-hero">
+    <div class="eyebrow">Chapter 16</div>
+    <h1>작지만 중요한 확장들</h1>
+    <p class="lead">M·A·F·V처럼 한 글자 이름을 가진 큰 확장 말고도, RISC-V에는 이름이 <b>Z</b>로 시작하는 작은 확장이 수십 개 있다. 명령어가 두 개뿐인 것도 있고, 아예 새 명령 없이 <b>기존 인코딩의 빈자리에 뜻만 얹은</b> 것도 있다. 하지만 이 작은 확장들이 없으면 운영체제는 CSR을 못 건드리고, JIT 컴파일러는 새 코드를 못 돌리고, 공격자는 반환 주소를 마음대로 바꾼다. <strong>이 장은 Z 확장 하나하나가 “왜” 필요했는지를 따라가며, 작은 인코딩 결정이 어떤 큰 문제를 푸는지 본다.</strong></p>
+    <ul class="objectives">
+      <li>Zicsr의 CSR 명령 6개가 하나의 CSR을 원자적으로 읽고·고치고·쓰는 방식과 의사 명령을 안다.</li>
+      <li>Zicntr·Zihpm 카운터의 CSR 주소와, RV32에서 64비트 카운터를 안전하게 읽는 3회 읽기 루프를 이해한다.</li>
+      <li>fence.i, pause, ntl.* 처럼 기존 인코딩을 빌려 쓴 명령과 힌트의 인코딩을 확인한다.</li>
+      <li>Zimop의 “may-be 연산”이 새 확장을 옛 하드웨어에서도 돌게 해 주는 원리를 안다.</li>
+      <li>Zicond로 분기 없는 조건부 선택을 만들고, 분기 예측 실패 비용과 비교한다.</li>
+      <li>CMO의 clean·flush·inval·zero·prefetch가 캐시와 메모리에 미치는 효과를 구별한다.</li>
+      <li>Zicfilp 착지 패드와 Zicfiss 그림자 스택이 각각 어떤 공격을 막는지, 위반 시 어떤 예외가 나는지 안다.</li>
+      <li>Zilsd가 RV32에서 레지스터 짝으로 64비트를 한 번에 옮기는 규칙을 안다.</li>
+    </ul>
+    <div class="spec-meta">
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/unpriv/zicsr.html" target="_blank" rel="noopener">Zicsr</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/unpriv/counters.html" target="_blank" rel="noopener">Zicntr · Zihpm</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/unpriv/zifencei.html" target="_blank" rel="noopener">Zifencei</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/unpriv/zimop.html" target="_blank" rel="noopener">Zimop</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/unpriv/zicond.html" target="_blank" rel="noopener">Zicond</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/unpriv/cmo.html" target="_blank" rel="noopener">CMO</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/unpriv/unpriv-cfi.html" target="_blank" rel="noopener">CFI</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/unpriv/zilsd.html" target="_blank" rel="noopener">Zilsd</a>
+    </div>
+  </header>
+
+  <!-- ============================================================ -->
+  <section id="overview">
+    <h2>Z 확장 지도: 작게 쪼갠 이유</h2>
+    <p>RISC-V의 확장 이름 규칙(<a href="modular.html">2장</a>)에서 <code>Z</code> 다음 글자는 그 확장이 기대는 한 글자 확장을 가리킨다. <code>Zi*</code>는 베이스 정수 ISA(I) 쪽, <code>Zb*</code>는 비트 조작(B) 쪽이다. 이 장에서 다루는 확장은 대부분 <code>Zi</code>로 시작한다. 즉 <b>정수 베이스에 붙는 작은 기능</b>이다.</p>
+    <p>왜 이렇게 잘게 나눌까? 이유는 두 가지다. 첫째, <b>필요 없는 구현은 안 만들어도 되게</b> 하려는 것이다. 운영체제 없는 마이크로컨트롤러에는 shadow stack이 필요 없고, 캐시가 없는 칩에는 캐시 관리 명령이 의미가 없다. 둘째, <b>원래 베이스에 있던 것을 떼어 내기 위해서</b>다. 카운터 CSR과 <code>fence.i</code>는 예전에 RV32I 안에 있었지만, 모든 구현에 강요하기엔 부담이 커서 Zicntr와 Zifencei로 분리되었다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 380" role="img" aria-label="이 장에서 다루는 아홉 무리의 Z 확장과 그것들이 빌려 쓰는 인코딩 공간">
+        <g>
+          <rect x="10" y="12" width="270" height="88" rx="12" class="f-accent-soft"/>
+          <text x="145" y="40" text-anchor="middle" class="t t-bold">Zicsr</text>
+          <text x="145" y="62" text-anchor="middle" class="t-dim">CSR 읽기·수정·쓰기 명령 6개</text>
+          <text x="145" y="84" text-anchor="middle" class="t-faint">SYSTEM opcode · csr[11:0]</text>
+        </g>
+        <g>
+          <rect x="295" y="12" width="270" height="88" rx="12" class="f-accent-soft"/>
+          <text x="430" y="40" text-anchor="middle" class="t t-bold">Zicntr · Zihpm</text>
+          <text x="430" y="62" text-anchor="middle" class="t-dim">cycle · time · instret · 성능 카운터</text>
+          <text x="430" y="84" text-anchor="middle" class="t-faint">CSR 0xC00–0xC1F (+0xC80–)</text>
+        </g>
+        <g>
+          <rect x="580" y="12" width="270" height="88" rx="12" class="f-accent-soft"/>
+          <text x="715" y="40" text-anchor="middle" class="t t-bold">Zifencei</text>
+          <text x="715" y="62" text-anchor="middle" class="t-dim">새로 쓴 코드를 인출에 보이게</text>
+          <text x="715" y="84" text-anchor="middle" class="t-faint">MISC-MEM · fence.i</text>
+        </g>
+        <g>
+          <rect x="10" y="112" width="270" height="88" rx="12" class="f-teal-soft"/>
+          <text x="145" y="140" text-anchor="middle" class="t t-bold">Zihintpause · Zihintntl</text>
+          <text x="145" y="162" text-anchor="middle" class="t-dim">스핀 대기 힌트 · 캐시 힌트</text>
+          <text x="145" y="184" text-anchor="middle" class="t-faint">FENCE · ADD x0 힌트 공간</text>
+        </g>
+        <g>
+          <rect x="295" y="112" width="270" height="88" rx="12" class="f-teal-soft"/>
+          <text x="430" y="140" text-anchor="middle" class="t t-bold">Zimop · Zcmop</text>
+          <text x="430" y="162" text-anchor="middle" class="t-dim">나중에 뜻이 붙는 예약 자리</text>
+          <text x="430" y="184" text-anchor="middle" class="t-faint">SYSTEM · C.LUI 예약 공간</text>
+        </g>
+        <g>
+          <rect x="580" y="112" width="270" height="88" rx="12" class="f-teal-soft"/>
+          <text x="715" y="140" text-anchor="middle" class="t t-bold">Zicond</text>
+          <text x="715" y="162" text-anchor="middle" class="t-dim">분기 없는 조건부 선택</text>
+          <text x="715" y="184" text-anchor="middle" class="t-faint">OP · czero.eqz / czero.nez</text>
+        </g>
+        <g>
+          <rect x="10" y="212" width="270" height="88" rx="12" class="f-violet-soft"/>
+          <text x="145" y="240" text-anchor="middle" class="t t-bold">Zicbom · Zicboz · Zicbop</text>
+          <text x="145" y="262" text-anchor="middle" class="t-dim">캐시 블록 관리 · 0 채우기 · 프리페치</text>
+          <text x="145" y="284" text-anchor="middle" class="t-faint">MISC-MEM · ORI(rd=x0)</text>
+        </g>
+        <g>
+          <rect x="295" y="212" width="270" height="88" rx="12" class="f-bad-soft"/>
+          <text x="430" y="240" text-anchor="middle" class="t t-bold">Zicfilp · Zicfiss</text>
+          <text x="430" y="262" text-anchor="middle" class="t-dim">착지 패드 · 그림자 스택</text>
+          <text x="430" y="284" text-anchor="middle" class="t-faint">AUIPC(rd=x0) · MOP 재정의</text>
+        </g>
+        <g>
+          <rect x="580" y="212" width="270" height="88" rx="12" class="f-gold-soft"/>
+          <text x="715" y="240" text-anchor="middle" class="t t-bold">Zilsd · Zclsd</text>
+          <text x="715" y="262" text-anchor="middle" class="t-dim">RV32의 레지스터 짝 load/store</text>
+          <text x="715" y="284" text-anchor="middle" class="t-faint">RV64 ld/sd 인코딩 재사용</text>
+        </g>
+        <rect x="10" y="318" width="840" height="50" rx="12" class="f-surface"/>
+        <text x="430" y="340" text-anchor="middle" class="t t-bold">베이스 정수 ISA (RV32I · RV64I)</text>
+        <text x="430" y="358" text-anchor="middle" class="t-dim">위 확장 대부분은 새 opcode를 만들지 않고 기존 인코딩의 빈자리·예약 자리를 빌려 쓴다</text>
+      </svg></div>
+      <figcaption><b>그림 16-1.</b> 이 장에서 다루는 Z 확장 지도. 상자 맨 아랫줄은 각 확장이 빌려 쓰는 인코딩 공간이다. 파란 무리는 “기본 도구”, 청록 무리는 “힌트와 예약 자리”, 보라·빨강·금색은 각각 캐시, 보안, RV32 성능을 위한 확장이다.</figcaption>
+    </figure>
+
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>확장</th><th>규격 버전</th><th>새 명령·CSR</th><th>한 줄 요약</th></tr></thead>
+      <tbody>
+        <tr><td><b>Zicsr</b></td><td>2.0</td><td>csrrw·csrrs·csrrc·csrrwi·csrrsi·csrrci</td><td>CSR 하나를 원자적으로 읽고 고쳐 쓴다</td></tr>
+        <tr><td><b>Zicntr</b> / <b>Zihpm</b></td><td>2.0</td><td>cycle·time·instret / hpmcounter3–31</td><td>읽기 전용 64비트 카운터</td></tr>
+        <tr><td><b>Zifencei</b></td><td>2.0</td><td>fence.i</td><td>자기 하트의 store를 명령 인출에 보이게</td></tr>
+        <tr><td><b>Zihintntl</b></td><td>1.0</td><td>ntl.p1·ntl.pall·ntl.s1·ntl.all</td><td>다음 메모리 접근은 다시 안 쓴다는 힌트</td></tr>
+        <tr><td><b>Zihintpause</b></td><td>2.0</td><td>pause</td><td>스핀 대기 중 잠깐 쉬어 가라는 힌트</td></tr>
+        <tr><td><b>Zimop</b> / <b>Zcmop</b></td><td>1.0</td><td>mop.r.n·mop.rr.n / c.mop.n</td><td>나중 확장이 뜻을 붙일 자리, 기본은 rd ← 0</td></tr>
+        <tr><td><b>Zicond</b></td><td>1.0.0</td><td>czero.eqz·czero.nez</td><td>조건이 0이면(아니면) 0을 쓴다</td></tr>
+        <tr><td><b>CMO</b> (Zicbom·Zicboz·Zicbop)</td><td>1.0.0</td><td>cbo.clean·flush·inval·zero, prefetch.i·r·w</td><td>캐시 블록 단위 관리</td></tr>
+        <tr><td><b>Zicfilp</b> / <b>Zicfiss</b></td><td>CFI 장 (비준됨)</td><td>lpad / sspush·sspopchk·ssrdp·ssamoswap, ssp CSR</td><td>간접 점프·반환 주소 보호</td></tr>
+        <tr><td><b>Zilsd</b> / <b>Zclsd</b></td><td>1.0</td><td>RV32용 ld·sd / c.ld·c.sd·c.ldsp·c.sdsp</td><td>짝수·홀수 레지스터 짝으로 64비트 접근</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="zicsr">
+    <h2>Zicsr: CSR을 원자적으로 읽고 고쳐 쓰기</h2>
+    <p>각 하트에는 <span class="term">제어·상태 레지스터</span><span class="english">(CSR, Control and Status Register)</span>를 위한 별도 주소 공간이 4096칸 있다. 일반 레지스터 x0–x31과 달리 CSR은 하드웨어 동작을 조절하거나(예: 인터럽트 허용) 상태를 알려 준다(예: 부동소수점 플래그, 카운터). 특권 아키텍처(<a href="privilege.html">17장</a>)가 대부분의 CSR을 정의하지만, CSR에 접근하는 <b>명령</b>은 비특권 규격의 Zicsr 확장이 정한다.</p>
+    <p>Zicsr의 명령은 여섯 개뿐이고 모두 같은 일을 한다. <b>CSR의 옛 값을 읽어 rd에 넣고, 동시에 새 값을 CSR에 쓴다.</b> 새 값을 만드는 방법이 세 가지(그대로 쓰기·비트 켜기·비트 끄기)이고, 피연산자가 레지스터인지 5비트 즉시값인지에 따라 두 벌이 있다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 350" role="img" aria-label="CSR 명령의 인코딩과 원자적 읽기-수정-쓰기 흐름">
+        <defs>
+          <marker id="zicsr-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker>
+          <marker id="zicsr-arrow-gold" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent-2)"/></marker>
+          <path id="zicsr-path-read" d="M240 168 H636"/>
+          <path id="zicsr-path-old" d="M240 200 C290 200 290 222 328 222"/>
+          <path id="zicsr-path-source" d="M240 278 C290 278 290 255 328 255"/>
+          <path id="zicsr-path-write" d="M440 288 V328 H22 V184 H36"/>
+        </defs>
+        <!-- 비트 번호 -->
+        <g class="t-faint">
+          <text x="34" y="24">31</text><text x="326" y="24" text-anchor="end">20</text>
+          <text x="334" y="24">19</text><text x="451" y="24" text-anchor="end">15</text>
+          <text x="459" y="24">14</text><text x="526" y="24" text-anchor="end">12</text>
+          <text x="534" y="24">11</text><text x="651" y="24" text-anchor="end">7</text>
+          <text x="659" y="24">6</text><text x="826" y="24" text-anchor="end">0</text>
+        </g>
+        <rect x="30" y="30" width="300" height="48" class="f-gold-soft"/>
+        <rect x="330" y="30" width="125" height="48" class="f-teal-soft"/>
+        <rect x="455" y="30" width="75" height="48" class="f-violet-soft"/>
+        <rect x="530" y="30" width="125" height="48" class="f-teal-soft"/>
+        <rect x="655" y="30" width="175" height="48" class="f-accent-soft"/>
+        <text x="180" y="59" text-anchor="middle" class="t t-bold">csr[11:0] (CSR 주소)</text>
+        <text x="392" y="59" text-anchor="middle" class="t">rs1 / uimm</text>
+        <text x="492" y="59" text-anchor="middle" class="t">funct3</text>
+        <text x="592" y="59" text-anchor="middle" class="t">rd</text>
+        <text x="742" y="59" text-anchor="middle" class="t-mono">1110011 SYSTEM</text>
+        <text x="430" y="100" text-anchor="middle" class="t-dim">funct3: 001 csrrw · 010 csrrs · 011 csrrc · 101 csrrwi · 110 csrrsi · 111 csrrci</text>
+        <!-- 원자적 읽기·수정·쓰기 -->
+        <rect x="290" y="118" width="300" height="26" rx="13" class="f-gold-soft"/>
+        <text x="440" y="136" text-anchor="middle" class="t-gold" style="font-size:13px">한 명령 안에서 끼어들 틈 없이</text>
+        <rect x="40" y="150" width="200" height="64" rx="10" class="f-elev"/>
+        <text x="140" y="176" text-anchor="middle" class="t t-bold">CSR</text>
+        <text x="140" y="198" text-anchor="middle" class="t-dim">옛 값을 읽는다</text>
+        <rect x="40" y="250" width="200" height="56" rx="10" class="f-elev"/>
+        <text x="140" y="274" text-anchor="middle" class="t t-bold">rs1 또는 uimm[4:0]</text>
+        <text x="140" y="294" text-anchor="middle" class="t-faint">uimm은 0으로 확장</text>
+        <rect x="330" y="190" width="220" height="98" rx="10" class="f-accent-soft"/>
+        <text x="440" y="212" text-anchor="middle" class="t t-bold">새 값 만들기</text>
+        <text x="440" y="234" text-anchor="middle" class="t-mono" style="font-size:12px">csrrw: 새 값 = rs1</text>
+        <text x="440" y="254" text-anchor="middle" class="t-mono" style="font-size:12px">csrrs: 옛 값 | rs1</text>
+        <text x="440" y="274" text-anchor="middle" class="t-mono" style="font-size:12px">csrrc: 옛 값 &amp; ~rs1</text>
+        <rect x="640" y="150" width="190" height="64" rx="10" class="f-teal-soft"/>
+        <text x="735" y="176" text-anchor="middle" class="t t-bold">rd ← 옛 값</text>
+        <text x="735" y="198" text-anchor="middle" class="t-dim">XLEN으로 0 확장</text>
+        <use href="#zicsr-path-read" class="s-accent flow-dash" marker-end="url(#zicsr-arrow)"/>
+        <use href="#zicsr-path-old" class="s-accent flow-dash" marker-end="url(#zicsr-arrow)"/>
+        <use href="#zicsr-path-source" class="s-accent flow-dash" marker-end="url(#zicsr-arrow)"/>
+        <use href="#zicsr-path-write" class="s-gold flow-dash" marker-end="url(#zicsr-arrow-gold)"/>
+        <text x="236" y="342" class="t-gold" style="font-size:13px">새 값을 같은 CSR에 다시 쓴다</text>
+        <circle r="5" fill="var(--accent-2)"><animateMotion dur="2.6s" begin="-0.4s" repeatCount="indefinite"><mpath href="#zicsr-path-write"/></animateMotion></circle>
+        <circle r="5" fill="var(--accent)"><animateMotion dur="1.8s" begin="-0.9s" repeatCount="indefinite"><mpath href="#zicsr-path-read"/></animateMotion></circle>
+      </svg></div>
+      <figcaption><b>그림 16-2.</b> CSR 명령의 인코딩(위)과 동작(아래). CSR 주소는 명령의 위쪽 12비트(31–20)에 그대로 들어가므로 4096개의 CSR을 가리킬 수 있다. 즉시값 형식은 rs1 칸 5비트를 레지스터 번호 대신 0으로 확장한 값으로 쓴다. 옛 값 읽기와 새 값 쓰기가 한 명령 안에서 원자적으로 일어난다.</figcaption>
+    </figure>
+
+    <div class="table-wrap"><table class="instruction-table compact">
+      <thead><tr><th>명령</th><th>동작</th><th>자주 쓰는 의사 명령</th></tr></thead>
+      <tbody>
+        <tr><td>csrrw rd, csr, rs1</td><td>rd ← CSR, CSR ← rs1 (맞바꾸기)</td><td><code>csrw csr, rs1</code> = <code>csrrw x0, csr, rs1</code></td></tr>
+        <tr><td>csrrs rd, csr, rs1</td><td>rd ← CSR, CSR ← CSR | rs1</td><td><code>csrr rd, csr</code> = <code>csrrs rd, csr, x0</code> · <code>csrs csr, rs1</code></td></tr>
+        <tr><td>csrrc rd, csr, rs1</td><td>rd ← CSR, CSR ← CSR &amp; ~rs1</td><td><code>csrc csr, rs1</code></td></tr>
+        <tr><td>csrrwi rd, csr, uimm</td><td>rd ← CSR, CSR ← uimm</td><td><code>csrwi csr, uimm</code></td></tr>
+        <tr><td>csrrsi rd, csr, uimm</td><td>rd ← CSR, CSR ← CSR | uimm</td><td><code>csrsi csr, uimm</code></td></tr>
+        <tr><td>csrrci rd, csr, uimm</td><td>rd ← CSR, CSR ← CSR &amp; ~uimm</td><td><code>csrci csr, uimm</code></td></tr>
+      </tbody>
+    </table></div>
+
+    <h3>읽지 않거나 쓰지 않는 경우</h3>
+    <p>CSR 중에는 읽거나 쓰는 것만으로 부수 효과가 생기는 것이 있다. 그래서 규격은 <b>언제 CSR을 실제로 읽고 쓰는지</b>를 정확히 정해 두었다. 핵심은 x0과 0이다. <code>csrrw</code>의 rd가 x0이면 CSR을 아예 <b>읽지 않고</b>, <code>csrrs/csrrc</code>의 rs1이 x0이면(즉시값 형식은 uimm=0이면) CSR에 아예 <b>쓰지 않는다</b>. 덕분에 <code>csrr</code>은 읽기 전용 CSR에 써도 불법 명령 예외가 나지 않는다.</p>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>명령</th><th>조건</th><th>CSR 읽기</th><th>CSR 쓰기</th></tr></thead>
+      <tbody>
+        <tr><td>csrrw / csrrwi</td><td>rd = x0</td><td>안 함</td><td>함</td></tr>
+        <tr><td>csrrw / csrrwi</td><td>rd ≠ x0</td><td>함</td><td>함</td></tr>
+        <tr><td>csrrs / csrrc</td><td>rs1 = x0</td><td>함</td><td>안 함</td></tr>
+        <tr><td>csrrsi / csrrci</td><td>uimm = 0</td><td>함</td><td>안 함</td></tr>
+        <tr><td>csrrs / csrrc / csrrsi / csrrci</td><td>그 밖</td><td>함</td><td>함</td></tr>
+      </tbody>
+    </table></div>
+    <div class="callout warn"><strong>“레지스터에 0이 있다”와 “x0이다”는 다르다</strong><p><code>csrrs</code>의 rs1이 x0이 아닌 레지스터인데 값이 우연히 0이라면, 비트는 하나도 안 바뀌지만 규격상 <b>쓰기는 일어난 것</b>이다. 읽기 전용 CSR이었다면 불법 명령 예외가 날 수 있다. 쓰기를 피하려면 인코딩 자체가 x0(또는 uimm=0)이어야 한다.</p></div>
+
+    <div class="callout spec"><strong>규격 원문에서</strong>
+      <blockquote>“All CSR instructions atomically read-modify-write a single CSR, whose CSR specifier is encoded in the 12-bit csr field of the instruction held in bits 31-20.”</blockquote>
+      <p><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/zicsr.html" target="_blank" rel="noopener">Zicsr, CSR Instructions</a> — “원자적”이라는 말은 읽기와 쓰기 사이에 다른 명령이 끼어들 수 없다는 뜻이다. 인터럽트 허용 비트를 끄면서 옛 값을 저장하는 일이 한 명령으로 끝난다.</p></div>
+    <p>예를 들어 운영체제가 잠깐 인터럽트를 막았다가 원래대로 되돌릴 때 다음처럼 쓴다. <code>csrrci</code> 한 명령이 “옛 mstatus 저장”과 “MIE 비트(3번) 끄기”를 동시에 한다.</p>
+    <div class="codebox" data-title="인터럽트를 잠깐 막았다가 되돌리기 (M 모드)" data-highlight>    csrrci t0, mstatus, 8     # t0 ← 옛 mstatus, MIE(비트 3) 끄기
+    # ... 끼어들면 안 되는 일 ...
+    csrw   mstatus, t0        # 옛 값 그대로 되돌리기</div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="counters">
+    <h2>Zicntr · Zihpm: 카운터와 타이머</h2>
+    <p>성능을 재려면 “몇 사이클 걸렸나”, “명령 몇 개를 실행했나”를 알아야 한다. RISC-V는 사용자 모드에서도 읽을 수 있는 <b>읽기 전용 64비트 카운터</b>를 최대 32개 둔다. 주소는 0xC00–0xC1F이고, RV32에서는 위쪽 32비트를 0xC80–0xC9F로 따로 읽는다. 이 중 처음 세 개가 <b>Zicntr</b>, 나머지 29개가 <b>Zihpm</b>이다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 880 330" role="img" aria-label="카운터 CSR의 주소 배치">
+        <text x="20" y="54" class="t-mono">0xC00</text>
+        <text x="20" y="160" class="t-mono">0xC80</text>
+        <g>
+          <rect x="110" y="34" width="22" height="30" rx="4" class="f-accent"/>
+          <rect x="133" y="34" width="22" height="30" rx="4" class="f-accent"/>
+          <rect x="156" y="34" width="22" height="30" rx="4" class="f-accent"/>
+        </g>
+        <g><rect x="179" y="34" width="22" height="30" rx="4" class="f-accent-soft"/><rect x="202" y="34" width="22" height="30" rx="4" class="f-accent-soft"/><rect x="225" y="34" width="22" height="30" rx="4" class="f-accent-soft"/><rect x="248" y="34" width="22" height="30" rx="4" class="f-accent-soft"/><rect x="271" y="34" width="22" height="30" rx="4" class="f-accent-soft"/><rect x="294" y="34" width="22" height="30" rx="4" class="f-accent-soft"/><rect x="317" y="34" width="22" height="30" rx="4" class="f-accent-soft"/><rect x="340" y="34" width="22" height="30" rx="4" class="f-accent-soft"/><rect x="363" y="34" width="22" height="30" rx="4" class="f-accent-soft"/><rect x="386" y="34" width="22" height="30" rx="4" class="f-accent-soft"/><rect x="409" y="34" width="22" height="30" rx="4" class="f-accent-soft"/><rect x="432" y="34" width="22" height="30" rx="4" class="f-accent-soft"/><rect x="455" y="34" width="22" height="30" rx="4" class="f-accent-soft"/><rect x="478" y="34" width="22" height="30" rx="4" class="f-accent-soft"/><rect x="501" y="34" width="22" height="30" rx="4" class="f-accent-soft"/><rect x="524" y="34" width="22" height="30" rx="4" class="f-accent-soft"/><rect x="547" y="34" width="22" height="30" rx="4" class="f-accent-soft"/><rect x="570" y="34" width="22" height="30" rx="4" class="f-accent-soft"/><rect x="593" y="34" width="22" height="30" rx="4" class="f-accent-soft"/><rect x="616" y="34" width="22" height="30" rx="4" class="f-accent-soft"/><rect x="639" y="34" width="22" height="30" rx="4" class="f-accent-soft"/><rect x="662" y="34" width="22" height="30" rx="4" class="f-accent-soft"/><rect x="685" y="34" width="22" height="30" rx="4" class="f-accent-soft"/><rect x="708" y="34" width="22" height="30" rx="4" class="f-accent-soft"/><rect x="731" y="34" width="22" height="30" rx="4" class="f-accent-soft"/><rect x="754" y="34" width="22" height="30" rx="4" class="f-accent-soft"/><rect x="777" y="34" width="22" height="30" rx="4" class="f-accent-soft"/><rect x="800" y="34" width="22" height="30" rx="4" class="f-accent-soft"/><rect x="823" y="34" width="22" height="30" rx="4" class="f-accent-soft"/></g>
+        <g><rect x="179" y="140" width="22" height="30" rx="4" class="f-surface"/><rect x="202" y="140" width="22" height="30" rx="4" class="f-surface"/><rect x="225" y="140" width="22" height="30" rx="4" class="f-surface"/><rect x="248" y="140" width="22" height="30" rx="4" class="f-surface"/><rect x="271" y="140" width="22" height="30" rx="4" class="f-surface"/><rect x="294" y="140" width="22" height="30" rx="4" class="f-surface"/><rect x="317" y="140" width="22" height="30" rx="4" class="f-surface"/><rect x="340" y="140" width="22" height="30" rx="4" class="f-surface"/><rect x="363" y="140" width="22" height="30" rx="4" class="f-surface"/><rect x="386" y="140" width="22" height="30" rx="4" class="f-surface"/><rect x="409" y="140" width="22" height="30" rx="4" class="f-surface"/><rect x="432" y="140" width="22" height="30" rx="4" class="f-surface"/><rect x="455" y="140" width="22" height="30" rx="4" class="f-surface"/><rect x="478" y="140" width="22" height="30" rx="4" class="f-surface"/><rect x="501" y="140" width="22" height="30" rx="4" class="f-surface"/><rect x="524" y="140" width="22" height="30" rx="4" class="f-surface"/><rect x="547" y="140" width="22" height="30" rx="4" class="f-surface"/><rect x="570" y="140" width="22" height="30" rx="4" class="f-surface"/><rect x="593" y="140" width="22" height="30" rx="4" class="f-surface"/><rect x="616" y="140" width="22" height="30" rx="4" class="f-surface"/><rect x="639" y="140" width="22" height="30" rx="4" class="f-surface"/><rect x="662" y="140" width="22" height="30" rx="4" class="f-surface"/><rect x="685" y="140" width="22" height="30" rx="4" class="f-surface"/><rect x="708" y="140" width="22" height="30" rx="4" class="f-surface"/><rect x="731" y="140" width="22" height="30" rx="4" class="f-surface"/><rect x="754" y="140" width="22" height="30" rx="4" class="f-surface"/><rect x="777" y="140" width="22" height="30" rx="4" class="f-surface"/><rect x="800" y="140" width="22" height="30" rx="4" class="f-surface"/><rect x="823" y="140" width="22" height="30" rx="4" class="f-surface"/></g>
+        <text x="144" y="26" text-anchor="middle" class="t-accent" style="font-size:12px">C00 C01 C02</text>
+        <path d="M110 74 v8 h68 v-8" class="s-accent"/>
+        <text x="144" y="100" text-anchor="middle" class="t t-bold">Zicntr</text>
+        <text x="144" y="118" text-anchor="middle" class="t-dim">cycle · time · instret</text>
+        <path d="M179 74 v8 h667 v-8" class="s-line"/>
+        <text x="512" y="100" text-anchor="middle" class="t t-bold">Zihpm</text>
+        <text x="512" y="118" text-anchor="middle" class="t-dim">hpmcounter3 – hpmcounter31 (0xC03–0xC1F)</text>
+        <g>
+          <rect x="110" y="140" width="22" height="30" rx="4" class="f-violet-soft"/>
+          <rect x="133" y="140" width="22" height="30" rx="4" class="f-violet-soft"/>
+          <rect x="156" y="140" width="22" height="30" rx="4" class="f-violet-soft"/>
+        </g>
+        <text x="478" y="192" text-anchor="middle" class="t-dim">RV32 전용 상위 절반: cycleh · timeh · instreth · hpmcounter3h – hpmcounter31h</text>
+        <!-- 64비트 카운터 막대 -->
+        <rect x="110" y="222" width="368" height="44" rx="8" class="f-violet-soft"/>
+        <rect x="478" y="222" width="368" height="44" rx="8" class="f-accent-soft"/>
+        <text x="294" y="249" text-anchor="middle" class="t t-bold">비트 63–32 (cycleh, 0xC80)</text>
+        <text x="662" y="249" text-anchor="middle" class="t t-bold">비트 31–0 (cycle, 0xC00)</text>
+        <text x="20" y="249" class="t-dim">64비트</text>
+        <text x="478" y="294" text-anchor="middle" class="t-dim">RV64: <tspan class="t-mono">rdcycle</tspan> 한 번이면 64비트 전체 · RV32: 두 CSR을 따로 읽어야 한다</text>
+        <text x="478" y="316" text-anchor="middle" class="t-faint">상위 두 비트 11 = 읽기 전용, 그다음 두 비트 00 = 사용자 수준 CSR (17장)</text>
+      </svg></div>
+      <figcaption><b>그림 16-3.</b> 카운터 CSR 주소 배치. 0xC00–0xC1F의 32칸 중 앞의 세 칸이 Zicntr, 나머지 29칸이 Zihpm이다. RV32에서는 같은 카운터의 위쪽 32비트를 0x80만큼 떨어진 0xC80–0xC9F에서 읽는다. 아래 막대는 RV32에서 64비트 cycle 값이 두 CSR로 나뉘는 모습이다.</figcaption>
+    </figure>
+
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>의사 명령</th><th>CSR (주소)</th><th>세는 것</th><th>RV32 상위 절반</th></tr></thead>
+      <tbody>
+        <tr><td><code>rdcycle rd</code></td><td>cycle (0xC00)</td><td>하트가 돌고 있는 <b>코어</b>의 클럭 사이클 수</td><td><code>rdcycleh</code> · cycleh (0xC80)</td></tr>
+        <tr><td><code>rdtime rd</code></td><td>time (0xC01)</td><td>실시간 시계 틱 (벽시계 시간)</td><td><code>rdtimeh</code> · timeh (0xC81)</td></tr>
+        <tr><td><code>rdinstret rd</code></td><td>instret (0xC02)</td><td>이 하트가 <b>완료(retire)</b>한 명령 수</td><td><code>rdinstreth</code> · instreth (0xC82)</td></tr>
+        <tr><td><code>csrr rd, hpmcounter3</code> …</td><td>hpmcounter3–31 (0xC03–0xC1F)</td><td>플랫폼이 정하는 사건 (캐시 미스 등)</td><td>hpmcounter3h–31h (0xC83–0xC9F)</td></tr>
+      </tbody>
+    </table></div>
+    <p>세 의사 명령은 모두 <code>csrrs rd, counter, x0</code>으로 바뀐다. 몇 가지 눈여겨볼 규칙이 있다. <code>ecall</code>·<code>ebreak</code>처럼 동기 예외를 일으킨 명령은 완료된 것으로 치지 않아 instret이 늘지 않는다. 모든 하트의 실시간 시계는 서로 한 틱 안으로 맞아야 한다. 그리고 Zihpm 카운터가 어떤 사건을 셀지는 플랫폼이 정하며, 특권 소프트웨어가 <code>mcounteren</code>/<code>scounteren</code>으로 사용자 모드의 접근을 막을 수도 있다(<a href="privilege.html">17장</a>). 타이밍 부채널 공격을 막기 위해 카운터 접근을 막는 실행 환경도 있다고 규격이 적고 있다.</p>
+
+    <h3>RV32에서 64비트 카운터 읽기</h3>
+    <p>RV32에서 cycle을 읽으려면 두 번 나눠 읽어야 한다. 문제는 그 사이에도 카운터가 계속 증가한다는 점이다. 아래쪽 32비트가 0xFFFFFFFF에서 0으로 넘어가는 순간 위쪽이 1 늘어나는데, 하필 두 읽기 사이에 그 일이 일어나면 위·아래가 서로 다른 시점의 값이 되어 <b>약 43억(2<sup>32</sup>)만큼 틀린 값</b>을 얻는다. 규격은 이를 피하는 짧은 루프를 제시한다.</p>
+    <div class="codebox" data-title="규격의 예: RV32에서 64비트 cycle 값을 x3:x2로 읽기" data-highlight>again:
+    rdcycleh x3          # 위쪽 절반
+    rdcycle  x2          # 아래쪽 절반
+    rdcycleh x4          # 위쪽 절반을 한 번 더
+    bne      x3, x4, again   # 그 사이 자리올림이 있었으면 다시</div>
+    <p>위쪽을 앞뒤로 두 번 읽어 같으면, 그 사이에 자리올림이 없었다는 뜻이므로 x3:x2가 한 시점의 올바른 값이다. 다르면 처음부터 다시 읽는다. 아래 애니메이션으로 “자리올림까지 남은 사이클”을 바꿔 가며 직접 확인해 보자.</p>
+
+    <div class="sim" id="counter-sim">
+      <div class="sim-head"><span class="sim-tag animation">ANIMATION</span><h3>RV32에서 64비트 cycle 읽기</h3></div>
+      <div class="split-view">
+        <div class="program-listing" id="counter-listing"></div>
+        <div class="canvas-holder"><canvas id="counter-canvas"></canvas></div>
+      </div>
+      <div class="step-description" id="counter-description"><b>한 명령</b>을 눌러 시작하자. 카운터는 명령 하나마다 1씩 늘어난다고 가정한다.</div>
+      <div class="sim-controls">
+        <div class="control"><span>읽는 방법</span><div class="segmented" id="counter-mode"><button data-value="loop" class="on">규격의 루프</button><button data-value="highFirst">상위→하위 한 번씩</button><button data-value="lowFirst">하위→상위 한 번씩</button></div></div>
+        <label class="control"><span>자리올림까지 남은 사이클 <output id="counter-distance-output"></output></span><input type="range" id="counter-distance" min="1" max="6" value="1"></label>
+        <div class="control"><span>실행</span><div class="button-row"><button class="button primary" id="counter-step">한 명령</button><button class="button" id="counter-run">자동 실행</button><button class="button" id="counter-reset">처음으로</button></div></div>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">하위를 읽은 순간의 참값</span><span class="value" id="counter-true-value">—</span></div>
+        <div class="stat"><span class="key">읽어 낸 값 (x3:x2)</span><span class="value" id="counter-read-value">—</span></div>
+        <div class="stat"><span class="key">오차</span><span class="value" id="counter-error">—</span></div>
+        <div class="stat"><span class="key">실행한 명령 수</span><span class="value" id="counter-count">0</span></div>
+      </div>
+      <div class="sim-note">남은 사이클을 1로 두고 “상위→하위 한 번씩”을 실행해 보자. 상위는 자리올림 전, 하위는 자리올림 후의 값을 읽어 2<sup>32</sup>만큼 작은 값이 나온다. 같은 조건에서 “규격의 루프”는 한 바퀴를 더 돌고 올바른 값을 얻는다. 남은 사이클이 3 이상이면 루프도 한 바퀴로 끝난다.</div>
+    </div>
+
+    <div class="callout spec"><strong>규격 원문에서</strong>
+      <blockquote>“We required the counters be 64 bits wide, even when XLEN=32, as otherwise it is very difficult for software to determine if values have overflowed.”</blockquote>
+      <p><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/counters.html" target="_blank" rel="noopener">Zicntr and Zihpm</a> — 32비트 카운터는 수 GHz 클럭에서 몇 초 만에 한 바퀴를 돈다. 64비트로 정해 두면 현실적으로 넘칠 일이 없고, 대신 RV32에는 위의 짧은 루프라는 비용만 남는다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="fence-and-hints">
+    <h2>fence.i와 힌트: Zifencei · Zihintpause · Zihintntl</h2>
+    <h3>Zifencei: 내가 쓴 코드를 내가 실행하려면</h3>
+    <p>JIT 컴파일러는 실행 중에 기계어를 만들어 메모리에 <b>store</b>로 쓴 뒤 그 주소로 점프한다. 그런데 많은 코어는 명령어 캐시(I-캐시)와 데이터 캐시(D-캐시)가 따로 있고, 둘이 서로를 자동으로 맞춰 주지 않는다. store는 D-캐시에 들어갔는데 인출 장치는 I-캐시에 남은 <b>옛 명령</b>을 가져올 수 있다. RISC-V는 store가 명령 인출에 보이는 것을 <code>fence.i</code>를 실행하기 전까지 보장하지 않는다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 300" role="img" aria-label="JIT가 쓴 새 명령이 fence.i 이후에 명령 인출로 전달되는 흐름">
+        <defs>
+          <marker id="fencei-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--text-faint)"/></marker>
+          <path id="fencei-path" d="M505 212 H712 L785 178 V122 L712 72 H505"/>
+        </defs>
+        <rect x="20" y="40" width="250" height="52" rx="10" class="f-elev"/>
+        <text x="145" y="64" text-anchor="middle" class="t t-bold">① store로 새 기계어 쓰기</text>
+        <text x="145" y="82" text-anchor="middle" class="t-faint">sw / sd 로 코드 버퍼에</text>
+        <rect x="20" y="118" width="250" height="52" rx="10" class="f-gold-soft"/>
+        <text x="145" y="142" text-anchor="middle" class="t t-bold">② fence.i</text>
+        <text x="145" y="160" text-anchor="middle" class="t-faint">store → 인출 순서 보장</text>
+        <rect x="20" y="196" width="250" height="52" rx="10" class="f-elev"/>
+        <text x="145" y="220" text-anchor="middle" class="t t-bold">③ jalr 로 새 코드 실행</text>
+        <text x="145" y="238" text-anchor="middle" class="t-faint">이제 새 명령이 인출된다</text>
+        <path d="M145 94 V114" class="s-line" marker-end="url(#fencei-arrow)"/>
+        <path d="M145 172 V192" class="s-line" marker-end="url(#fencei-arrow)"/>
+        <!-- 하트 -->
+        <rect x="310" y="14" width="536" height="272" rx="14" fill="none" stroke="var(--border)" stroke-dasharray="6 5"/>
+        <text x="326" y="36" class="t-dim">하트 하나</text>
+        <rect x="340" y="50" width="160" height="44" rx="8" class="f-surface"/>
+        <text x="420" y="77" text-anchor="middle" class="t">명령 인출 장치</text>
+        <rect x="340" y="190" width="160" height="44" rx="8" class="f-surface"/>
+        <text x="420" y="217" text-anchor="middle" class="t">load/store 장치</text>
+        <rect x="560" y="40" width="150" height="64" rx="8" class="f-bad-soft"/>
+        <text x="635" y="66" text-anchor="middle" class="t t-bold">I-캐시</text>
+        <text x="635" y="88" text-anchor="middle" class="t-dim">옛 명령이 남아 있음</text>
+        <rect x="560" y="180" width="150" height="64" rx="8" class="f-ok-soft"/>
+        <text x="635" y="206" text-anchor="middle" class="t t-bold">D-캐시</text>
+        <text x="635" y="228" text-anchor="middle" class="t-dim">새 명령이 들어옴</text>
+        <rect x="740" y="100" width="94" height="100" rx="8" class="f-elev"/>
+        <text x="787" y="144" text-anchor="middle" class="t t-bold">L2</text>
+        <text x="787" y="164" text-anchor="middle" class="t-dim">메모리</text>
+        <path d="M500 72 H556" class="s-line" marker-end="url(#fencei-arrow)"/>
+        <path d="M500 212 H556" class="s-line" marker-end="url(#fencei-arrow)"/>
+        <use href="#fencei-path" class="s-gold flow-dash"/>
+        <circle r="6" fill="var(--accent-2)"><animateMotion dur="3.2s" begin="-1s" repeatCount="indefinite"><mpath href="#fencei-path"/></animateMotion></circle>
+        <text x="620" y="128" text-anchor="middle" class="t-bad" style="font-size:12px">fence.i 전: 옛 명령일 수 있다</text>
+        <text x="610" y="270" text-anchor="middle" class="t-faint">금색 점: store가 D-캐시 → L2 → I-캐시로 전달되는 길</text>
+      </svg></div>
+      <figcaption><b>그림 16-4.</b> 자기 수정 코드와 JIT의 문제. store한 새 명령은 D-캐시에 있지만 인출 장치는 I-캐시의 옛 명령을 볼 수 있다. <code>fence.i</code>는 그 앞의 store가 그 뒤의 명령 인출에 보이도록 보장한다. 단순한 구현은 I-캐시와 파이프라인을 통째로 비우는 식으로 이를 지킨다.</figcaption>
+    </figure>
+    <p><code>fence.i</code>의 인코딩은 MISC-MEM opcode(<code>0001111</code>)에 funct3=001이고, 나머지 칸(imm, rs1, rd)은 앞으로 더 정밀한 펜스를 위해 남겨 두었다. 표준 소프트웨어는 이 칸을 0으로 두고, 구현은 무시해야 한다.</p>
+    <div class="callout warn"><strong>fence.i는 “내 하트”만 맞춘다</strong><p><code>fence.i</code>는 실행한 하트 자신의 인출만 동기화한다. 다른 하트도 새 코드를 실행하려면, 쓴 쪽이 데이터 <code>fence</code>를 한 뒤 다른 하트들에게 각자 <code>fence.i</code>를 하라고 요청해야 한다. 게다가 운영체제는 사용자 스레드를 언제든 다른 하트로 옮길 수 있다. 그래서 리눅스는 사용자 모드의 <code>fence.i</code>에 기대지 않고, 명령 캐시를 맞추는 <b>시스템 호출</b>(riscv_flush_icache)을 두었다. 이것이 <code>fence.i</code>가 베이스 ISA에서 빠져 Zifencei로 분리된 이유 중 하나다.</p></div>
+
+    <h3>Zihintpause: 스핀 대기 중 잠깐 쉬기</h3>
+    <p>잠금(lock)이 풀리기를 기다리며 같은 메모리를 계속 읽는 <b>스핀 대기</b> 루프는 아무 일도 안 하면서 에너지와 실행 자원을 쓴다. <code>pause</code>는 “명령 완료 속도를 잠깐 늦춰도 된다”는 힌트다. SMT 코어라면 그동안 다른 하트에게 자원을 양보할 수 있다. 효과가 지속되는 시간은 유한해야 하고, 0이어도 된다.</p>
+    <p>재미있는 점은 인코딩이다. <code>pause</code>는 새 opcode가 아니라 <b>FENCE 명령의 쓸모없는 조합</b>이다. pred=W(앞의 쓰기), succ=0(뒤의 아무것도 아님)인 FENCE는 순서를 강제할 대상이 없으므로 아무 의미가 없다. 그 자리를 힌트로 쓴다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 300" role="img" aria-label="PAUSE와 NTL 힌트의 인코딩">
+        <text x="30" y="22" class="t t-bold">pause = 0x0100000F</text>
+        <text x="830" y="22" text-anchor="end" class="t-faint">FENCE 형식에 pred=W, succ=0</text>
+        <g class="t-faint" style="font-size:11px">
+          <text x="34" y="44">31</text><text x="126" y="44" text-anchor="end">28</text>
+          <text x="134" y="44">27</text><text x="226" y="44" text-anchor="end">24</text>
+          <text x="234" y="44">23</text><text x="326" y="44" text-anchor="end">20</text>
+          <text x="334" y="44">19</text><text x="451" y="44" text-anchor="end">15</text>
+          <text x="459" y="44">14</text><text x="526" y="44" text-anchor="end">12</text>
+          <text x="534" y="44">11</text><text x="651" y="44" text-anchor="end">7</text>
+          <text x="659" y="44">6</text><text x="826" y="44" text-anchor="end">0</text>
+        </g>
+        <rect x="30" y="50" width="100" height="52" class="f-surface"/>
+        <rect x="130" y="50" width="100" height="52" class="f-gold-soft"/>
+        <rect x="230" y="50" width="100" height="52" class="f-gold-soft"/>
+        <rect x="330" y="50" width="125" height="52" class="f-surface"/>
+        <rect x="455" y="50" width="75" height="52" class="f-surface"/>
+        <rect x="530" y="50" width="125" height="52" class="f-surface"/>
+        <rect x="655" y="50" width="175" height="52" class="f-accent-soft"/>
+        <text x="80" y="71" text-anchor="middle" class="t-dim">fm</text><text x="80" y="92" text-anchor="middle" class="t-mono">0000</text>
+        <text x="180" y="71" text-anchor="middle" class="t-dim">pred (IORW)</text><text x="180" y="92" text-anchor="middle" class="t-mono">0001 = W</text>
+        <text x="280" y="71" text-anchor="middle" class="t-dim">succ (IORW)</text><text x="280" y="92" text-anchor="middle" class="t-mono">0000</text>
+        <text x="392" y="71" text-anchor="middle" class="t-dim">rs1</text><text x="392" y="92" text-anchor="middle" class="t-mono">00000</text>
+        <text x="492" y="71" text-anchor="middle" class="t-dim">funct3</text><text x="492" y="92" text-anchor="middle" class="t-mono">000</text>
+        <text x="592" y="71" text-anchor="middle" class="t-dim">rd</text><text x="592" y="92" text-anchor="middle" class="t-mono">00000</text>
+        <text x="742" y="71" text-anchor="middle" class="t-dim">opcode MISC-MEM</text><text x="742" y="92" text-anchor="middle" class="t-mono">0001111</text>
+        <!-- NTL -->
+        <text x="30" y="146" class="t t-bold">ntl.* = 결과를 버리는 ADD (rd = x0, rs1 = x0)</text>
+        <g>
+          <rect x="30" y="160" width="190" height="78" rx="10" class="f-teal-soft"/>
+          <text x="125" y="184" text-anchor="middle" class="t t-bold">ntl.p1</text>
+          <text x="125" y="205" text-anchor="middle" class="t-mono">add x0, x0, x2</text>
+          <text x="125" y="226" text-anchor="middle" class="t-faint">0x00200033</text>
+        </g>
+        <g>
+          <rect x="232" y="160" width="190" height="78" rx="10" class="f-teal-soft"/>
+          <text x="327" y="184" text-anchor="middle" class="t t-bold">ntl.pall</text>
+          <text x="327" y="205" text-anchor="middle" class="t-mono">add x0, x0, x3</text>
+          <text x="327" y="226" text-anchor="middle" class="t-faint">0x00300033</text>
+        </g>
+        <g>
+          <rect x="434" y="160" width="190" height="78" rx="10" class="f-teal-soft"/>
+          <text x="529" y="184" text-anchor="middle" class="t t-bold">ntl.s1</text>
+          <text x="529" y="205" text-anchor="middle" class="t-mono">add x0, x0, x4</text>
+          <text x="529" y="226" text-anchor="middle" class="t-faint">0x00400033</text>
+        </g>
+        <g>
+          <rect x="636" y="160" width="194" height="78" rx="10" class="f-teal-soft"/>
+          <text x="733" y="184" text-anchor="middle" class="t t-bold">ntl.all</text>
+          <text x="733" y="205" text-anchor="middle" class="t-mono">add x0, x0, x5</text>
+          <text x="733" y="226" text-anchor="middle" class="t-faint">0x00500033</text>
+        </g>
+        <text x="430" y="268" text-anchor="middle" class="t-dim">x0에 쓰는 ADD는 원래 아무 효과가 없다 → 모르는 코어는 그냥 실행하고, 아는 코어는 힌트로 읽는다</text>
+        <text x="430" y="288" text-anchor="middle" class="t-faint">C 확장이 있으면 c.add x0, x2 … x5 가 c.ntl.* 이다</text>
+      </svg></div>
+      <figcaption><b>그림 16-5.</b> 힌트의 인코딩. 위: <code>pause</code>는 pred=W(0001), succ=0인 FENCE다. 아래: 네 가지 NTL 힌트는 rd=x0, rs1=x0인 ADD에서 rs2만 x2–x5로 바꾼 것이다. 둘 다 원래는 “아무 일도 안 하는” 인코딩이라 힌트를 모르는 코어에서도 안전하다.</figcaption>
+    </figure>
+    <div class="codebox" data-title="pause를 넣은 스핀 대기 루프" data-highlight>spin:
+    lw    t0, 0(a0)       # 잠금 변수 읽기
+    beqz  t0, try_lock    # 0이면(풀렸으면) 잡으러 간다
+    pause                 # 잠깐 쉬어 가기 (FENCE 힌트)
+    j     spin</div>
+    <p>스핀 루프마다 <code>pause</code>는 <b>하나만</b> 넣으라고 규격은 권한다. 여러 개를 넣으면 어떤 구현에서는 필요 이상으로 오래 멈출 수 있다. 메모리 값이 바뀔 때까지 아예 저전력으로 잠들고 싶다면 Zawrs 확장의 <code>lr.w</code> + <code>wrs.nto</code>를 쓴다(<a href="atomic.html">10장</a>).</p>
+
+    <h3>Zihintntl: “이 데이터는 다시 안 쓴다”</h3>
+    <p>큰 배열을 한 번 훑고 지나가는 스트리밍 코드는 캐시를 쓸모없는 데이터로 채워, 정작 자주 쓰는 데이터를 밀어낸다. NTL(Non-Temporal Locality) 힌트는 <b>바로 다음 명령</b>의 메모리 접근이 시간 지역성이 낮다고 알려 준다. 구현은 이 힌트로 캐시에 아예 넣지 않거나, 교체 우선순위를 낮출 수 있다. 네 가지 변형은 “어느 캐시 수준까지 지역성을 기대할 수 없는가”를 나타낸다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 280" role="img" aria-label="개인 L1과 L2, 공유 L3인 계층에서 NTL 변형이 가리키는 캐시 수준">
+        <text x="20" y="24" class="t-dim">예: 개인 L1·L2, 공유 L3인 시스템 (규격 표 2의 한 행)</text>
+        <rect x="20" y="40" width="300" height="44" rx="8" class="f-accent-soft"/>
+        <text x="170" y="67" text-anchor="middle" class="t t-bold">L1 (코어 개인)</text>
+        <rect x="20" y="96" width="300" height="44" rx="8" class="f-accent-soft"/>
+        <text x="170" y="123" text-anchor="middle" class="t t-bold">L2 (코어 개인)</text>
+        <rect x="20" y="152" width="300" height="44" rx="8" class="f-violet-soft"/>
+        <text x="170" y="179" text-anchor="middle" class="t t-bold">L3 (코어들이 공유)</text>
+        <rect x="20" y="208" width="300" height="44" rx="8" class="f-surface"/>
+        <text x="170" y="235" text-anchor="middle" class="t">메모리</text>
+        <!-- 괄호들 -->
+        <path d="M350 42 h10 v40 h-10" class="s-accent"/>
+        <text x="370" y="67" class="t-mono">ntl.p1</text>
+        <text x="440" y="67" class="t-dim">가장 안쪽 개인 캐시(L1)에선 재사용 없음</text>
+        <path d="M350 98 h10 v40 h-10" class="s-accent"/>
+        <path d="M352 42 v96" class="s-line s-dashed"/>
+        <text x="370" y="123" class="t-mono">ntl.pall</text>
+        <text x="450" y="123" class="t-dim">개인 캐시 전체(L1–L2)에서 재사용 없음</text>
+        <path d="M350 154 h10 v40 h-10" class="s-gold"/>
+        <text x="370" y="172" class="t-mono">ntl.s1</text>
+        <text x="440" y="172" class="t-dim">가장 안쪽 공유 캐시(L3)까지 재사용 없음</text>
+        <text x="370" y="192" class="t-mono">ntl.all</text>
+        <text x="440" y="192" class="t-dim">모든 캐시에서 재사용 없음 → 이 시스템에선 L3</text>
+        <text x="370" y="238" class="t-faint">힌트일 뿐이므로 무시해도 되고, 캐시가 없어도 된다</text>
+        <circle cx="336" cy="62" r="5" class="f-gold pulse"/>
+        <circle cx="336" cy="118" r="5" class="f-gold pulse" style="animation-delay:.3s"/>
+        <circle cx="336" cy="174" r="5" class="f-gold pulse" style="animation-delay:.6s"/>
+      </svg></div>
+      <figcaption><b>그림 16-6.</b> NTL 변형과 캐시 수준의 대응. 규격의 예시 표에서 “개인 L1·L2, 공유 L3” 계층은 P1→L1, PALL→L2, S1→L3, ALL→L3로 대응한다. 캐시 구성이 다르면 대응도 달라지므로, 이식성 있는 코드는 쓰임새(스트리밍이면 <code>ntl.all</code>, 경쟁이 심한 동기화 변수면 <code>ntl.pall</code>)에 따라 고르라고 규격은 권한다.</figcaption>
+    </figure>
+    <div class="callout tip"><strong>힌트는 왜 이렇게 만드나</strong><p>HINT는 아키텍처 상태를 바꾸지 않는 인코딩(대개 rd=x0)에 성능 정보를 실은 것이다. 힌트를 모르는 옛 코어는 그냥 아무 일도 안 하는 명령으로 실행하므로, 같은 바이너리가 어디서나 돈다. NTL 힌트는 ADD로 인코딩되어 있어서 LR/SC 루프 안에 넣어도 전진 보장을 깨지 않는다는 장점도 있다. 반면 <code>pause</code>는 FENCE이므로 LR/SC 루프 안에 넣으면 전진 보장이 사라진다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="zimop">
+    <h2>Zimop: “어쩌면 연산”이라는 예약 자리</h2>
+    <p>새 보안 확장을 만들었다고 하자. 컴파일러가 그 명령을 함수마다 넣으면, 그 확장이 없는 옛 칩에서는 <b>불법 명령 예외</b>로 프로그램이 죽는다. 그렇다고 칩마다 바이너리를 따로 만들 수는 없다. Zimop은 이 문제를 미리 풀어 둔 확장이다. <span class="term">MOP</span><span class="english">(May-Be-Operation)</span>은 “지금은 rd에 0을 쓰는 것 말고 아무 일도 안 하지만, 나중 확장이 뜻을 붙일 수 있는” 명령이다.</p>
+    <ul>
+      <li><b>mop.r.n</b> (n = 0–31, 32개): 나중에 rs1을 읽고 rd를 쓰도록 재정의될 수 있다.</li>
+      <li><b>mop.rr.n</b> (n = 0–7, 8개): 나중에 rs1·rs2를 읽고 rd를 쓰도록 재정의될 수 있다.</li>
+      <li><b>c.mop.n</b> (Zcmop, n = 1, 3, …, 15의 홀수 8개): 16비트판. <code>c.lui xn, 0</code>에 해당하는 예약 공간에 있고, 레지스터를 쓰지 않는다.</li>
+    </ul>
+    <p>모두 합쳐 32비트 MOP 40개다. MOP는 SYSTEM opcode에 들어 있는데, 나중에 특권 CSR 상태(예: “이 모드에서 기능이 켜졌는가”)에 따라 동작이 달라질 것으로 예상했기 때문이다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 360" role="img" aria-label="MOP.R.n의 인코딩과, 같은 바이너리가 옛 하트와 새 하트에서 다르게 동작하는 모습">
+        <defs>
+          <path id="zimop-path-left" d="M430 172 C430 210 200 200 200 246"/>
+          <path id="zimop-path-right" d="M430 172 C430 210 660 200 660 246"/>
+        </defs>
+        <text x="30" y="20" class="t t-bold">mop.r.n 인코딩</text>
+        <g class="t-faint" style="font-size:11px">
+          <text x="42" y="40" text-anchor="middle">31</text><text x="67" y="40" text-anchor="middle">30</text>
+          <text x="105" y="40" text-anchor="middle">29–28</text><text x="155" y="40" text-anchor="middle">27–26</text>
+          <text x="230" y="40" text-anchor="middle">25–22</text><text x="305" y="40" text-anchor="middle">21–20</text>
+          <text x="392" y="40" text-anchor="middle">19–15</text><text x="492" y="40" text-anchor="middle">14–12</text>
+          <text x="592" y="40" text-anchor="middle">11–7</text><text x="742" y="40" text-anchor="middle">6–0</text>
+        </g>
+        <rect x="30" y="46" width="25" height="44" class="f-surface"/>
+        <rect x="55" y="46" width="25" height="44" class="f-gold-soft"/>
+        <rect x="80" y="46" width="50" height="44" class="f-surface"/>
+        <rect x="130" y="46" width="50" height="44" class="f-gold-soft"/>
+        <rect x="180" y="46" width="100" height="44" class="f-surface"/>
+        <rect x="280" y="46" width="50" height="44" class="f-gold-soft"/>
+        <rect x="330" y="46" width="125" height="44" class="f-teal-soft"/>
+        <rect x="455" y="46" width="75" height="44" class="f-surface"/>
+        <rect x="530" y="46" width="125" height="44" class="f-teal-soft"/>
+        <rect x="655" y="46" width="175" height="44" class="f-accent-soft"/>
+        <text x="42" y="73" text-anchor="middle" class="t-mono">1</text>
+        <text x="67" y="73" text-anchor="middle" class="t-mono" style="font-size:11px">n4</text>
+        <text x="105" y="73" text-anchor="middle" class="t-mono">00</text>
+        <text x="155" y="73" text-anchor="middle" class="t-mono" style="font-size:12px">n3 n2</text>
+        <text x="230" y="73" text-anchor="middle" class="t-mono">0111</text>
+        <text x="305" y="73" text-anchor="middle" class="t-mono" style="font-size:12px">n1 n0</text>
+        <text x="392" y="73" text-anchor="middle" class="t">rs1</text>
+        <text x="492" y="73" text-anchor="middle" class="t-mono">100</text>
+        <text x="592" y="73" text-anchor="middle" class="t">rd</text>
+        <text x="742" y="73" text-anchor="middle" class="t-mono">1110011 SYSTEM</text>
+        <text x="430" y="112" text-anchor="middle" class="t-dim">mop.rr.n은 비트 25가 1이고 rs2 칸(24–20)이 있으며 n은 30·27·26번 비트(3비트)에 들어간다</text>
+        <!-- 바이너리 -->
+        <rect x="290" y="128" width="280" height="44" rx="10" class="f-elev"/>
+        <text x="430" y="148" text-anchor="middle" class="t t-bold">sspush ra  (= mop.rr.7)</text>
+        <text x="430" y="165" text-anchor="middle" class="t-faint">하나의 바이너리</text>
+        <use href="#zimop-path-left" class="s-accent flow-dash"/>
+        <use href="#zimop-path-right" class="s-accent flow-dash"/>
+        <circle r="5" fill="var(--accent-2)"><animateMotion dur="2.2s" begin="-0.3s" repeatCount="indefinite"><mpath href="#zimop-path-left"/></animateMotion></circle>
+        <circle r="5" fill="var(--accent-2)"><animateMotion dur="2.2s" begin="-1.4s" repeatCount="indefinite"><mpath href="#zimop-path-right"/></animateMotion></circle>
+        <rect x="40" y="250" width="320" height="96" rx="12" class="f-surface"/>
+        <text x="200" y="276" text-anchor="middle" class="t t-bold">Zimop만 있는 옛 하트</text>
+        <text x="200" y="300" text-anchor="middle" class="t-dim">rd(=x0) ← 0 : 사실상 아무 일 없음</text>
+        <text x="200" y="322" text-anchor="middle" class="t-ok">프로그램은 그대로 돈다 (보호만 없음)</text>
+        <rect x="500" y="250" width="320" height="96" rx="12" class="f-ok-soft"/>
+        <text x="660" y="276" text-anchor="middle" class="t t-bold">Zicfiss가 켜진 하트</text>
+        <text x="660" y="300" text-anchor="middle" class="t-dim">ra를 그림자 스택에 push</text>
+        <text x="660" y="322" text-anchor="middle" class="t-ok">반환 주소 보호가 동작한다</text>
+      </svg></div>
+      <figcaption><b>그림 16-7.</b> MOP의 인코딩과 쓰임. 위: <code>mop.r.n</code>의 번호 n(5비트)은 30·27·26·21·20번 비트에 흩어져 있다. 아래: Zicfiss의 <code>sspush</code>는 <code>mop.rr.7</code> 자리를 재정의한 것이어서, 확장이 없거나 꺼진 하트에서는 rd=x0에 0을 쓰는 무해한 명령이 된다.</figcaption>
+    </figure>
+
+    <div class="callout spec"><strong>규격 원문에서</strong>
+      <blockquote>“It is sometimes desirable to define instruction-set extensions whose instructions, rather than raising illegal-instruction exceptions when the extension is not implemented, take no useful action (beyond writing x[rd]).”</blockquote>
+      <p><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/zimop.html" target="_blank" rel="noopener">Zimop</a> — 규격은 바로 이어서 제어 흐름 무결성 검사를 예로 든다. 검사를 무시해도 프로그램은 올바르게 돈다면, MOP로 만들어 두는 것이 옳다.</p></div>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>MOP 자리</th><th>재정의한 명령 (Zicfiss)</th><th>확장이 없거나 꺼졌을 때</th></tr></thead>
+      <tbody>
+        <tr><td><code>mop.rr.7</code></td><td><code>sspush x1</code>, <code>sspush x5</code></td><td>x0 ← 0 (아무 일 없음)</td></tr>
+        <tr><td><code>mop.r.28</code></td><td><code>sspopchk x1</code>, <code>sspopchk x5</code>, <code>ssrdp rd</code></td><td>rd ← 0</td></tr>
+        <tr><td><code>c.mop.1</code></td><td><code>c.sspush x1</code></td><td>아무 레지스터도 안 씀</td></tr>
+        <tr><td><code>c.mop.5</code></td><td><code>c.sspopchk x5</code></td><td>아무 레지스터도 안 씀</td></tr>
+      </tbody>
+    </table></div>
+    <p>MOP가 “아무 일도 안 함”이 아니라 <b>rd에 0을 쓰는</b> 것으로 정의된 데에도 이유가 있다. 해독이 단순해지고, 결과가 0인지로 기능이 켜졌는지 알아낼 수 있기 때문이다. 예를 들어 <code>ssrdp t0</code>은 그림자 스택이 켜져 있으면 ssp 값을, 아니면 0을 준다. 그래서 운영체제는 그림자 스택을 0번지에 두지 않기로 약속한다.</p>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="zicond">
+    <h2>Zicond: 분기 없는 조건부 연산</h2>
+    <p><code>x = c ? a : b</code> 같은 코드는 보통 분기로 번역된다. 분기 예측기가 맞히면 빠르지만, <code>c</code>가 무작위에 가까운 데이터라면 예측은 자주 틀리고, 틀릴 때마다 파이프라인에 들어온 명령을 버리는 벌점을 낸다(<a href="pipeline.html">8장</a>). 다른 ISA에는 조건부 이동(cmov) 명령이 있지만, 그 명령은 레지스터를 세 개 읽어야 해서 RISC-V의 “읽기 포트 두 개” 원칙과 맞지 않는다. Zicond는 두 개만 읽는 더 작은 부품을 준다.</p>
+    <div class="table-wrap"><table class="instruction-table compact">
+      <thead><tr><th>명령</th><th>동작</th><th>인코딩 (R형, opcode OP=0110011)</th></tr></thead>
+      <tbody>
+        <tr><td>czero.eqz rd, rs1, rs2</td><td>rs2 == 0 이면 rd ← 0, 아니면 rd ← rs1</td><td>funct7=0000111, funct3=101</td></tr>
+        <tr><td>czero.nez rd, rs1, rs2</td><td>rs2 ≠ 0 이면 rd ← 0, 아니면 rd ← rs1</td><td>funct7=0000111, funct3=111</td></tr>
+      </tbody>
+    </table></div>
+    <p>“조건에 따라 0으로 만들기” 하나만 있으면 나머지는 조합으로 만든다. 한쪽을 0으로 지운 두 값을 더하면(또는 OR하면) 선택이 되고, 0으로 지운 값을 더하면 조건부 덧셈이 된다. 두 명령 모두 Zkt가 있으면 데이터 값과 무관한 시간에 실행되어야 하므로, 비밀 데이터로 분기하면 안 되는 암호 코드에도 쓸 수 있다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 270" role="img" aria-label="czero.eqz, czero.nez, add로 조건부 선택을 만드는 데이터 흐름">
+        <defs><marker id="zicond-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker></defs>
+        <text x="430" y="22" text-anchor="middle" class="t t-bold">a3 = (a2 ≠ 0) ? a0 : a1   — 예: a2 = 7, a0 = 10, a1 = 20</text>
+        <rect x="20" y="50" width="150" height="48" rx="8" class="f-teal-soft"/><text x="95" y="80" text-anchor="middle" class="t-mono">a0 = 10</text>
+        <rect x="20" y="112" width="150" height="48" rx="8" class="f-gold-soft"/><text x="95" y="142" text-anchor="middle" class="t-mono">a2 = 7 (조건)</text>
+        <rect x="20" y="174" width="150" height="48" rx="8" class="f-teal-soft"/><text x="95" y="204" text-anchor="middle" class="t-mono">a1 = 20</text>
+        <rect x="270" y="56" width="230" height="56" rx="10" class="f-accent-soft"/>
+        <text x="385" y="80" text-anchor="middle" class="t-mono">czero.eqz a3, a0, a2</text>
+        <text x="385" y="100" text-anchor="middle" class="t-dim">a2 ≠ 0 → a3 = 10</text>
+        <rect x="270" y="160" width="230" height="56" rx="10" class="f-accent-soft"/>
+        <text x="385" y="184" text-anchor="middle" class="t-mono">czero.nez t0, a1, a2</text>
+        <text x="385" y="204" text-anchor="middle" class="t-dim">a2 ≠ 0 → t0 = 0</text>
+        <rect x="590" y="108" width="140" height="56" rx="10" class="f-accent-soft"/>
+        <text x="660" y="132" text-anchor="middle" class="t-mono">add a3, a3, t0</text>
+        <text x="660" y="152" text-anchor="middle" class="t-dim">10 + 0</text>
+        <rect x="760" y="112" width="84" height="48" rx="8" class="f-ok-soft"/>
+        <text x="802" y="142" text-anchor="middle" class="t-mono t-bold">a3 = 10</text>
+        <path d="M170 74 C220 74 220 80 266 80" class="s-accent flow-dash" marker-end="url(#zicond-arrow)"/>
+        <path d="M170 136 C220 136 220 100 266 98" class="s-accent flow-dash" marker-end="url(#zicond-arrow)"/>
+        <path d="M170 136 C220 136 220 178 266 180" class="s-accent flow-dash" marker-end="url(#zicond-arrow)"/>
+        <path d="M170 198 C220 198 220 198 266 198" class="s-accent flow-dash" marker-end="url(#zicond-arrow)"/>
+        <path d="M500 84 C550 84 550 126 586 128" class="s-accent flow-dash" marker-end="url(#zicond-arrow)"/>
+        <path d="M500 188 C550 188 550 146 586 146" class="s-accent flow-dash" marker-end="url(#zicond-arrow)"/>
+        <path d="M730 136 H756" class="s-accent" marker-end="url(#zicond-arrow)"/>
+        <text x="430" y="252" text-anchor="middle" class="t-faint">세 명령 모두 분기가 아니므로 예측 실패가 없다. 둘 중 하나는 반드시 0이라 add 대신 or를 써도 같다.</text>
+      </svg></div>
+      <figcaption><b>그림 16-8.</b> 규격의 “조건부 선택” 관용구. 조건이 0이 아니면 a0 쪽은 살리고 a1 쪽은 0으로 지운 뒤 더한다. 조건이 0이면 반대로 된다. 어느 경우든 같은 세 명령이 같은 순서로 실행된다.</figcaption>
+    </figure>
+
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>연산 (규격 예시)</th><th>명령 순서</th></tr></thead>
+      <tbody>
+        <tr><td>rd = (rc ≠ 0) ? rs1 + rs2 : rs1</td><td><code>czero.eqz rd, rs2, rc</code> → <code>add rd, rs1, rd</code></td></tr>
+        <tr><td>rd = (rc == 0) ? rs1 + rs2 : rs1</td><td><code>czero.nez rd, rs2, rc</code> → <code>add rd, rs1, rd</code></td></tr>
+        <tr><td>rd = (rc ≠ 0) ? rs1 | rs2 : rs1</td><td><code>czero.eqz rd, rs2, rc</code> → <code>or rd, rs1, rd</code></td></tr>
+        <tr><td>rd = (rc ≠ 0) ? rs1 : rs2</td><td><code>czero.eqz rd, rs1, rc</code> → <code>czero.nez rtmp, rs2, rc</code> → <code>add rd, rd, rtmp</code></td></tr>
+        <tr><td>rd = (rc == 0) ? rs1 : rs2</td><td><code>czero.nez rd, rs1, rc</code> → <code>czero.eqz rtmp, rs2, rc</code> → <code>add rd, rd, rtmp</code></td></tr>
+      </tbody>
+    </table></div>
+
+    <div class="sim" id="zicond-sim">
+      <div class="sim-head"><span class="sim-tag">SIMULATOR</span><h3>분기 없는 선택 vs 분기 코드</h3></div>
+      <div class="twin-listing">
+        <div><div class="program-listing" id="zicond-branchless-listing"></div><div class="cell-grid" id="zicond-branchless-registers"></div></div>
+        <div><div class="program-listing" id="zicond-branchy-listing"></div><div class="cell-grid" id="zicond-branchy-registers"></div></div>
+      </div>
+      <div class="sim-view"><canvas id="zicond-canvas"></canvas></div>
+      <div class="step-description" id="zicond-description">값을 고르고 <b>한 단계</b>를 눌러 두 코드를 나란히 실행해 보자.</div>
+      <div class="sim-controls">
+        <label class="control"><span>조건 a2</span><input type="number" class="narrow-input" id="zicond-condition" value="7"></label>
+        <label class="control"><span>a0</span><input type="number" class="narrow-input" id="zicond-first" value="10"></label>
+        <label class="control"><span>a1</span><input type="number" class="narrow-input" id="zicond-second" value="20"></label>
+        <div class="control"><span>선택식</span><div class="segmented" id="zicond-form"><button data-value="nonzero" class="on">a2≠0 ? a0 : a1</button><button data-value="zero">a2==0 ? a0 : a1</button></div></div>
+        <div class="control"><span>분기 예측</span><div class="segmented" id="zicond-prediction"><button data-value="hit" class="on">적중</button><button data-value="miss">실패</button></div></div>
+        <label class="control"><span>예측 실패 벌점 <output id="zicond-penalty-output"></output></span><input type="range" id="zicond-penalty" min="2" max="16" value="2"></label>
+        <div class="control"><span>실행</span><div class="button-row"><button class="button primary" id="zicond-step">한 단계</button><button class="button" id="zicond-reset">처음으로</button></div></div>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">Zicond 코드 사이클</span><span class="value" id="zicond-branchless-cycles">—</span></div>
+        <div class="stat"><span class="key">분기 코드 사이클</span><span class="value" id="zicond-branchy-cycles">—</span></div>
+        <div class="stat"><span class="key">분기 코드 평균 (예측 50%)</span><span class="value" id="zicond-average-cycles">—</span></div>
+        <div class="stat"><span class="key">결과 a3</span><span class="value" id="zicond-result">—</span></div>
+      </div>
+      <div class="sim-note">아래 그림은 5단 파이프라인(IF·ID·EX·MEM·WB)에서 각 명령이 어느 사이클에 어느 단계에 있는지 보여 준다. 예측을 “실패”로 바꾸고 벌점을 키워 보자. 5단 파이프라인에서 EX 단계에 분기를 판정하면 벌점은 2사이클이지만, 단계가 깊은 고성능 코어에서는 훨씬 커진다. 조건 값이 예측하기 어려울수록 Zicond 쪽이 유리하다.</div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="cmo">
+    <h2>CMO: 캐시 블록 다루기</h2>
+    <p>캐시는 보통 소프트웨어 눈에 보이지 않는다. 하지만 <b>캐시 일관성 밖에 있는 장치</b>와 데이터를 주고받을 때는 이야기가 다르다. 예를 들어 DMA 장치가 하트의 캐시를 보지 못하고 메모리만 읽는다면, 하트가 쓴 데이터가 아직 캐시에만 있을 때 장치는 옛 값을 읽는다. 반대로 장치가 메모리에 새 데이터를 쓰면, 하트의 캐시에 남은 옛 사본이 그 값을 가린다. CMO(Cache-Management Operation) 확장은 이런 상황을 위해 <b>캐시 블록 단위</b>로 동작하는 명령을 정의한다.</p>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>확장</th><th>명령</th><th>하는 일</th><th>인코딩</th></tr></thead>
+      <tbody>
+        <tr><td rowspan="3"><b>Zicbom</b><br>(관리)</td><td><code>cbo.clean (rs1)</code></td><td>수정된 사본이 있으면 메모리로 써 보낸다. 사본은 남는다.</td><td>MISC-MEM, funct3=010, rd=0, imm=1</td></tr>
+        <tr><td><code>cbo.flush (rs1)</code></td><td>clean을 한 뒤 사본을 없앤다 (원자적으로).</td><td>… imm=2</td></tr>
+        <tr><td><code>cbo.inval (rs1)</code></td><td>사본을 없앤다. 다음 load는 메모리에서 읽는다.</td><td>… imm=0</td></tr>
+        <tr><td><b>Zicboz</b></td><td><code>cbo.zero (rs1)</code></td><td>블록 전체 바이트에 0을 store한다.</td><td>… imm=4</td></tr>
+        <tr><td rowspan="3"><b>Zicbop</b><br>(프리페치 힌트)</td><td><code>prefetch.i off(rs1)</code></td><td>곧 명령 인출할 블록이라는 힌트</td><td>ORI, rd=0, rs2 칸=00000</td></tr>
+        <tr><td><code>prefetch.r off(rs1)</code></td><td>곧 읽을 블록이라는 힌트</td><td>ORI, rd=0, rs2 칸=00001</td></tr>
+        <tr><td><code>prefetch.w off(rs1)</code></td><td>곧 쓸 블록이라는 힌트</td><td>ORI, rd=0, rs2 칸=00011</td></tr>
+      </tbody>
+    </table></div>
+    <p>캐시 블록은 메모리를 2의 거듭제곱 크기로 자연 정렬한(NAPOT) 조각이다. <b>블록 크기는 구현마다 다르고</b>, 소프트웨어는 실행 환경(예: 장치 트리)을 통해 알아내야 한다. 첫 CMO 확장들에서는 시스템 전체의 블록 크기가 같아야 한다. <code>cbo.*</code>는 rs1이 가리키는 주소가 블록 안 어디든 그 블록 전체에 작용하며, 정렬되지 않았다고 예외를 내지 않는다. 프리페치는 ORI의 rd=x0 힌트 자리를 빌렸으므로 오프셋의 하위 5비트(imm[4:0])는 0이어야 한다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 300" role="img" aria-label="clean, inval, flush 세 연산이 캐시와 메모리에 미치는 효과">
+        <defs>
+          <marker id="cmo-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent-2)"/></marker>
+          <marker id="cmo-arrow-teal" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--teal)"/></marker>
+        </defs>
+        <!-- clean -->
+        <text x="143" y="24" text-anchor="middle" class="t t-bold">cbo.clean</text>
+        <rect x="30" y="40" width="226" height="64" rx="10" class="f-accent-soft"/>
+        <text x="143" y="64" text-anchor="middle" class="t">캐시: V=1 D=1 → D=0</text>
+        <text x="143" y="88" text-anchor="middle" class="t-mono">값 B (그대로 남음)</text>
+        <path d="M143 106 V182" class="s-gold flow-dash" marker-end="url(#cmo-arrow)"/>
+        <text x="152" y="148" class="t-gold" style="font-size:12px">write back</text>
+        <rect x="30" y="186" width="226" height="56" rx="10" class="f-surface"/>
+        <text x="143" y="210" text-anchor="middle" class="t">메모리</text>
+        <text x="143" y="230" text-anchor="middle" class="t-mono">A → B</text>
+        <text x="143" y="272" text-anchor="middle" class="t-dim">장치가 하트의 최신 값을 본다</text>
+        <!-- inval -->
+        <text x="430" y="24" text-anchor="middle" class="t t-bold">cbo.inval</text>
+        <rect x="317" y="40" width="226" height="64" rx="10" class="f-bad-soft"/>
+        <text x="430" y="64" text-anchor="middle" class="t">캐시: 사본 버림 (V=0)</text>
+        <text x="430" y="88" text-anchor="middle" class="t-mono">옛 값 A ✕</text>
+        <path d="M430 182 V108" class="s-line flow-dash" stroke="var(--teal)" marker-end="url(#cmo-arrow-teal)"/>
+        <text x="439" y="148" class="t-teal" style="font-size:12px">다음 load</text>
+        <rect x="317" y="186" width="226" height="56" rx="10" class="f-surface"/>
+        <text x="430" y="210" text-anchor="middle" class="t">메모리 (장치가 씀)</text>
+        <text x="430" y="230" text-anchor="middle" class="t-mono">값 D</text>
+        <text x="430" y="272" text-anchor="middle" class="t-dim">하트가 장치의 새 값을 본다</text>
+        <!-- flush -->
+        <text x="717" y="24" text-anchor="middle" class="t t-bold">cbo.flush</text>
+        <rect x="604" y="40" width="226" height="64" rx="10" class="f-violet-soft"/>
+        <text x="717" y="64" text-anchor="middle" class="t">clean 다음 inval</text>
+        <text x="717" y="88" text-anchor="middle" class="t-mono">값 B → 메모리, 사본 버림</text>
+        <path d="M717 106 V182" class="s-gold flow-dash" marker-end="url(#cmo-arrow)"/>
+        <rect x="604" y="186" width="226" height="56" rx="10" class="f-surface"/>
+        <text x="717" y="210" text-anchor="middle" class="t">메모리</text>
+        <text x="717" y="230" text-anchor="middle" class="t-mono">A → B</text>
+        <text x="717" y="272" text-anchor="middle" class="t-dim">양쪽 모두 같은 값에서 다시 시작</text>
+      </svg></div>
+      <figcaption><b>그림 16-9.</b> 캐시 블록 관리 세 가지. clean은 하트 → 장치 방향(하트가 쓴 것을 장치가 보게), inval은 장치 → 하트 방향(장치가 쓴 것을 하트가 보게), flush는 둘 다다. 구현은 clean이나 inval 대신 flush를 해도 된다. 결과가 소프트웨어 입장에서 구별되지 않기 때문이다.</figcaption>
+    </figure>
+
+    <div class="sim" id="cmo-sim">
+      <div class="sim-head"><span class="sim-tag">SIMULATOR</span><h3>캐시 블록 연산 실험실</h3></div>
+      <div class="sim-view"><canvas id="cmo-canvas"></canvas></div>
+      <div class="step-description" id="cmo-description">블록을 고르고 버튼을 눌러 보자. 블록 1은 하트가 고쳐 쓴 상태(D=1)라 메모리 값이 낡아 있다.</div>
+      <div class="sim-controls">
+        <div class="control"><span>대상 블록</span><div class="segmented" id="cmo-block"><button data-value="0">0x1000</button><button data-value="1" class="on">0x1040</button><button data-value="2">0x1080</button><button data-value="3">0x10C0</button></div></div>
+        <div class="control"><span>하트</span><div class="button-row"><button class="button" id="cmo-store">store</button><button class="button" id="cmo-load">load</button></div></div>
+        <div class="control"><span>CMO</span><div class="button-row"><button class="button primary" id="cmo-clean">cbo.clean</button><button class="button primary" id="cmo-flush">cbo.flush</button><button class="button primary" id="cmo-inval">cbo.inval</button><button class="button primary" id="cmo-zero">cbo.zero</button></div></div>
+        <div class="control"><span>DMA 장치 (비일관)</span><div class="button-row"><button class="button" id="cmo-device-write">메모리에 쓰기</button><button class="button" id="cmo-device-read">메모리 읽기</button><button class="button" id="cmo-reset">처음으로</button></div></div>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">하트가 보는 값</span><span class="value" id="cmo-hart-view">—</span></div>
+        <div class="stat"><span class="key">장치가 보는 값 (메모리)</span><span class="value" id="cmo-device-view">—</span></div>
+        <div class="stat"><span class="key">두 시각이 일치?</span><span class="value" id="cmo-agreement">—</span></div>
+      </div>
+      <div class="sim-note">블록 0x1040에서 “메모리 읽기”를 먼저 눌러 장치가 낡은 값을 읽는 것을 보고, <code>cbo.clean</code> 뒤에 다시 읽어 보자. 그다음 dirty 상태에서 <code>cbo.inval</code>을 누르면 하트가 쓴 값이 메모리에 가지 못한 채 사라진다. 그래서 규격은 낮은 특권 모드에 inval을 허락하기 전에 높은 특권 소프트웨어가 clean이나 flush를 해 두거나, <code>xenvcfg.CBIE</code>로 inval을 flush로 바꾸라고 권한다.</div>
+    </div>
+    <div class="callout deep"><strong>특권 모드별 허용</strong><p>사용자·감독자 모드에서 이 명령들을 쓸 수 있는지는 <code>menvcfg</code>·<code>senvcfg</code>·<code>henvcfg</code>의 CBIE(inval), CBCFE(clean·flush), CBZE(zero) 필드가 정한다. 허락되지 않으면 불법 명령 예외(가상화 중이면 가상 명령 예외)가 난다. CBIE가 01이면 inval이 flush로 바뀌어 실행된다. 프리페치는 힌트이므로 어떤 경우에도 예외를 내지 않는다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="cfi">
+    <h2>CFI: 착지 패드와 그림자 스택</h2>
+    <p>메모리 오류(버퍼 넘침, use-after-free)를 이용하는 공격자는 새 코드를 넣는 대신, 이미 있는 코드 조각(가젯)을 이어 붙여 원하는 일을 시킨다. 반환 주소를 바꿔 가젯을 이어 가는 <b>ROP</b>와, 함수 포인터를 바꿔 엉뚱한 곳으로 점프하는 <b>JOP/COP</b>가 대표적이다. 직접 분기(<code>beq</code>, <code>jal</code>)는 목적지가 명령 안에 박혀 있어 바꿀 수 없으므로, 노리는 것은 레지스터 값으로 점프하는 <code>jalr</code>뿐이다. RISC-V의 CFI(Control-Flow Integrity)는 이 <code>jalr</code>을 두 방향에서 지킨다.</p>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th></th><th>Zicfilp — 앞 방향(forward-edge)</th><th>Zicfiss — 뒤 방향(backward-edge)</th></tr></thead>
+      <tbody>
+        <tr><td><b>지키는 것</b></td><td>간접 호출·간접 점프의 목적지</td><td>함수 반환(<code>ret</code>)의 목적지</td></tr>
+        <tr><td><b>방법</b></td><td>목적지 첫 명령이 <code>lpad</code>여야 한다 (라벨 비교 선택)</td><td>반환 주소를 그림자 스택에 한 벌 더 두고 비교</td></tr>
+        <tr><td><b>새 상태</b></td><td>ELP(예상 착지 패드) 1비트</td><td><code>ssp</code> CSR (0x011), 그림자 스택 페이지</td></tr>
+        <tr><td><b>인코딩</b></td><td><code>lpad</code> = rd=x0인 AUIPC (HINT 자리)</td><td>sspush·sspopchk·ssrdp = MOP 재정의, ssamoswap = AMO</td></tr>
+        <tr><td><b>위반 시</b></td><td>software-check 예외(cause 18), xtval = 2</td><td>software-check 예외(cause 18), xtval = 3</td></tr>
+      </tbody>
+    </table></div>
+
+    <h3>Zicfilp: 착지 패드</h3>
+    <p>Zicfilp가 켜지면 하트는 <b>ELP</b>(Expected Landing Pad) 상태를 추적한다. <code>jalr</code>·<code>c.jr</code>·<code>c.jalr</code>로 간접 점프하는데 rs1이 x1·x5(링크 레지스터)도 x7도 아니면 ELP가 LP_EXPECTED가 된다. 그러면 도착한 곳의 첫 명령은 반드시 <code>lpad</code>여야 하고 4바이트 정렬되어 있어야 한다. <code>lpad</code>에는 20비트 라벨(LPL)이 있어서, 0이 아니면 호출하는 쪽이 x7의 비트 31–12에 넣어 둔 기대 라벨과 같아야 한다. 하나라도 어기면 software-check 예외가 나고 xtval에는 “landing pad fault”를 뜻하는 2가 기록된다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 320" role="img" aria-label="간접 호출 뒤 착지 패드 검사가 성공하거나 실패하는 흐름">
+        <defs>
+          <marker id="landing-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker>
+          <marker id="landing-arrow-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--bad)"/></marker>
+          <path id="landing-path-good" d="M300 128 C380 128 400 70 520 70"/>
+        </defs>
+        <rect x="20" y="40" width="280" height="140" rx="12" class="f-elev"/>
+        <text x="36" y="64" class="t-dim">호출하는 쪽</text>
+        <text x="36" y="92" class="t-mono">lui  t2, 0x12345</text>
+        <text x="36" y="114" class="t-mono">lw   a5, 0(a0)</text>
+        <text x="36" y="136" class="t-mono">jalr ra, 0(a5)</text>
+        <text x="36" y="164" class="t-faint">t2 = x7 · 비트 31–12가 기대 라벨</text>
+        <rect x="80" y="210" width="160" height="64" rx="32" class="f-gold-soft"/>
+        <circle cx="112" cy="242" r="10" class="f-gold pulse"/>
+        <text x="132" y="238" class="t t-bold">ELP</text>
+        <text x="132" y="258" class="t-dim" style="font-size:12px">LP_EXPECTED</text>
+        <path d="M160 182 V206" class="s-gold s-dashed"/>
+        <rect x="520" y="30" width="320" height="86" rx="12" class="f-ok-soft"/>
+        <text x="536" y="54" class="t-dim">handler: (주소를 가진 함수)</text>
+        <text x="536" y="80" class="t-mono t-bold">lpad 0x12345</text>
+        <text x="536" y="102" class="t-ok">라벨 일치 → ELP = NO_LP_EXPECTED</text>
+        <rect x="520" y="160" width="320" height="120" rx="12" class="f-bad-soft"/>
+        <text x="536" y="184" class="t-dim">handler+4: 함수 중간 (가젯)</text>
+        <text x="536" y="210" class="t-mono">addi a0, a0, 1</text>
+        <text x="536" y="236" class="t-bad">lpad가 아님 → software-check 예외</text>
+        <text x="536" y="260" class="t-dim">cause = 18, xtval = 2 (landing pad fault)</text>
+        <use href="#landing-path-good" class="s-accent flow-dash" marker-end="url(#landing-arrow)"/>
+        <path d="M300 136 C380 136 400 210 516 210" class="s-bad s-dashed" marker-end="url(#landing-arrow-bad)"/>
+        <text x="408" y="186" class="t-bad" style="font-size:12px">포인터 조작</text>
+        <circle r="6" fill="var(--accent-2)"><animateMotion dur="2.4s" begin="-0.6s" repeatCount="indefinite"><mpath href="#landing-path-good"/></animateMotion></circle>
+        <text x="430" y="308" text-anchor="middle" class="t-faint">라벨(LPL)이 0인 lpad는 라벨 검사를 하지 않는다 — 한 가지 라벨만 쓰는 거친 단계의 보호</text>
+      </svg></div>
+      <figcaption><b>그림 16-10.</b> 착지 패드 검사. 간접 호출이 ELP를 LP_EXPECTED로 만들고, 도착한 명령이 라벨이 맞는 <code>lpad</code>일 때만 실행이 이어진다. 함수 포인터를 조작해 함수 중간으로 뛰어들게 하면 첫 명령이 <code>lpad</code>가 아니므로 즉시 예외가 난다. <code>lpad</code>는 AUIPC의 HINT 자리라 Zicfilp가 없거나 꺼진 하트에서는 아무 일도 하지 않는다.</figcaption>
+    </figure>
+    <p>x7로 점프하는 경우가 예외인 이유도 있다. 컴파일러가 범위를 검사한 읽기 전용 점프 테이블(switch 문)처럼 목적지를 완전히 통제하는 경우를 위해 “소프트웨어가 지키는 분기”로 남겨 둔 것이다. 또 rs1이 링크 레지스터인 <code>jalr</code>은 반환이거나, <code>auipc ra</code>와 짝을 이룬 사실상 직접 호출이라 착지 패드가 필요 없다.</p>
+
+    <h3>Zicfiss: 그림자 스택</h3>
+    <p>함수를 호출하면 반환 주소(ra)가 일반 스택에 저장된다. 일반 스택은 보통 메모리라서 버퍼 넘침으로 덮어쓸 수 있다. Zicfiss는 반환 주소를 <b>보호된 두 번째 스택</b>에도 저장해 두고, 반환하기 직전에 둘을 비교한다. 그림자 스택은 페이지 테이블에서 R=0, W=1, X=0인 특별한 페이지(원래 예약된 조합)로 표시되며, <code>sspush</code>·<code>ssamoswap</code> 말고 일반 store로는 쓸 수 없다. 일반 store가 그 페이지에 쓰려 하면 store/AMO access-fault가 난다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 330" role="img" aria-label="일반 스택과 그림자 스택에 저장된 반환 주소를 sspopchk가 비교하는 모습">
+        <defs><marker id="shadow-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker></defs>
+        <text x="170" y="24" text-anchor="middle" class="t t-bold">일반 스택 (읽기·쓰기 페이지)</text>
+        <rect x="40" y="40" width="260" height="44" class="f-surface"/>
+        <text x="170" y="67" text-anchor="middle" class="t-dim">호출한 함수의 프레임</text>
+        <rect x="40" y="84" width="260" height="44" class="f-bad-soft"/>
+        <text x="170" y="104" text-anchor="middle" class="t t-bold">저장된 ra = 0x1004</text>
+        <text x="170" y="121" text-anchor="middle" class="t-bad" style="font-size:12px">넘친 데이터로 0x4000 이 될 수 있다</text>
+        <rect x="40" y="128" width="260" height="44" class="f-elev"/>
+        <text x="170" y="155" text-anchor="middle" class="t-mono">char buffer[8]</text>
+        <path d="M30 172 V96" class="s-bad flow-dash"/>
+        <text x="26" y="190" text-anchor="end" class="t-bad" style="font-size:11px">넘침</text>
+        <text x="170" y="196" text-anchor="middle" class="t-faint">sp ↓ 낮은 주소로 자란다</text>
+        <text x="620" y="24" text-anchor="middle" class="t t-bold">그림자 스택 (SS 페이지, xwr=010)</text>
+        <rect x="490" y="40" width="260" height="44" class="f-ok-soft"/>
+        <text x="620" y="67" text-anchor="middle" class="t-dim">이전 사본</text>
+        <rect x="490" y="84" width="260" height="44" class="f-ok-soft"/>
+        <text x="620" y="111" text-anchor="middle" class="t t-bold">ra 사본 = 0x1004</text>
+        <text x="770" y="111" class="t-mono">← ssp</text>
+        <text x="620" y="152" text-anchor="middle" class="t-faint">일반 store 금지 → access fault</text>
+        <path d="M300 106 H486" class="s-accent flow-dash" marker-end="url(#shadow-arrow)"/>
+        <rect x="330" y="120" width="130" height="40" rx="8" class="f-gold-soft"/>
+        <text x="395" y="145" text-anchor="middle" class="t-mono t-bold">sspopchk ra</text>
+        <!-- 비교 결과 -->
+        <rect x="40" y="226" width="380" height="88" rx="12" class="f-ok-soft"/>
+        <text x="230" y="254" text-anchor="middle" class="t t-bold">같으면</text>
+        <text x="230" y="278" text-anchor="middle" class="t-dim">ssp += XLEN/8, 그다음 ret 정상 실행</text>
+        <rect x="440" y="226" width="380" height="88" rx="12" class="f-bad-soft"/>
+        <text x="630" y="254" text-anchor="middle" class="t t-bold">다르면</text>
+        <text x="630" y="278" text-anchor="middle" class="t-dim">software-check 예외 (cause 18)</text>
+        <text x="630" y="300" text-anchor="middle" class="t-dim">xtval = 3 (shadow stack fault)</text>
+      </svg></div>
+      <figcaption><b>그림 16-11.</b> 두 개의 스택. 함수 머리에서 ra를 일반 스택에 저장하고(<code>sw ra</code>) 그림자 스택에도 저장한다(<code>sspush ra</code>). 꼬리에서는 일반 스택에서 ra를 되읽은 뒤 <code>sspopchk ra</code>로 그림자 사본과 비교한다. 버퍼 넘침이 일반 스택의 ra를 바꿔도 그림자 사본은 바꿀 수 없다.</figcaption>
+    </figure>
+
+    <div class="codebox" data-title="규격의 예: 그림자 스택을 쓰는 비말단 함수의 머리와 꼬리 (RV64)" data-highlight>function_entry:
+    addi     sp, sp, -8   # 일반 스택에
+    sd       x1, (sp)     #   링크 레지스터 x1 저장
+    sspush   x1           # 그림자 스택에도 x1 저장
+    # ... 함수 본문 (다른 함수를 부른다) ...
+    ld       x1, (sp)     # 일반 스택에서 x1 복원
+    addi     sp, sp, 8
+    sspopchk x1           # 그림자 사본과 다르면 예외
+    ret</div>
+    <div class="callout spec"><strong>규격 원문에서</strong>
+      <blockquote>“A mismatch of the two values is indicative of a subversion of the return address control variable and causes a software-check exception.”</blockquote>
+      <p><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/unpriv-cfi.html" target="_blank" rel="noopener">Control-flow Integrity (CFI), Shadow Stack</a> — 예외 번호 18(software check)과 xtval 값 2·3은 특권 규격의 <a href="https://docs.riscv.org/reference/isa/v20260120/priv/machine.html" target="_blank" rel="noopener">mcause 표</a>에 정의되어 있다.</p></div>
+
+    <div class="sim" id="cfi-sim">
+      <div class="sim-head"><span class="sim-tag">SIMULATOR</span><h3>공격과 방어: 그림자 스택과 착지 패드</h3></div>
+      <div class="split-view">
+        <div class="program-listing" id="cfi-listing"></div>
+        <div class="canvas-holder"><canvas id="cfi-canvas"></canvas></div>
+      </div>
+      <div class="step-description" id="cfi-description"><b>한 단계</b>를 눌러 프로그램을 따라가 보자.</div>
+      <div class="sim-controls">
+        <div class="control"><span>장면</span><div class="segmented" id="cfi-scenario"><button data-value="normal" class="on">정상 호출·반환</button><button data-value="overflow">버퍼 넘침</button><button data-value="landingGood">간접 호출(lpad)</button><button data-value="landingGadget">가젯으로 점프</button><button data-value="landingLabel">라벨 불일치</button></div></div>
+        <div class="control"><span>CFI</span><label class="checkbox"><input type="checkbox" id="cfi-enabled" checked> Zicfiss·Zicfilp 켜기</label></div>
+        <div class="control"><span>실행</span><div class="button-row"><button class="button primary" id="cfi-step">한 단계</button><button class="button" id="cfi-reset">처음으로</button></div></div>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">ra</span><span class="value" id="cfi-return-address">—</span></div>
+        <div class="stat"><span class="key">ssp</span><span class="value" id="cfi-shadow-pointer">—</span></div>
+        <div class="stat"><span class="key">ELP</span><span class="value" id="cfi-expected-landing">—</span></div>
+        <div class="stat"><span class="key">예외</span><span class="value" id="cfi-exception">없음</span></div>
+      </div>
+      <div class="sim-note">“버퍼 넘침” 장면을 CFI를 켠 채로 끝까지 실행하고, 다시 CFI를 끈 채로 실행해 보자. 끈 경우 <code>sspush</code>/<code>sspopchk</code>는 MOP로서 아무 일도 하지 않고, <code>ret</code>은 공격자가 심은 0x4000으로 간다. 착지 패드 장면에서도 마찬가지로 CFI를 끄면 <code>lpad</code>는 그냥 지나가는 명령이 된다.</div>
+    </div>
+    <div class="callout warn"><strong>켜고 끄는 것은 특권 소프트웨어</strong><p>Zicfilp·Zicfiss는 모드마다 따로 켤 수 있다. 켜는 스위치(<code>menvcfg</code>·<code>senvcfg</code>의 LPE·SSE 비트, M 모드는 <code>mseccfg.MLPE</code>)와 트랩 때 ELP를 보존하는 방법은 특권 규격이 정한다. Zicfiss는 Zicsr·Zimop·Zaamo에 의존하고, 사용자 모드에서 쓰려면 S 모드가 있어야 하며, M 모드에서는 지원되지 않는다. 동적 로더는 실행 파일과 모든 공유 라이브러리가 CFI로 컴파일되었을 때만 기능을 켜야 한다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="zilsd">
+    <h2>Zilsd: RV32의 레지스터 짝 load/store</h2>
+    <p>RV32에서 64비트 값(예: <code>long long</code>, double 값을 정수 레지스터로 옮기는 경우)을 옮기려면 <code>lw</code> 두 번, <code>sw</code> 두 번이 필요하다. Zilsd는 RV64에만 있던 <code>ld</code>·<code>sd</code> 인코딩을 RV32에서 재사용해, <b>짝수 번호 레지스터와 그다음 홀수 레지스터</b>를 한 쌍으로 묶어 64비트를 한 명령에 옮긴다. 엔디안과 상관없이 낮은 번호 레지스터가 하위 32비트를 갖는다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 256" role="img" aria-label="ld x14, 0(a0)이 메모리 8바이트를 x14와 x15 레지스터 짝으로 읽는 모습">
+        <defs><marker id="zilsd-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker></defs>
+        <rect x="300" y="12" width="260" height="40" rx="10" class="f-gold-soft"/>
+        <text x="430" y="38" text-anchor="middle" class="t-mono t-bold">ld x14, 0(a0)   (RV32 + Zilsd)</text>
+        <text x="40" y="200" class="t-dim">메모리 (a0부터 8바이트, 리틀 엔디안)</text>
+        <g>
+          <rect x="40" y="102" width="70" height="40" class="f-teal-soft"/><text x="75" y="127" text-anchor="middle" class="t-mono">b0</text>
+          <rect x="110" y="102" width="70" height="40" class="f-teal-soft"/><text x="145" y="127" text-anchor="middle" class="t-mono">b1</text>
+          <rect x="180" y="102" width="70" height="40" class="f-teal-soft"/><text x="215" y="127" text-anchor="middle" class="t-mono">b2</text>
+          <rect x="250" y="102" width="70" height="40" class="f-teal-soft"/><text x="285" y="127" text-anchor="middle" class="t-mono">b3</text>
+          <rect x="320" y="102" width="70" height="40" class="f-violet-soft"/><text x="355" y="127" text-anchor="middle" class="t-mono">b4</text>
+          <rect x="390" y="102" width="70" height="40" class="f-violet-soft"/><text x="425" y="127" text-anchor="middle" class="t-mono">b5</text>
+          <rect x="460" y="102" width="70" height="40" class="f-violet-soft"/><text x="495" y="127" text-anchor="middle" class="t-mono">b6</text>
+          <rect x="530" y="102" width="70" height="40" class="f-violet-soft"/><text x="565" y="127" text-anchor="middle" class="t-mono">b7</text>
+        </g>
+        <rect x="660" y="74" width="180" height="44" rx="8" class="f-teal-soft"/>
+        <text x="750" y="101" text-anchor="middle" class="t-mono">x14 = b3 b2 b1 b0</text>
+        <rect x="660" y="132" width="180" height="44" rx="8" class="f-violet-soft"/>
+        <text x="750" y="159" text-anchor="middle" class="t-mono">x15 = b7 b6 b5 b4</text>
+        <path d="M180 100 C180 62 600 62 656 92" class="s-accent flow-dash" marker-end="url(#zilsd-arrow)"/>
+        <path d="M460 144 C470 178 620 178 656 158" class="s-accent flow-dash" marker-end="url(#zilsd-arrow)"/>
+        <text x="40" y="222" class="t-dim">하위 32비트 → 짝수 레지스터(rd), 상위 32비트 → rd+1</text>
+        <text x="40" y="242" class="t-faint">홀수 번호를 rd로 쓰는 것은 예약 · rd=x0이면 결과를 버리고 x1도 쓰지 않는다</text>
+      </svg></div>
+      <figcaption><b>그림 16-12.</b> Zilsd의 <code>ld</code>. RV32에서 <code>ld x14, 0(a0)</code>은 8바이트를 읽어 x14(하위)와 x15(상위)에 나눠 넣는다. <code>sd</code>는 반대로 레지스터 짝을 8바이트로 쓴다.</figcaption>
+    </figure>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>유효 주소 정렬</th><th>각 워드 접근이 원자적인가</th><th>정렬 예외가 날 수 있나</th></tr></thead>
+      <tbody>
+        <tr><td>8의 배수</td><td>예</td><td>아니요</td></tr>
+        <tr><td>4의 배수지만 8의 배수는 아님</td><td>예</td><td>예</td></tr>
+        <tr><td>그 밖</td><td>아니요</td><td>예</td></tr>
+      </tbody>
+    </table></div>
+    <p>8바이트 정렬이어도 64비트 전체가 원자적으로 접근된다는 보장은 없다. 4바이트 정렬이면 두 개의 4바이트 접근으로 나뉠 수 있고, 각 워드만 원자적이다. load 도중 트랩이 나면 베이스 레지스터는 원래 값을 유지해야 다시 실행할 수 있다(짝의 다른 레지스터는 이미 바뀌었을 수 있다). 압축판 <b>Zclsd</b>는 <code>c.ld</code>·<code>c.sd</code>·<code>c.ldsp</code>·<code>c.sdsp</code>를 주는데, RV32의 Zcf(<code>c.flw</code> 등)와 같은 인코딩을 쓰므로 둘은 함께 쓸 수 없다(<a href="compressed.html">13장</a>).</p>
+    <div class="callout tip"><strong>작은 확장이 바꾸는 것</strong><p>Zilsd는 새 기능이라기보다 코드 크기와 성능을 위한 확장이다. 함수 머리·꼬리에서 레지스터를 저장·복원할 때, 64비트 값을 복사할 때 명령 수가 절반으로 준다. 레지스터 파일이 짝 단위로 쓰기를 지원하는 구현이라면 원자성 조건도 자연스럽게 만족한다.</p></div>
+  </section>
+
+  <section class="keypoints" id="summary">
+    <h2>핵심 정리</h2>
+    <ol>
+      <li><b>Zicsr</b>의 6개 명령은 CSR 하나를 원자적으로 읽고(rd ← 옛 값) 고쳐 쓴다. rd=x0이면 읽지 않고, rs1=x0(uimm=0)이면 쓰지 않는다. <code>csrr</code>은 <code>csrrs rd, csr, x0</code>이다.</li>
+      <li><b>Zicntr</b>는 cycle·time·instret(0xC00–0xC02), <b>Zihpm</b>은 hpmcounter3–31(0xC03–0xC1F)이다. 모두 64비트이며 RV32는 0xC80–0xC9F로 위쪽을 읽고, 자리올림 때문에 <b>상위-하위-상위 3회 읽기 루프</b>가 필요하다.</li>
+      <li><code>fence.i</code>는 자기 하트의 store를 이후 명령 인출에 보이게 한다. <code>pause</code>는 pred=W·succ=0인 FENCE, <code>ntl.*</code>은 <code>add x0, x0, x2–x5</code>로 인코딩된 힌트다.</li>
+      <li><b>Zimop</b>의 MOP는 기본으로 rd에 0만 쓰는 예약 자리다. Zicfiss의 <code>sspush</code>(mop.rr.7)·<code>sspopchk</code>(mop.r.28)처럼 나중 확장이 재정의해도, 옛 하트에서는 무해하게 돈다.</li>
+      <li><b>Zicond</b>의 <code>czero.eqz</code>·<code>czero.nez</code> 두 명령과 add/or를 조합하면 분기 없는 조건부 선택·연산을 만든다. 예측하기 어려운 조건에서 분기 예측 실패 벌점을 없앤다.</li>
+      <li><b>CMO</b>: clean(써 보내기), inval(사본 버리기), flush(둘 다), zero(블록에 0), prefetch(힌트). 블록 크기는 구현마다 다르며 실행 환경에서 알아낸다.</li>
+      <li><b>CFI</b>: Zicfilp는 간접 점프 목적지에 <code>lpad</code>(라벨 비교)를, Zicfiss는 그림자 스택(ssp CSR 0x011, xwr=010 페이지)을 요구한다. 위반하면 software-check 예외(cause 18)가 나고 xtval은 착지 패드 2, 그림자 스택 3이다.</li>
+      <li><b>Zilsd</b>는 RV32에서 <code>ld</code>·<code>sd</code>로 짝수·홀수 레지스터 짝에 64비트를 옮긴다. 낮은 번호가 하위 절반이다.</li>
+    </ol>
+  </section>
+
+  <section id="quiz">
+    <h2>확인 퀴즈</h2>
+    <div class="quiz">
+      <div class="quiz-question"><p>의사 명령 <code>csrr a0, mstatus</code>는 어떤 실제 명령으로 바뀌는가?</p><div class="options">
+        <button class="option">csrrw a0, mstatus, x0</button>
+        <button class="option" data-correct>csrrs a0, mstatus, x0</button>
+        <button class="option">csrrc x0, mstatus, a0</button>
+        <button class="option">csrrwi a0, mstatus, 0</button>
+      </div><div class="quiz-explanation"><code>csrrw</code>는 rs1=x0이어도 0을 써 버린다. <code>csrrs</code>는 rs1=x0이면 CSR에 아예 쓰지 않으므로 순수한 읽기가 된다.</div></div>
+      <div class="quiz-question"><p>RV32에서 64비트 cycle을 읽을 때 <code>rdcycleh</code>를 두 번 읽어 비교하는 이유는?</p><div class="options">
+        <button class="option">rdcycleh가 가끔 틀린 값을 주기 때문에</button>
+        <button class="option">cycleh는 읽을 때마다 0으로 초기화되기 때문에</button>
+        <button class="option">사용자 모드에서는 한 번만 읽으면 예외가 나기 때문에</button>
+        <button class="option" data-correct>두 읽기 사이에 하위 32비트가 넘쳐 상위가 바뀌었을 수 있기 때문에</button>
+      </div><div class="quiz-explanation">상위를 앞뒤로 읽어 같아야 그 사이 자리올림이 없었다는 것이 보장된다. 다르면 다시 읽는다.</div></div>
+      <div class="quiz-question"><p><code>pause</code> 명령의 인코딩으로 옳은 것은?</p><div class="options">
+        <button class="option">새로 배정한 전용 opcode</button>
+        <button class="option">rd=x0인 ADDI</button>
+        <button class="option" data-correct>pred=W, succ=0, rd=rs1=x0, fm=0인 FENCE</button>
+        <button class="option">funct3=001인 MISC-MEM (fence.i)</button>
+      </div><div class="quiz-explanation">succ가 비어 있는 FENCE는 순서를 강제할 대상이 없어 원래 의미가 없다. 그 자리를 힌트로 재활용했다. 인코딩은 0x0100000F다.</div></div>
+      <div class="quiz-question"><p>Zicfiss의 <code>sspush</code>가 Zimop의 MOP 자리를 쓰는 가장 큰 이유는?</p><div class="options">
+        <button class="option" data-correct>확장이 없거나 꺼진 하트에서도 같은 바이너리가 예외 없이 돌게 하려고</button>
+        <button class="option">인코딩 비트가 부족해서</button>
+        <button class="option">MOP가 더 빨리 실행되기 때문에</button>
+        <button class="option">M 모드에서만 쓰기 위해서</button>
+      </div><div class="quiz-explanation">MOP는 기본으로 rd에 0만 쓴다. sspush는 rd=x0이라 옛 하트에서는 아무 효과가 없고, 프로그램은 보호만 없을 뿐 정상 동작한다.</div></div>
+      <div class="quiz-question"><p><code>czero.nez a3, a0, a2</code>에서 a2 = 5, a0 = 9이면 a3은?</p><div class="options">
+        <button class="option" data-correct>0</button>
+        <button class="option">9</button>
+        <button class="option">5</button>
+        <button class="option">14</button>
+      </div><div class="quiz-explanation">czero.nez는 조건(rs2)이 0이 아니면(nez) 0을 쓴다. a2 = 5 ≠ 0이므로 a3 = 0이다.</div></div>
+      <div class="quiz-question"><p>DMA 장치가 메모리에 새 데이터를 쓴 뒤, 하트가 그 데이터를 읽기 전에 해야 할 CMO는?</p><div class="options">
+        <button class="option">cbo.clean</button>
+        <button class="option" data-correct>cbo.inval (또는 cbo.flush)</button>
+        <button class="option">cbo.zero</button>
+        <button class="option">prefetch.w</button>
+      </div><div class="quiz-explanation">하트 캐시에 남은 옛 사본을 없애야 다음 load가 메모리의 새 값을 가져온다. flush도 사본을 없애므로 같은 목적을 이룬다. clean은 하트 → 장치 방향이다.</div></div>
+      <div class="quiz-question"><p><code>sspopchk ra</code>에서 그림자 사본과 ra가 다를 때 일어나는 일은?</p><div class="options">
+        <button class="option">ssp만 증가하고 계속 실행된다</button>
+        <button class="option">불법 명령 예외(cause 2)</button>
+        <button class="option" data-correct>software-check 예외(cause 18), xtval = 3</button>
+        <button class="option">store/AMO access fault(cause 7)</button>
+      </div><div class="quiz-explanation">xtval 3은 shadow stack fault, 2는 landing pad fault다. 불일치일 때 ssp는 증가하지 않는다. access fault는 일반 store가 그림자 스택 페이지에 쓰려 할 때 난다.</div></div>
+      <div class="quiz-question"><p>RV32 + Zilsd에서 <code>ld x14, 0(a0)</code>의 결과로 옳은 것은?</p><div class="options">
+        <button class="option">x14에 하위 32비트만 들어가고 상위는 버린다</button>
+        <button class="option">x13에 상위 32비트가 들어간다</button>
+        <button class="option" data-correct>x14에 하위 32비트, x15에 상위 32비트가 들어간다</button>
+        <button class="option">빅 엔디안 시스템에서는 x14가 상위 32비트다</button>
+      </div><div class="quiz-explanation">rd는 짝수여야 하고, 엔디안과 상관없이 낮은 번호 레지스터가 하위 비트를 갖는다.</div></div>
+    </div>
+  </section>
+
+  <section id="references">
+    <h2>더 읽을거리</h2>
+    <ul class="references">
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/zicsr.html" target="_blank" rel="noopener">“Zicsr” Extension for CSR Instructions, Version 2.0</a> (ISA Manual v20260120, Vol. I)</li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/counters.html" target="_blank" rel="noopener">“Zicntr” and “Zihpm” Extensions for Counters, Version 2.0</a></li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/zifencei.html" target="_blank" rel="noopener">“Zifencei” Extension for Instruction-Fetch Fence, Version 2.0</a></li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/zihintntl.html" target="_blank" rel="noopener">“Zihintntl” Version 1.0</a> · <a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/zihintpause.html" target="_blank" rel="noopener">“Zihintpause” Version 2.0</a></li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/zimop.html" target="_blank" rel="noopener">“Zimop” and “Zcmop” Extensions, Version 1.0</a></li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/zicond.html" target="_blank" rel="noopener">“Zicond” Extension for Integer Conditional Operations, Version 1.0.0</a></li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/cmo.html" target="_blank" rel="noopener">“CMO” Extensions for Base Cache Management Operation ISA, Version 1.0.0</a></li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/unpriv-cfi.html" target="_blank" rel="noopener">Control-flow Integrity (CFI) — Zicfilp · Zicfiss</a> · 특권 쪽: <a href="https://docs.riscv.org/reference/isa/v20260120/priv/priv-cfi.html" target="_blank" rel="noopener">Privileged CFI</a></li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/zilsd.html" target="_blank" rel="noopener">“Zilsd”, “Zclsd” Extensions for Load/Store pair for RV32, Version 1.0</a></li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/zawrs.html" target="_blank" rel="noopener">“Zawrs” Extension, Version 1.01</a> — 스핀 대기 대신 저전력 대기 (10장)</li>
+    </ul>
+  </section>
+</main>
+
+<script>
+/* ---------------------------------------------------------------------------
+   이 장 공통 도우미: 어셈블리 코드에 색을 입힌다.
+   riscv.js 의 강조 함수는 숫자가 들어간 니모닉(sspush 등)을 놓치므로 이 장 안에서 따로 만든다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const REGISTER_NAMES = new Set([
+    "zero", "ra", "sp", "gp", "tp", "fp",
+    "t0", "t1", "t2", "t3", "t4", "t5", "t6",
+    "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11",
+    "a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7",
+  ]);
+  const NUMBERED_REGISTER_PATTERN = /^x([0-9]|[12][0-9]|3[01])$/;
+  const TOKEN_PATTERN = /(\s+)|([A-Za-z_.][\w.]*:)|([A-Za-z_.][\w.]*)|(-?0x[0-9a-fA-F]+|-?\d+)|([^\s])/g;
+
+  function escapeHtml(text) {
+    return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+  function isRegisterName(word) {
+    return REGISTER_NAMES.has(word) || NUMBERED_REGISTER_PATTERN.test(word);
+  }
+
+  function highlightLine(line) {
+    const commentIndex = line.indexOf("#");
+    const code = commentIndex >= 0 ? line.slice(0, commentIndex) : line;
+    const comment = commentIndex >= 0 ? line.slice(commentIndex) : "";
+    let html = "";
+    // 줄의 첫 단어(라벨 다음)가 니모닉이다. 그 뒤의 단어는 레지스터인지 검사한다.
+    let hasSeenMnemonic = false;
+    let match = TOKEN_PATTERN.exec(code);
+    while (match !== null) {
+      if (match[1]) {
+        html += match[1];
+      } else if (match[2]) {
+        html += '<span class="label">' + escapeHtml(match[2]) + "</span>";
+      } else if (match[3]) {
+        const word = match[3];
+        if (!hasSeenMnemonic) {
+          html += '<span class="keyword">' + escapeHtml(word) + "</span>";
+          hasSeenMnemonic = true;
+        } else if (isRegisterName(word)) {
+          html += '<span class="register">' + word + "</span>";
+        } else {
+          html += escapeHtml(word);
+        }
+      } else if (match[4]) {
+        html += '<span class="number">' + match[4] + "</span>";
+      } else {
+        html += escapeHtml(match[5]);
+      }
+      match = TOKEN_PATTERN.exec(code);
+    }
+    TOKEN_PATTERN.lastIndex = 0;
+    if (comment) html += '<span class="comment">' + escapeHtml(comment) + "</span>";
+    return html;
+  }
+
+  function highlightSource(source) {
+    return source.split("\n").map(highlightLine).join("\n");
+  }
+
+  /* 프로그램 목록(.program-listing)을 그린다. rows: [{ address, text }] */
+  function renderListing(container, title, rows) {
+    let html = title ? '<div class="listing-title">' + escapeHtml(title) + "</div>" : "";
+    rows.forEach((row, index) => {
+      html += '<div class="row" data-index="' + index + '"><span class="address">' + escapeHtml(row.address || "") + "</span><span>" + highlightLine(row.text) + "</span></div>";
+    });
+    container.innerHTML = html;
+  }
+
+  function markListing(container, currentIndex, options) {
+    const settings = Object.assign({ faultedIndex: -1, skippedIndices: [] }, options || {});
+    container.querySelectorAll(".row").forEach((row) => {
+      const index = Number(row.dataset.index);
+      row.classList.toggle("current", index === currentIndex && index !== settings.faultedIndex);
+      row.classList.toggle("faulted", index === settings.faultedIndex);
+      row.classList.toggle("skipped", settings.skippedIndices.includes(index));
+    });
+  }
+
+  document.querySelectorAll(".codebox[data-highlight]").forEach((box) => {
+    box.innerHTML = highlightSource(box.textContent);
+  });
+
+  window.SmallExtensionsChapter = { highlightLine, renderListing, markListing };
+})();
+
+/* ---------------------------------------------------------------------------
+   RV32에서 64비트 cycle 읽기 애니메이션.
+   카운터는 명령 하나마다 1씩 늘어난다고 단순화했다. 그래야 "두 읽기 사이의 자리올림"을
+   사이클 단위로 정확히 보여 줄 수 있다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const chapter = window.SmallExtensionsChapter;
+  const LOW_HALF_MODULUS = 1n << 32n;
+  const LOW_HALF_MASK = LOW_HALF_MODULUS - 1n;
+  const HIGH_HALF_AT_START = 0x7n;
+  const CYCLES_PER_INSTRUCTION = 1n;
+  const TIMELINE_CYCLE_COUNT = 10;
+  const AUTO_STEPS_PER_SECOND = 1.4;
+  const FLASH_DURATION_SECONDS = 0.8;
+
+  const PROGRAMS = {
+    loop: [
+      { address: "again:", text: "rdcycleh x3", kind: "readHigh", target: "x3" },
+      { address: "", text: "rdcycle  x2", kind: "readLow", target: "x2" },
+      { address: "", text: "rdcycleh x4", kind: "readHigh", target: "x4" },
+      { address: "", text: "bne x3, x4, again", kind: "compare" },
+    ],
+    highFirst: [
+      { address: "", text: "rdcycleh x3", kind: "readHigh", target: "x3" },
+      { address: "", text: "rdcycle  x2", kind: "readLow", target: "x2" },
+    ],
+    lowFirst: [
+      { address: "", text: "rdcycle  x2", kind: "readLow", target: "x2" },
+      { address: "", text: "rdcycleh x3", kind: "readHigh", target: "x3" },
+    ],
+  };
+
+  const listing = document.getElementById("counter-listing");
+  const description = document.getElementById("counter-description");
+  const runButton = document.getElementById("counter-run");
+  let mode = "loop";
+  let distanceToWrap = 1;
+  let state = null;
+  let flashRemaining = 0;
+  let isAutoRunning = false;
+  let autoAccumulator = 0;
+
+  function startCounterValue() {
+    return (HIGH_HALF_AT_START << 32n) | (LOW_HALF_MODULUS - BigInt(distanceToWrap));
+  }
+
+  function freshState() {
+    return {
+      counter: startCounterValue(),
+      cycleIndex: 0,
+      instructionIndex: 0,
+      registers: { x2: null, x3: null, x4: null },
+      lastWritten: null,
+      trueValueAtLowRead: null,
+      readLog: [],
+      executedCount: 0,
+      loopCount: 1,
+      isDone: false,
+    };
+  }
+
+  function formatSixtyFour(value) {
+    const text = value.toString(16).padStart(16, "0");
+    return "0x" + text.slice(0, 8) + "_" + text.slice(8);
+  }
+  function formatThirtyTwo(value) {
+    return "0x" + value.toString(16).padStart(8, "0");
+  }
+
+  /* 한 명령 실행. 순수 논리 부분이라 node 에서도 같은 규칙으로 검증했다. */
+  function executeOne() {
+    if (state.isDone) return "";
+    const program = PROGRAMS[mode];
+    const instruction = program[state.instructionIndex];
+    let message = "";
+    const highHalf = state.counter >> 32n;
+    const lowHalf = state.counter & LOW_HALF_MASK;
+    if (instruction.kind === "readHigh") {
+      state.registers[instruction.target] = highHalf;
+      state.lastWritten = instruction.target;
+      state.readLog.push({ cycle: state.cycleIndex, kind: "H", target: instruction.target });
+      message = "<code>" + instruction.text.trim() + "</code>: 이 순간 상위 32비트 = <b>" + formatThirtyTwo(highHalf) + "</b>.";
+    } else if (instruction.kind === "readLow") {
+      state.registers[instruction.target] = lowHalf;
+      state.lastWritten = instruction.target;
+      state.trueValueAtLowRead = state.counter;
+      state.readLog.push({ cycle: state.cycleIndex, kind: "L", target: instruction.target });
+      message = "<code>" + instruction.text.trim() + "</code>: 이 순간 하위 32비트 = <b>" + formatThirtyTwo(lowHalf) + "</b>.";
+    } else {
+      state.lastWritten = null;
+      if (state.registers.x3 !== state.registers.x4) {
+        message = "x3(" + formatThirtyTwo(state.registers.x3) + ") ≠ x4(" + formatThirtyTwo(state.registers.x4) + ") — 그 사이 자리올림이 있었다. <b>again으로 돌아가 다시 읽는다.</b>";
+        state.instructionIndex = -1;
+        state.loopCount += 1;
+      } else {
+        message = "x3 = x4 이므로 그 사이 자리올림이 없었다. <b>x3:x2가 한 시점의 올바른 값이다.</b>";
+        state.isDone = true;
+      }
+    }
+    state.executedCount += 1;
+    state.counter += CYCLES_PER_INSTRUCTION;
+    state.cycleIndex += 1;
+    state.instructionIndex += 1;
+    if (state.instructionIndex >= program.length) state.isDone = true;
+    if (state.isDone && mode !== "loop") message += " 두 번 읽기가 끝났다.";
+    return message;
+  }
+
+  function resultValue() {
+    if (state.registers.x3 === null || state.registers.x2 === null) return null;
+    return (state.registers.x3 << 32n) | state.registers.x2;
+  }
+
+  function renderReadout() {
+    const result = resultValue();
+    document.getElementById("counter-count").textContent = state.executedCount + (mode === "loop" ? " (" + state.loopCount + "바퀴)" : "");
+    if (!state.isDone || result === null) {
+      document.getElementById("counter-true-value").textContent = state.trueValueAtLowRead === null ? "—" : formatSixtyFour(state.trueValueAtLowRead);
+      document.getElementById("counter-read-value").textContent = "—";
+      document.getElementById("counter-error").textContent = "—";
+      return;
+    }
+    const error = result - state.trueValueAtLowRead;
+    document.getElementById("counter-true-value").textContent = formatSixtyFour(state.trueValueAtLowRead);
+    document.getElementById("counter-read-value").textContent = formatSixtyFour(result);
+    let errorText = "0 (정확)";
+    if (error !== 0n) {
+      const sign = error > 0n ? "+" : "−";
+      const magnitude = error > 0n ? error : -error;
+      errorText = sign + magnitude.toString() + (magnitude === LOW_HALF_MODULUS ? " (= 2³²)" : "");
+    }
+    document.getElementById("counter-error").textContent = errorText;
+  }
+
+  function draw(context, width, height, colors) {
+    const padding = 14;
+    const isNarrow = width < 420;
+    const boxGap = 8;
+    const boxWidth = (width - padding * 2 - boxGap) / 2;
+    const highHalf = state.counter >> 32n;
+    const lowHalf = state.counter & LOW_HALF_MASK;
+    book.drawText(context, "cycle 카운터 (64비트, 지금 이 순간)", padding, 16, { size: 12, color: colors.faint, bold: true });
+    const flashAmount = Math.max(0, flashRemaining / FLASH_DURATION_SECONDS);
+    // 상위·하위 두 상자
+    [["cycleh (비트 63–32)", highHalf, colors.violet, colors.violetSoft], ["cycle (비트 31–0)", lowHalf, colors.accent, colors.accentSoft]].forEach((entry, index) => {
+      const x = padding + index * (boxWidth + boxGap);
+      book.roundedRectangle(context, x, 28, boxWidth, 52, 8);
+      context.fillStyle = entry[3];
+      context.fill();
+      context.lineWidth = 1 + flashAmount * 2;
+      context.strokeStyle = entry[2];
+      context.stroke();
+      book.drawText(context, entry[0], x + 8, 40, { size: 11, color: colors.dim });
+      book.drawText(context, formatThirtyTwo(entry[1]), x + 8, 64, { size: isNarrow ? 13 : 16, bold: true, mono: true, color: colors.text });
+    });
+    // 타임라인: 사이클마다 하위 값의 끝자리와 읽은 시점
+    const timelineTop = 112;
+    const cellWidth = (width - padding * 2) / TIMELINE_CYCLE_COUNT;
+    book.drawText(context, "사이클 →  (칸 안: 하위 32비트의 끝 두 자리)", padding, timelineTop - 14, { size: 11, color: colors.faint });
+    const startValue = startCounterValue();
+    for (let cycle = 0; cycle < TIMELINE_CYCLE_COUNT; cycle += 1) {
+      const value = startValue + BigInt(cycle);
+      const x = padding + cycle * cellWidth;
+      const isPast = cycle < state.cycleIndex;
+      const isNow = cycle === state.cycleIndex;
+      book.roundedRectangle(context, x + 1, timelineTop, cellWidth - 2, 30, 5);
+      if (isNow) context.fillStyle = colors.goldSoft;
+      else if (isPast) context.fillStyle = colors.surface2;
+      else context.fillStyle = colors.surface;
+      context.fill();
+      if (isNow) { context.strokeStyle = colors.gold; context.lineWidth = 2; context.stroke(); }
+      const lowText = (value & 0xFFn).toString(16).padStart(2, "0");
+      book.drawText(context, lowText, x + cellWidth / 2, timelineTop + 15, { size: 12, mono: true, align: "center", color: (value >> 32n) > HIGH_HALF_AT_START ? colors.violet : colors.text });
+    }
+    // 자리올림 경계선
+    const wrapX = padding + distanceToWrap * cellWidth;
+    context.save();
+    context.strokeStyle = colors.bad;
+    context.lineWidth = 2;
+    context.setLineDash([4, 3]);
+    context.beginPath();
+    context.moveTo(wrapX, timelineTop - 6);
+    context.lineTo(wrapX, timelineTop + 66);
+    context.stroke();
+    context.restore();
+    book.drawText(context, "자리올림: 상위 +1", Math.min(wrapX + 4, width - padding - 96), timelineTop + 60, { size: 11, color: colors.bad, bold: true });
+    // 읽은 시점 표시
+    const readsPerCycle = {};
+    state.readLog.forEach((entry) => {
+      const stackIndex = readsPerCycle[entry.cycle] || 0;
+      readsPerCycle[entry.cycle] = stackIndex + 1;
+      const x = padding + entry.cycle * cellWidth + cellWidth / 2;
+      const y = timelineTop + 42 + stackIndex * 14;
+      const color = entry.kind === "H" ? colors.violet : colors.teal;
+      book.drawText(context, (entry.kind === "H" ? "상" : "하") + (isNarrow ? "" : " " + entry.target), x, y, { size: 11, bold: true, align: "center", color: color });
+    });
+    // 레지스터
+    const registerTop = timelineTop + 92;
+    const registerNames = mode === "loop" ? ["x3", "x2", "x4"] : ["x3", "x2"];
+    const registerWidth = (width - padding * 2 - boxGap * (registerNames.length - 1)) / registerNames.length;
+    registerNames.forEach((name, index) => {
+      const x = padding + index * (registerWidth + boxGap);
+      const value = state.registers[name];
+      const isFresh = state.lastWritten === name;
+      book.roundedRectangle(context, x, registerTop, registerWidth, 46, 8);
+      context.fillStyle = isFresh ? colors.goldSoft : colors.elevated;
+      context.fill();
+      context.strokeStyle = isFresh ? colors.gold : colors.border;
+      context.lineWidth = 1;
+      context.stroke();
+      book.drawText(context, name + (name === "x2" ? " (하위)" : " (상위)"), x + 8, registerTop + 13, { size: 11, color: colors.faint });
+      book.drawText(context, value === null ? "—" : formatThirtyTwo(value), x + 8, registerTop + 32, { size: isNarrow ? 11 : 14, bold: true, mono: true, color: colors.text });
+    });
+    if (state.isDone) {
+      const result = resultValue();
+      const isCorrect = result !== null && result === state.trueValueAtLowRead;
+      const message = isCorrect ? "결과가 참값과 같다" : "결과가 2³²만큼 어긋났다";
+      book.drawText(context, message, width / 2, registerTop + 66, { size: 13, bold: true, align: "center", color: isCorrect ? colors.ok : colors.bad });
+    }
+  }
+
+  state = freshState();
+  const canvas = book.createCanvas(document.getElementById("counter-canvas"), draw, { aspectRatio: 0.55, minimumHeight: 290, maximumHeight: 300 });
+
+  function renderListingState() {
+    chapter.renderListing(listing, mode === "loop" ? "규격의 3회 읽기 루프" : "순진하게 한 번씩 읽기", PROGRAMS[mode]);
+    chapter.markListing(listing, state.isDone ? -1 : state.instructionIndex);
+  }
+
+  function step() {
+    if (state.isDone) { stopAuto(); return; }
+    const message = executeOne();
+    description.innerHTML = message;
+    flashRemaining = FLASH_DURATION_SECONDS;
+    chapter.markListing(listing, state.isDone ? -1 : state.instructionIndex);
+    renderReadout();
+    canvas.redraw();
+    if (state.isDone) stopAuto();
+  }
+
+  function reset() {
+    stopAuto();
+    state = freshState();
+    renderListingState();
+    renderReadout();
+    description.innerHTML = "<b>한 명령</b>을 눌러 시작하자. 하위 32비트는 " + distanceToWrap + "사이클 뒤에 0으로 넘어간다.";
+    canvas.redraw();
+  }
+
+  function stopAuto() {
+    isAutoRunning = false;
+    runButton.textContent = "자동 실행";
+  }
+
+  book.animationLoop(document.getElementById("counter-sim"), (deltaSeconds) => {
+    let shouldRedraw = false;
+    if (flashRemaining > 0) {
+      flashRemaining = Math.max(0, flashRemaining - deltaSeconds);
+      shouldRedraw = true;
+    }
+    if (isAutoRunning) {
+      autoAccumulator += deltaSeconds * AUTO_STEPS_PER_SECOND;
+      if (autoAccumulator >= 1) {
+        autoAccumulator = 0;
+        step();
+      }
+    }
+    if (shouldRedraw) canvas.redraw();
+  });
+
+  document.getElementById("counter-step").addEventListener("click", () => { stopAuto(); step(); });
+  runButton.addEventListener("click", () => {
+    if (isAutoRunning) { stopAuto(); return; }
+    if (state.isDone) reset();
+    isAutoRunning = true;
+    autoAccumulator = 1;
+    runButton.textContent = "멈춤";
+  });
+  document.getElementById("counter-reset").addEventListener("click", reset);
+  state = freshState();
+  book.segmented("counter-mode", (value) => { mode = value; reset(); });
+  book.range("counter-distance", (value) => { distanceToWrap = value; reset(); }, (value) => value + " 사이클");
+})();
+
+/* ---------------------------------------------------------------------------
+   Zicond 시뮬레이터: 분기 없는 선택과 분기 코드를 나란히 실행하고,
+   5단 파이프라인 시간표로 예측 실패 벌점을 비교한다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const chapter = window.SmallExtensionsChapter;
+  const STAGE_NAMES = ["IF", "ID", "EX", "MEM", "WB"];
+  const STAGE_COUNT = STAGE_NAMES.length;
+  const CURSOR_CYCLES_PER_SECOND = 3;
+  const CURSOR_PAUSE_CYCLES = 3;
+  const LABEL_FONT_SIZE = 11;
+
+  let form = "nonzero";
+  let isMispredicted = false;
+  let penalty = 2;
+  let stepIndex = 0;
+  let cursorCycle = 0;
+
+  const toInteger = (value) => {
+    const parsed = Number.parseInt(value, 10);
+    return Number.isFinite(parsed) ? parsed | 0 : 0;
+  };
+  function readInputs() {
+    return {
+      condition: toInteger(document.getElementById("zicond-condition").value),
+      first: toInteger(document.getElementById("zicond-first").value),
+      second: toInteger(document.getElementById("zicond-second").value),
+    };
+  }
+
+  /* 분기 없는 코드. nonzero 형태면 a2≠0 일 때 a0 을, 아니면 a1 을 고른다. */
+  function branchlessProgram() {
+    if (form === "nonzero") {
+      return [
+        { text: "czero.eqz a3, a0, a2", run: (registers) => { registers.a3 = registers.a2 === 0 ? 0 : registers.a0; } },
+        { text: "czero.nez t0, a1, a2", run: (registers) => { registers.t0 = registers.a2 !== 0 ? 0 : registers.a1; } },
+        { text: "add       a3, a3, t0", run: (registers) => { registers.a3 = (registers.a3 + registers.t0) | 0; } },
+      ];
+    }
+    return [
+      { text: "czero.nez a3, a0, a2", run: (registers) => { registers.a3 = registers.a2 !== 0 ? 0 : registers.a0; } },
+      { text: "czero.eqz t0, a1, a2", run: (registers) => { registers.t0 = registers.a2 === 0 ? 0 : registers.a1; } },
+      { text: "add       a3, a3, t0", run: (registers) => { registers.a3 = (registers.a3 + registers.t0) | 0; } },
+    ];
+  }
+
+  /* 분기 코드의 목록과, 조건에 따라 실제로 지나가는 줄 번호 */
+  function branchyProgram(condition) {
+    const branchMnemonic = form === "nonzero" ? "beqz" : "bnez";
+    const rows = [
+      { address: "", text: branchMnemonic + " a2, else" },
+      { address: "", text: "mv   a3, a0" },
+      { address: "", text: "j    done" },
+      { address: "else:", text: "mv   a3, a1" },
+      { address: "done:", text: "" },
+    ];
+    const choosesFirst = form === "nonzero" ? condition !== 0 : condition === 0;
+    const path = choosesFirst ? [0, 1, 2] : [0, 3];
+    return { rows, path, choosesFirst };
+  }
+
+  function computeTimeline(inputs) {
+    const branchless = branchlessProgram().map((instruction, index) => ({ text: instruction.text, issueCycle: index, isCancelled: false }));
+    const branchy = branchyProgram(inputs.condition);
+    const branchyRows = [];
+    let issueCycle = 0;
+    branchy.path.forEach((rowIndex, pathIndex) => {
+      branchyRows.push({ text: branchy.rows[rowIndex].text, issueCycle: issueCycle, isCancelled: false });
+      issueCycle += 1;
+      // 첫 줄이 분기다. 예측이 틀렸으면 잘못 가져온 명령들을 버리는 동안 벌점만큼 늦어진다.
+      if (pathIndex === 0 && isMispredicted) {
+        branchyRows.push({ text: "잘못 가져온 명령 취소", issueCycle: issueCycle, isCancelled: true, width: penalty });
+        issueCycle += penalty;
+      }
+    });
+    const lastBranchless = branchless[branchless.length - 1].issueCycle + STAGE_COUNT;
+    const lastBranchy = branchyRows.filter((row) => !row.isCancelled).reduce((maximum, row) => Math.max(maximum, row.issueCycle + STAGE_COUNT), 0);
+    return { branchless, branchyRows, branchlessCycles: lastBranchless, branchyCycles: lastBranchy, choosesFirst: branchy.choosesFirst, pathLength: branchy.path.length };
+  }
+
+  function averageBranchyCycles(timeline) {
+    const correctCycles = timeline.pathLength + STAGE_COUNT - 1;
+    return (correctCycles + correctCycles + penalty) / 2;
+  }
+
+  const branchlessListing = document.getElementById("zicond-branchless-listing");
+  const branchyListing = document.getElementById("zicond-branchy-listing");
+  const description = document.getElementById("zicond-description");
+  let branchlessRegisters = null;
+  let branchyRegisters = null;
+  let branchyPathPosition = 0;
+
+  function renderRegisters(containerId, registers, names, changedName) {
+    document.getElementById(containerId).innerHTML = names.map((name) => {
+      const isChanged = name === changedName;
+      return '<div class="cell' + (isChanged ? " changed" : "") + '"><div class="cell-name"><span>' + name + '</span></div><div class="cell-value">' + registers[name] + "</div></div>";
+    }).join("");
+  }
+
+  function resetExecution() {
+    const inputs = readInputs();
+    stepIndex = 0;
+    branchyPathPosition = 0;
+    branchlessRegisters = { a0: inputs.first, a1: inputs.second, a2: inputs.condition, a3: 0, t0: 0 };
+    branchyRegisters = { a0: inputs.first, a1: inputs.second, a2: inputs.condition, a3: 0 };
+    chapter.renderListing(branchlessListing, "Zicond: 분기 없음", branchlessProgram().map((instruction) => ({ address: "", text: instruction.text })));
+    const branchy = branchyProgram(inputs.condition);
+    chapter.renderListing(branchyListing, "분기 코드", branchy.rows);
+    chapter.markListing(branchlessListing, 0);
+    chapter.markListing(branchyListing, branchy.path[0]);
+    renderRegisters("zicond-branchless-registers", branchlessRegisters, ["a2", "a3", "t0"], null);
+    renderRegisters("zicond-branchy-registers", branchyRegisters, ["a2", "a3"], null);
+    document.getElementById("zicond-result").textContent = "—";
+    description.innerHTML = "값을 고르고 <b>한 단계</b>를 눌러 두 코드를 나란히 실행해 보자. 왼쪽은 언제나 같은 세 명령, 오른쪽은 조건에 따라 길이 갈린다.";
+    updateReadout();
+  }
+
+  function step() {
+    const inputs = readInputs();
+    const program = branchlessProgram();
+    const branchy = branchyProgram(inputs.condition);
+    if (stepIndex >= program.length) {
+      description.innerHTML = "두 코드 모두 끝났다. 결과 a3 = <b>" + branchlessRegisters.a3 + "</b> (분기 코드도 " + branchyRegisters.a3 + "). <b>처음으로</b>를 눌러 다시 해 보자.";
+      return;
+    }
+    program[stepIndex].run(branchlessRegisters);
+    const changedName = stepIndex === 1 ? "t0" : "a3";
+    let branchyMessage = "";
+    if (branchyPathPosition < branchy.path.length) {
+      const rowIndex = branchy.path[branchyPathPosition];
+      const text = branchy.rows[rowIndex].text;
+      if (rowIndex === 0) {
+        branchyMessage = "분기 코드: <code>" + text + "</code> → " + (branchy.choosesFirst ? "분기하지 않고 아래로" : "else로 분기") + (isMispredicted ? " (<b>예측 실패!</b> 파이프라인을 비운다)" : " (예측 적중)") + ".";
+      } else if (rowIndex === 1) {
+        branchyRegisters.a3 = branchyRegisters.a0;
+        branchyMessage = "분기 코드: <code>mv a3, a0</code>.";
+      } else if (rowIndex === 3) {
+        branchyRegisters.a3 = branchyRegisters.a1;
+        branchyMessage = "분기 코드: <code>mv a3, a1</code>.";
+      } else {
+        branchyMessage = "분기 코드: <code>j done</code>으로 else를 건너뛴다.";
+      }
+      branchyPathPosition += 1;
+    } else {
+      branchyMessage = "분기 코드는 이미 끝났다(경로가 짧았다).";
+    }
+    description.innerHTML = "Zicond: <code>" + program[stepIndex].text.replace(/\s+/g, " ") + "</code> → " + changedName + " = <b>" + branchlessRegisters[changedName] + "</b>. " + branchyMessage;
+    stepIndex += 1;
+    chapter.markListing(branchlessListing, stepIndex < program.length ? stepIndex : -1);
+    const nextBranchyRow = branchyPathPosition < branchy.path.length ? branchy.path[branchyPathPosition] : -1;
+    const skippedRows = [1, 2, 3].filter((rowIndex) => !branchy.path.includes(rowIndex));
+    chapter.markListing(branchyListing, nextBranchyRow, { skippedIndices: branchyPathPosition > 0 ? skippedRows : [] });
+    renderRegisters("zicond-branchless-registers", branchlessRegisters, ["a2", "a3", "t0"], changedName);
+    renderRegisters("zicond-branchy-registers", branchyRegisters, ["a2", "a3"], "a3");
+    if (stepIndex >= program.length) document.getElementById("zicond-result").textContent = String(branchlessRegisters.a3);
+  }
+
+  function updateReadout() {
+    const timeline = computeTimeline(readInputs());
+    document.getElementById("zicond-branchless-cycles").textContent = timeline.branchlessCycles;
+    document.getElementById("zicond-branchy-cycles").textContent = timeline.branchyCycles + (isMispredicted ? " (실패)" : " (적중)");
+    document.getElementById("zicond-average-cycles").textContent = averageBranchyCycles(timeline).toFixed(1);
+  }
+
+  /* 좁은 화면에서 명령 글자가 파이프라인 칸을 덮지 않도록, 들어갈 만큼만 남기고 줄임표를 붙인다 */
+  function fitText(context, text, maximumWidth, fontFamily) {
+    context.font = "400 " + LABEL_FONT_SIZE + "px " + fontFamily;
+    if (context.measureText(text).width <= maximumWidth) return text;
+    let shortened = text;
+    while (shortened.length > 1 && context.measureText(shortened + "…").width > maximumWidth) {
+      shortened = shortened.slice(0, -1);
+    }
+    return shortened.trimEnd() + "…";
+  }
+
+  function drawPanel(context, title, rows, top, labelWidth, cellWidth, colors, totalCycles) {
+    const rowHeight = 22;
+    book.drawText(context, title + " — " + totalCycles + " 사이클", 12, top + 9, { size: 12, bold: true, color: colors.text });
+    rows.forEach((row, rowIndex) => {
+      const y = top + 22 + rowIndex * (rowHeight + 4);
+      const label = fitText(context, row.text.replace(/\s+/g, " "), labelWidth - 18, row.isCancelled ? colors.font : colors.mono);
+      book.drawText(context, label, 12, y + rowHeight / 2, { size: 11, mono: !row.isCancelled, color: row.isCancelled ? colors.bad : colors.dim });
+      if (row.isCancelled) {
+        const x = labelWidth + row.issueCycle * cellWidth;
+        context.save();
+        context.globalAlpha = 0.9;
+        book.roundedRectangle(context, x + 1, y, row.width * cellWidth - 2, rowHeight, 4);
+        context.fillStyle = colors.badSoft;
+        context.fill();
+        context.strokeStyle = colors.bad;
+        context.setLineDash([4, 3]);
+        context.stroke();
+        context.restore();
+        if (row.width * cellWidth > 70) book.drawText(context, "벌점 " + row.width, x + row.width * cellWidth / 2, y + rowHeight / 2, { size: 11, bold: true, align: "center", color: colors.bad });
+        return;
+      }
+      for (let stage = 0; stage < STAGE_COUNT; stage += 1) {
+        const cycle = row.issueCycle + stage;
+        const x = labelWidth + cycle * cellWidth;
+        const hasPassed = cycle < cursorCycle;
+        book.roundedRectangle(context, x + 1, y, cellWidth - 2, rowHeight, 3);
+        context.fillStyle = hasPassed ? colors.accent : colors.accentSoft;
+        context.fill();
+        if (cellWidth >= 22) {
+          book.drawText(context, STAGE_NAMES[stage], x + cellWidth / 2, y + rowHeight / 2, { size: 10, bold: true, align: "center", color: hasPassed ? colors.onAccent : colors.accent });
+        }
+      }
+    });
+    return top + 22 + rows.length * (rowHeight + 4);
+  }
+
+  function draw(context, width, height, colors) {
+    const timeline = computeTimeline(readInputs());
+    const maximumCycles = Math.max(timeline.branchlessCycles, timeline.branchyCycles) + 1;
+    const labelWidth = Math.min(170, Math.max(118, width * 0.3));
+    const cellWidth = (width - labelWidth - 10) / maximumCycles;
+    const panelBottom = drawPanel(context, "Zicond (분기 없음)", timeline.branchless, 8, labelWidth, cellWidth, colors, timeline.branchlessCycles);
+    drawPanel(context, "분기 코드 (" + (isMispredicted ? "예측 실패" : "예측 적중") + ")", timeline.branchyRows, panelBottom + 14, labelWidth, cellWidth, colors, timeline.branchyCycles);
+    // 사이클 눈금과 커서
+    const axisY = height - 14;
+    for (let cycle = 0; cycle <= maximumCycles; cycle += 1) {
+      const x = labelWidth + cycle * cellWidth;
+      const isLabelled = cellWidth >= 16 || cycle % 2 === 0;
+      if (isLabelled && cycle < maximumCycles) book.drawText(context, String(cycle + 1), x + cellWidth / 2, axisY, { size: 10, align: "center", color: colors.faint });
+    }
+    const cursorX = labelWidth + Math.min(cursorCycle, maximumCycles) * cellWidth;
+    context.save();
+    context.strokeStyle = colors.gold;
+    context.lineWidth = 2;
+    context.beginPath();
+    context.moveTo(cursorX, 4);
+    context.lineTo(cursorX, height - 24);
+    context.stroke();
+    context.restore();
+  }
+
+  const canvas = book.createCanvas(document.getElementById("zicond-canvas"), draw, { aspectRatio: 0.42, minimumHeight: 270, maximumHeight: 300 });
+
+  book.animationLoop(document.getElementById("zicond-sim"), (deltaSeconds) => {
+    const timeline = computeTimeline(readInputs());
+    const maximumCycles = Math.max(timeline.branchlessCycles, timeline.branchyCycles) + 1;
+    cursorCycle += deltaSeconds * CURSOR_CYCLES_PER_SECOND;
+    if (cursorCycle > maximumCycles + CURSOR_PAUSE_CYCLES) cursorCycle = 0;
+    canvas.redraw();
+  });
+
+  function onSettingsChanged() {
+    updateReadout();
+    canvas.redraw();
+  }
+  ["zicond-condition", "zicond-first", "zicond-second"].forEach((id) => {
+    document.getElementById(id).addEventListener("input", () => { resetExecution(); onSettingsChanged(); });
+  });
+  document.getElementById("zicond-step").addEventListener("click", step);
+  document.getElementById("zicond-reset").addEventListener("click", () => { resetExecution(); onSettingsChanged(); });
+  book.segmented("zicond-form", (value) => { form = value; resetExecution(); onSettingsChanged(); });
+  book.segmented("zicond-prediction", (value) => { isMispredicted = value === "miss"; onSettingsChanged(); });
+  book.range("zicond-penalty", (value) => { penalty = value; onSettingsChanged(); }, (value) => value + " 사이클");
+})();
+
+/* ---------------------------------------------------------------------------
+   CMO 실험실: 캐시 블록 네 개와 메모리, 일관성 밖의 DMA 장치.
+   블록 크기(64바이트)는 예시일 뿐이며 실제 크기는 구현마다 다르다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const BLOCK_ADDRESSES = ["0x1000", "0x1040", "0x1080", "0x10C0"];
+  const PACKET_SPEED_PER_SECOND = 1.5;
+  const INITIAL_MEMORY = ["10", "20", "30", "40"];
+
+  let selectedBlock = 1;
+  let state = null;
+  let packets = [];
+  let loop = null;
+
+  function freshState() {
+    return {
+      cache: [
+        { isValid: true, isDirty: false, value: "10" },
+        { isValid: true, isDirty: true, value: "2A" },
+        { isValid: false, isDirty: false, value: "--" },
+        { isValid: false, isDirty: false, value: "--" },
+      ],
+      memory: INITIAL_MEMORY.slice(),
+      nextHartValue: 0xB1,
+      nextDeviceValue: 0xD1,
+      deviceLastRead: null,
+    };
+  }
+
+  const description = document.getElementById("cmo-description");
+
+  /* 좌표는 그릴 때마다 너비에 맞춰 다시 계산한다 */
+  function layout(width) {
+    const padding = 12;
+    const columnWidth = (width - padding * 2) / 4;
+    return {
+      padding,
+      columnWidth,
+      hartY: 8, hartHeight: 34,
+      cacheY: 64, cacheHeight: 76,
+      memoryY: 190, memoryHeight: 54,
+      deviceY: 286, deviceHeight: 40,
+      columnCenter: (index) => padding + columnWidth * index + columnWidth / 2,
+    };
+  }
+
+  function addPacket(from, to, label, color) {
+    const isAnimating = loop && loop.isRunning();
+    if (!isAnimating) return;
+    packets.push({ from, to, label, color, progress: 0 });
+  }
+
+  function hartView(block) {
+    const line = state.cache[block];
+    return line.isValid ? line.value : state.memory[block];
+  }
+
+  function act(action) {
+    const block = selectedBlock;
+    const line = state.cache[block];
+    const address = BLOCK_ADDRESSES[block];
+    let message = "";
+    if (action === "store") {
+      const value = state.nextHartValue.toString(16).toUpperCase();
+      state.nextHartValue = state.nextHartValue >= 0xBF ? 0xB1 : state.nextHartValue + 1;
+      line.isValid = true;
+      line.isDirty = true;
+      line.value = value;
+      addPacket("hart", "cache", value, "accent");
+      message = "하트가 " + address + " 블록에 <b>" + value + "</b>를 썼다. 캐시 사본만 바뀌고(D=1) 메모리는 아직 " + state.memory[block] + "이다.";
+    } else if (action === "load") {
+      if (line.isValid) {
+        addPacket("cache", "hart", line.value, "accent");
+        message = "캐시 적중: 하트는 캐시 사본 <b>" + line.value + "</b>를 읽는다. 메모리를 보지 않는다.";
+      } else {
+        line.isValid = true;
+        line.isDirty = false;
+        line.value = state.memory[block];
+        addPacket("memory", "cache", line.value, "teal");
+        message = "캐시 미스: 메모리에서 <b>" + line.value + "</b>를 가져와 캐시에 넣는다(V=1, D=0).";
+      }
+    } else if (action === "clean") {
+      if (line.isValid && line.isDirty) {
+        state.memory[block] = line.value;
+        line.isDirty = false;
+        addPacket("cache", "memory", line.value, "gold");
+        message = "<code>cbo.clean</code>: 수정된 사본 <b>" + line.value + "</b>를 메모리로 써 보냈다. 사본은 남고 D=0이 되었다.";
+      } else {
+        message = "<code>cbo.clean</code>: 수정된 사본이 없으므로 메모리로 보낼 것이 없다.";
+      }
+    } else if (action === "flush") {
+      if (line.isValid && line.isDirty) {
+        state.memory[block] = line.value;
+        addPacket("cache", "memory", line.value, "gold");
+        message = "<code>cbo.flush</code>: 먼저 <b>" + line.value + "</b>를 메모리로 써 보내고(clean), 사본을 버렸다(inval).";
+      } else if (line.isValid) {
+        message = "<code>cbo.flush</code>: 깨끗한 사본이라 써 보낼 것 없이 사본만 버렸다.";
+      } else {
+        message = "<code>cbo.flush</code>: 캐시에 사본이 없어 할 일이 없다.";
+      }
+      line.isValid = false;
+      line.isDirty = false;
+      line.value = "--";
+    } else if (action === "inval") {
+      if (line.isValid && line.isDirty) {
+        message = "⚠️ <code>cbo.inval</code>: 하트가 쓴 <b>" + line.value + "</b>가 메모리에 가지 못한 채 <b>사라졌다</b>. 메모리의 " + state.memory[block] + "이 다시 보인다.";
+      } else if (line.isValid) {
+        message = "<code>cbo.inval</code>: 사본을 버렸다. 다음 load는 메모리에서 새로 읽는다.";
+      } else {
+        message = "<code>cbo.inval</code>: 캐시에 사본이 없어 할 일이 없다.";
+      }
+      line.isValid = false;
+      line.isDirty = false;
+      line.value = "--";
+    } else if (action === "zero") {
+      line.isValid = true;
+      line.isDirty = true;
+      line.value = "00";
+      addPacket("hart", "cache", "00", "accent");
+      message = "<code>cbo.zero</code>: 블록의 모든 바이트에 0을 store했다. 이 그림에서는 캐시에 0으로 할당했다(D=1). 메모리를 먼저 읽지 않아도 되는 것이 일반 store 루프보다 좋은 점이다.";
+    } else if (action === "deviceWrite") {
+      const value = state.nextDeviceValue.toString(16).toUpperCase();
+      state.nextDeviceValue = state.nextDeviceValue >= 0xDF ? 0xD1 : state.nextDeviceValue + 1;
+      state.memory[block] = value;
+      addPacket("device", "memory", value, "violet");
+      message = "DMA 장치가 메모리 " + address + "에 <b>" + value + "</b>를 썼다." + (line.isValid ? " 하트 캐시에는 옛 사본 " + line.value + "이 남아 있어 하트는 새 값을 못 본다. <code>cbo.inval</code>이 필요하다." : " 하트 캐시에 사본이 없으니 다음 load가 새 값을 읽는다.");
+    } else if (action === "deviceRead") {
+      state.deviceLastRead = state.memory[block];
+      addPacket("memory", "device", state.memory[block], "violet");
+      if (line.isValid && line.isDirty) {
+        message = "DMA 장치가 메모리에서 <b>" + state.memory[block] + "</b>를 읽었다. 하지만 하트의 최신 값은 캐시의 " + line.value + "이다. 장치는 <b>낡은 값</b>을 본 것이다. 먼저 <code>cbo.clean</code>을 해야 한다.";
+      } else {
+        message = "DMA 장치가 메모리에서 <b>" + state.memory[block] + "</b>를 읽었다. 하트가 보는 값과 같다.";
+      }
+    }
+    description.innerHTML = message;
+    renderReadout();
+    canvas.redraw();
+  }
+
+  function renderReadout() {
+    const block = selectedBlock;
+    const hartValue = hartView(block);
+    const deviceValue = state.memory[block];
+    document.getElementById("cmo-hart-view").textContent = hartValue;
+    document.getElementById("cmo-device-view").textContent = deviceValue;
+    document.getElementById("cmo-agreement").textContent = hartValue === deviceValue ? "예" : "아니요";
+  }
+
+  function anchorPoint(geometry, place, block) {
+    const x = geometry.columnCenter(block);
+    if (place === "hart") return { x, y: geometry.hartY + geometry.hartHeight };
+    if (place === "cache") return { x, y: geometry.cacheY + geometry.cacheHeight / 2 };
+    if (place === "memory") return { x, y: geometry.memoryY + geometry.memoryHeight / 2 };
+    return { x, y: geometry.deviceY };
+  }
+
+  function draw(context, width, height, colors) {
+    const geometry = layout(width);
+    const isNarrow = width < 460;
+    // 하트
+    book.roundedRectangle(context, geometry.padding, geometry.hartY, width - geometry.padding * 2, geometry.hartHeight, 8);
+    context.fillStyle = colors.surface;
+    context.fill();
+    book.drawText(context, "하트 (load / store / cbo.*)", width / 2, geometry.hartY + geometry.hartHeight / 2, { size: 12, bold: true, align: "center", color: colors.text });
+    book.drawText(context, "캐시", geometry.padding, geometry.cacheY - 8, { size: 11, bold: true, color: colors.faint });
+    book.drawText(context, "메모리", geometry.padding, geometry.memoryY - 8, { size: 11, bold: true, color: colors.faint });
+    for (let block = 0; block < 4; block += 1) {
+      const x = geometry.padding + geometry.columnWidth * block + 3;
+      const boxWidth = geometry.columnWidth - 6;
+      const line = state.cache[block];
+      const isSelected = block === selectedBlock;
+      // 캐시 줄
+      book.roundedRectangle(context, x, geometry.cacheY, boxWidth, geometry.cacheHeight, 8);
+      if (!line.isValid) context.fillStyle = colors.surface;
+      else if (line.isDirty) context.fillStyle = colors.goldSoft;
+      else context.fillStyle = colors.accentSoft;
+      context.fill();
+      context.strokeStyle = isSelected ? colors.accent : colors.border;
+      context.lineWidth = isSelected ? 2.5 : 1;
+      context.stroke();
+      book.drawText(context, BLOCK_ADDRESSES[block], x + boxWidth / 2, geometry.cacheY + 13, { size: isNarrow ? 10 : 11, mono: true, align: "center", color: colors.faint });
+      book.drawText(context, "V=" + (line.isValid ? 1 : 0) + " D=" + (line.isDirty ? 1 : 0), x + boxWidth / 2, geometry.cacheY + 32, { size: isNarrow ? 10 : 12, mono: true, align: "center", color: line.isDirty ? colors.gold : colors.dim, bold: line.isDirty });
+      book.drawText(context, line.isValid ? line.value : "비어 있음", x + boxWidth / 2, geometry.cacheY + 56, { size: line.isValid ? 18 : 11, bold: line.isValid, mono: line.isValid, align: "center", color: line.isValid ? colors.text : colors.faint });
+      // 메모리 블록
+      book.roundedRectangle(context, x, geometry.memoryY, boxWidth, geometry.memoryHeight, 8);
+      context.fillStyle = colors.elevated;
+      context.fill();
+      context.strokeStyle = isSelected ? colors.accent : colors.border;
+      context.lineWidth = isSelected ? 2.5 : 1;
+      context.stroke();
+      book.drawText(context, state.memory[block], x + boxWidth / 2, geometry.memoryY + geometry.memoryHeight / 2, { size: 18, bold: true, mono: true, align: "center", color: colors.text });
+      const isStale = line.isValid && line.value !== state.memory[block];
+      if (isStale) book.drawText(context, line.isDirty ? "메모리 낡음" : "캐시 낡음", x + boxWidth / 2, geometry.memoryY - 10, { size: 10, bold: true, align: "center", color: colors.bad });
+      // 연결선
+      context.strokeStyle = colors.border;
+      context.lineWidth = 1;
+      context.beginPath();
+      context.moveTo(x + boxWidth / 2, geometry.cacheY + geometry.cacheHeight);
+      context.lineTo(x + boxWidth / 2, geometry.memoryY - 18);
+      context.stroke();
+    }
+    // DMA 장치
+    book.roundedRectangle(context, geometry.padding, geometry.deviceY, width - geometry.padding * 2, geometry.deviceHeight, 8);
+    context.fillStyle = colors.violetSoft;
+    context.fill();
+    const deviceText = "DMA 장치 (캐시를 보지 못함)" + (state.deviceLastRead ? " · 마지막으로 읽은 값 " + state.deviceLastRead : "");
+    book.drawText(context, deviceText, width / 2, geometry.deviceY + geometry.deviceHeight / 2, { size: isNarrow ? 11 : 12, bold: true, align: "center", color: colors.violet });
+    // 움직이는 데이터 꾸러미
+    packets.forEach((packet) => {
+      const from = anchorPoint(geometry, packet.from, selectedBlock);
+      const to = anchorPoint(geometry, packet.to, selectedBlock);
+      const fraction = book.easeInOut(Math.min(1, packet.progress));
+      const x = book.linearInterpolate(from.x, to.x, fraction);
+      const y = book.linearInterpolate(from.y, to.y, fraction);
+      book.roundedRectangle(context, x - 20, y - 11, 40, 22, 6);
+      context.fillStyle = colors[packet.color] || colors.accent;
+      context.fill();
+      book.drawText(context, packet.label, x, y, { size: 12, bold: true, mono: true, align: "center", color: colors.onAccent });
+    });
+  }
+
+  state = freshState();
+  const canvas = book.createCanvas(document.getElementById("cmo-canvas"), draw, { aspectRatio: 0.5, minimumHeight: 336, maximumHeight: 336 });
+
+  loop = book.animationLoop(document.getElementById("cmo-sim"), (deltaSeconds) => {
+    if (packets.length === 0) return;
+    packets.forEach((packet) => { packet.progress += deltaSeconds * PACKET_SPEED_PER_SECOND; });
+    packets = packets.filter((packet) => packet.progress < 1);
+    canvas.redraw();
+  });
+
+  const ACTIONS = { "cmo-store": "store", "cmo-load": "load", "cmo-clean": "clean", "cmo-flush": "flush", "cmo-inval": "inval", "cmo-zero": "zero", "cmo-device-write": "deviceWrite", "cmo-device-read": "deviceRead" };
+  Object.entries(ACTIONS).forEach(([id, action]) => {
+    document.getElementById(id).addEventListener("click", () => act(action));
+  });
+  document.getElementById("cmo-reset").addEventListener("click", () => {
+    state = freshState();
+    packets = [];
+    description.innerHTML = "처음 상태로 돌아왔다. 블록 0x1040은 하트가 고쳐 쓴 상태(D=1)라 메모리 값이 낡아 있다.";
+    renderReadout();
+    canvas.redraw();
+  });
+  state = freshState();
+  book.segmented("cmo-block", (value) => {
+    selectedBlock = Number(value);
+    packets = [];
+    renderReadout();
+    canvas.redraw();
+  });
+})();
+
+/* ---------------------------------------------------------------------------
+   CFI 시뮬레이터: 그림자 스택(Zicfiss)과 착지 패드(Zicfilp).
+   각 장면은 "프로그램 목록 + 단계 목록"으로 적어 두고, 단계마다 상태를 바꾼다.
+   주소와 값은 이해를 돕기 위한 예시다(RV32, XLEN/8 = 4).
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const chapter = window.SmallExtensionsChapter;
+  const XLEN_BYTES = 4;
+  const SOFTWARE_CHECK_CAUSE = 18;
+  const LANDING_PAD_FAULT = 2;
+  const SHADOW_STACK_FAULT = 3;
+  const INITIAL_STACK_POINTER = 0x7ff0;
+  const INITIAL_SHADOW_POINTER = 0x9000;
+  const MAIN_RETURN_ADDRESS = 0x1004;
+  const AFTER_CALL_ADDRESS = 0x2010;
+  const GADGET_ADDRESS = 0x4000;
+  const EXPECTED_LABEL = 0x12345;
+  const OTHER_LABEL = 0x00777;
+  const FRAME_SIZE = 16;
+
+  const formatAddress = (value) => "0x" + (value >>> 0).toString(16).padStart(4, "0");
+
+  const STACK_LISTING = [
+    { address: "1000", text: "main:  jal  ra, f        # f 호출" },
+    { address: "1004", text: "       ...               # f가 돌아올 곳" },
+    { address: "2000", text: "f:     addi sp, sp, -16" },
+    { address: "2004", text: "       sw   ra, 12(sp)   # 일반 스택에 ra" },
+    { address: "2008", text: "       sspush ra         # 그림자 스택에 ra" },
+    { address: "200c", text: "       jal  ra, g        # g가 buffer에 복사" },
+    { address: "2010", text: "       lw   ra, 12(sp)   # ra 복원" },
+    { address: "2014", text: "       addi sp, sp, 16" },
+    { address: "2018", text: "       sspopchk ra       # 사본과 비교" },
+    { address: "201c", text: "       ret" },
+    { address: "4000", text: "gadget: ...              # 공격자가 노린 곳" },
+  ];
+  const LANDING_LISTING = [
+    { address: "1000", text: "main:  lui  t2, 0x12345  # 기대 라벨 → x7" },
+    { address: "1004", text: "       lw   a5, 0(a0)    # 함수 포인터 읽기" },
+    { address: "1008", text: "       jalr ra, 0(a5)    # 간접 호출" },
+    { address: "3000", text: "handler: lpad 0x12345    # 착지 패드" },
+    { address: "3004", text: "       addi a0, a0, 1    # 함수 본문" },
+    { address: "3100", text: "other: lpad 0x777        # 다른 라벨" },
+    { address: "3104", text: "       addi a0, a0, 2" },
+  ];
+
+  let scenario = "normal";
+  let isEnabled = true;
+  let state = null;
+
+  function freshState() {
+    return {
+      stepIndex: 0,
+      currentLine: 0,
+      faultedLine: -1,
+      returnAddress: 0,
+      stackPointer: INITIAL_STACK_POINTER,
+      shadowPointer: INITIAL_SHADOW_POINTER,
+      labelRegister: 0,
+      targetRegister: 0,
+      expectedLanding: "NO_LP_EXPECTED",
+      frame: null,
+      shadowStack: [],
+      fault: null,
+      outcome: null,
+      isFinished: false,
+    };
+  }
+
+  /* ---------------- 그림자 스택 장면의 단계 ---------------- */
+  function stackSteps() {
+    const isAttack = scenario === "overflow";
+    return [
+      { line: 0, run: () => {
+        state.returnAddress = MAIN_RETURN_ADDRESS;
+        state.currentLine = 2;
+        return "<code>jal ra, f</code>: ra ← " + formatAddress(MAIN_RETURN_ADDRESS) + ", f로 간다.";
+      } },
+      { line: 2, run: () => {
+        state.stackPointer -= FRAME_SIZE;
+        state.frame = { savedReturn: null, buffer: ["", ""], isAttacked: false, isReleased: false };
+        state.currentLine = 3;
+        return "스택 프레임 16바이트를 잡았다. 맨 위(sp+12)에 ra 자리, 아래(sp+0–7)에 <code>char buffer[8]</code>이 있다.";
+      } },
+      { line: 3, run: () => {
+        state.frame.savedReturn = state.returnAddress;
+        state.currentLine = 4;
+        return "<code>sw ra, 12(sp)</code>: 일반 스택에 " + formatAddress(state.returnAddress) + " 저장.";
+      } },
+      { line: 4, run: () => {
+        state.currentLine = 5;
+        if (!isEnabled) return "<code>sspush ra</code>: Zicfiss가 꺼져 있어 MOP(mop.rr.7)로 실행된다. x0 ← 0, 아무 일도 없다.";
+        state.shadowPointer -= XLEN_BYTES;
+        state.shadowStack.push(state.returnAddress);
+        return "<code>sspush ra</code>: ssp를 4 줄이고 그림자 스택에 " + formatAddress(state.returnAddress) + " 저장.";
+      } },
+      { line: 5, run: () => {
+        state.currentLine = 6;
+        if (isAttack) {
+          state.frame.buffer = ["41414141", "41414141"];
+          state.frame.savedReturn = GADGET_ADDRESS;
+          state.frame.isAttacked = true;
+          return "g가 입력 문자열을 길이 검사 없이 buffer에 복사했다. 16바이트가 들어와 <b>buffer를 넘치고 저장된 ra를 " + formatAddress(GADGET_ADDRESS) + "로 덮어썼다.</b> g는 정상적으로 0x2010으로 돌아온다.";
+        }
+        state.frame.buffer = ["00216948", ""];
+        return "g가 짧은 문자열 \"Hi!\"를 buffer에 복사하고 0x2010으로 돌아왔다. 저장된 ra는 무사하다.";
+      } },
+      { line: 6, run: () => {
+        state.returnAddress = state.frame.savedReturn;
+        state.currentLine = 7;
+        return "<code>lw ra, 12(sp)</code>: 일반 스택에서 ra ← " + formatAddress(state.returnAddress) + (state.frame.isAttacked ? " (<b>조작된 값</b>)." : ".");
+      } },
+      { line: 7, run: () => {
+        state.stackPointer += FRAME_SIZE;
+        state.frame.isReleased = true;
+        state.currentLine = 8;
+        return "<code>addi sp, sp, 16</code>: 프레임을 해제했다.";
+      } },
+      { line: 8, run: () => {
+        if (!isEnabled) {
+          state.currentLine = 9;
+          return "<code>sspopchk ra</code>: Zicfiss가 꺼져 있어 MOP(mop.r.28)로 실행된다. 비교하지 않는다.";
+        }
+        const shadowTop = state.shadowStack[state.shadowStack.length - 1];
+        if (shadowTop !== state.returnAddress) {
+          state.fault = { cause: SOFTWARE_CHECK_CAUSE, value: SHADOW_STACK_FAULT };
+          state.faultedLine = 8;
+          state.isFinished = true;
+          state.outcome = "blocked";
+          return "<code>sspopchk ra</code>: 그림자 사본 " + formatAddress(shadowTop) + " ≠ ra " + formatAddress(state.returnAddress) + ". <b>software-check 예외(cause 18), xtval = 3 (shadow stack fault)</b>. ssp는 그대로이고, ret은 실행되지 않는다. 공격이 막혔다.";
+        }
+        state.shadowStack.pop();
+        state.shadowPointer += XLEN_BYTES;
+        state.currentLine = 9;
+        return "<code>sspopchk ra</code>: 그림자 사본과 ra가 같다. ssp를 4 늘렸다.";
+      } },
+      { line: 9, run: () => {
+        state.isFinished = true;
+        if (state.returnAddress === GADGET_ADDRESS) {
+          state.currentLine = 10;
+          state.outcome = "hijacked";
+          return "<code>ret</code>: ra = " + formatAddress(GADGET_ADDRESS) + " 로 점프했다. <b>공격 성공 — 제어 흐름을 빼앗겼다.</b> CFI가 꺼져 있으면 sspush/sspopchk는 아무것도 지키지 않는다.";
+        }
+        state.currentLine = 1;
+        state.outcome = "returned";
+        return "<code>ret</code>: main의 " + formatAddress(MAIN_RETURN_ADDRESS) + " 으로 정상 복귀했다.";
+      } },
+    ];
+  }
+
+  /* ---------------- 착지 패드 장면의 단계 ---------------- */
+  function landingSteps() {
+    let pointer = 0x3000;
+    if (scenario === "landingGadget") pointer = 0x3004;
+    if (scenario === "landingLabel") pointer = 0x3100;
+    const targetLine = { 0x3000: 3, 0x3004: 4, 0x3100: 5 }[pointer];
+    return [
+      { line: 0, run: () => {
+        state.labelRegister = EXPECTED_LABEL << 12;
+        state.currentLine = 1;
+        return "<code>lui t2, 0x12345</code>: x7(t2)의 비트 31–12에 기대 라벨 0x12345를 넣는다.";
+      } },
+      { line: 1, run: () => {
+        state.targetRegister = pointer;
+        state.currentLine = 2;
+        if (scenario === "landingGadget") return "<code>lw a5, 0(a0)</code>: 메모리의 함수 포인터를 읽었는데, 공격자가 이미 <b>" + formatAddress(pointer) + "(handler 중간)</b>로 바꿔 놓았다.";
+        if (scenario === "landingLabel") return "<code>lw a5, 0(a0)</code>: 포인터가 <b>다른 종류의 함수 other(" + formatAddress(pointer) + ")</b>를 가리키도록 바뀌어 있다.";
+        return "<code>lw a5, 0(a0)</code>: 함수 포인터 a5 = " + formatAddress(pointer) + " (handler).";
+      } },
+      { line: 2, run: () => {
+        state.returnAddress = 0x100c;
+        state.currentLine = targetLine;
+        if (isEnabled) {
+          state.expectedLanding = "LP_EXPECTED";
+          return "<code>jalr ra, 0(a5)</code>: rs1이 a5(x15)라 x1·x5·x7이 아니다 → <b>ELP = LP_EXPECTED</b>. " + formatAddress(pointer) + "로 점프한다.";
+        }
+        return "<code>jalr ra, 0(a5)</code>: Zicfilp가 꺼져 있어 ELP를 추적하지 않는다. " + formatAddress(pointer) + "로 점프한다.";
+      } },
+      { line: targetLine, run: () => {
+        const isLandingPad = targetLine === 3 || targetLine === 5;
+        const padLabel = targetLine === 5 ? OTHER_LABEL : EXPECTED_LABEL;
+        const expectedLabel = state.labelRegister >>> 12;
+        if (!isEnabled) {
+          state.isFinished = true;
+          if (!isLandingPad) {
+            state.outcome = "hijacked";
+            return "lpad 검사 없이 함수 중간의 <code>addi</code>부터 실행된다. <b>공격자가 고른 곳에서 실행이 이어졌다.</b>";
+          }
+          state.outcome = targetLine === 5 ? "hijacked" : "returned";
+          return "<code>lpad</code>는 Zicfilp가 꺼져 있으면 아무 일도 하지 않는다(AUIPC x0 HINT). 그대로 함수가 실행된다." + (targetLine === 5 ? " 라벨이 달라도 막을 수 없다." : "");
+        }
+        if (!isLandingPad) {
+          state.fault = { cause: SOFTWARE_CHECK_CAUSE, value: LANDING_PAD_FAULT };
+          state.faultedLine = targetLine;
+          state.isFinished = true;
+          state.outcome = "blocked";
+          return "ELP가 LP_EXPECTED인데 도착한 명령이 <code>lpad</code>가 아니다. <b>software-check 예외(cause 18), xtval = 2 (landing pad fault)</b>.";
+        }
+        if (padLabel !== 0 && padLabel !== expectedLabel) {
+          state.fault = { cause: SOFTWARE_CHECK_CAUSE, value: LANDING_PAD_FAULT };
+          state.faultedLine = targetLine;
+          state.isFinished = true;
+          state.outcome = "blocked";
+          return "<code>lpad 0x777</code>: 라벨 0x777 ≠ x7[31:12] 0x12345. <b>software-check 예외(cause 18), xtval = 2</b>. 형식이 다른 함수로의 호출이 막혔다.";
+        }
+        state.expectedLanding = "NO_LP_EXPECTED";
+        state.currentLine = targetLine + 1;
+        return "<code>lpad 0x12345</code>: 4바이트 정렬이고 라벨이 x7[31:12]와 같다 → <b>ELP = NO_LP_EXPECTED</b>. 검사 통과.";
+      } },
+      { line: 4, run: () => {
+        state.isFinished = true;
+        state.outcome = "returned";
+        state.currentLine = 4;
+        return "함수 본문 <code>addi a0, a0, 1</code>이 정상 실행된다.";
+      } },
+    ];
+  }
+
+  function isStackScenario() {
+    return scenario === "normal" || scenario === "overflow";
+  }
+  function steps() {
+    return isStackScenario() ? stackSteps() : landingSteps();
+  }
+
+  const listing = document.getElementById("cfi-listing");
+  const description = document.getElementById("cfi-description");
+
+  function renderAll() {
+    chapter.markListing(listing, state.currentLine, { faultedIndex: state.faultedLine });
+    document.getElementById("cfi-return-address").textContent = state.returnAddress ? formatAddress(state.returnAddress) : "—";
+    document.getElementById("cfi-shadow-pointer").textContent = isEnabled && isStackScenario() ? formatAddress(state.shadowPointer) : "—";
+    document.getElementById("cfi-expected-landing").textContent = isStackScenario() ? "—" : (state.expectedLanding === "LP_EXPECTED" ? "LP_EXPECTED" : "NO_LP");
+    document.getElementById("cfi-exception").textContent = state.fault ? "cause " + state.fault.cause + " · tval " + state.fault.value : "없음";
+    canvas.redraw();
+  }
+
+  function reset() {
+    state = freshState();
+    chapter.renderListing(listing, isStackScenario() ? "반환 주소 보호 (RV32)" : "간접 호출 보호", isStackScenario() ? STACK_LISTING : LANDING_LISTING);
+    description.innerHTML = "<b>한 단계</b>를 눌러 프로그램을 따라가 보자. CFI는 지금 <b>" + (isEnabled ? "켜져" : "꺼져") + "</b> 있다.";
+    renderAll();
+  }
+
+  function step() {
+    if (state.isFinished) {
+      description.innerHTML += " <b>처음으로</b>를 눌러 다시 해 보자.";
+      return;
+    }
+    const scenarioSteps = steps();
+    const nextStep = scenarioSteps[state.stepIndex];
+    if (!nextStep) { state.isFinished = true; return; }
+    description.innerHTML = nextStep.run();
+    state.stepIndex += 1;
+    renderAll();
+  }
+
+  /* ---------------- 그리기 ---------------- */
+  function drawSlot(context, x, y, width, height, label, value, fill, stroke, colors) {
+    book.roundedRectangle(context, x, y, width, height, 6);
+    context.fillStyle = fill;
+    context.fill();
+    context.strokeStyle = stroke;
+    context.lineWidth = 1.2;
+    context.stroke();
+    book.drawText(context, label, x + 8, y + 11, { size: 10, color: colors.faint });
+    book.drawText(context, value, x + 8, y + height - 12, { size: 13, bold: true, mono: true, color: colors.text });
+  }
+
+  function drawStacks(context, width, height, colors) {
+    const padding = 12;
+    const gap = 14;
+    const columnWidth = (width - padding * 2 - gap) / 2;
+    const slotHeight = 42;
+    const top = 34;
+    book.drawText(context, "일반 스택", padding, 14, { size: 12, bold: true, color: colors.text });
+    book.drawText(context, isEnabled ? "그림자 스택 (SS 페이지)" : "그림자 스택 (꺼짐)", padding + columnWidth + gap, 14, { size: 12, bold: true, color: isEnabled ? colors.ok : colors.faint });
+    // 일반 스택
+    const frame = state.frame;
+    if (!frame) {
+      book.drawText(context, "(main 프레임만 있음)", padding + 8, top + 20, { size: 12, color: colors.faint });
+    } else {
+      context.save();
+      if (frame.isReleased) context.globalAlpha = 0.45;
+      const savedText = frame.savedReturn === null ? "—" : formatAddress(frame.savedReturn);
+      drawSlot(context, padding, top, columnWidth, slotHeight, "sp+12: 저장된 ra", savedText, frame.isAttacked ? colors.badSoft : colors.elevated, frame.isAttacked ? colors.bad : colors.border, colors);
+      drawSlot(context, padding, top + slotHeight + 4, columnWidth, slotHeight, "sp+8: (빈칸)", frame.isAttacked ? "41414141" : "—", frame.isAttacked ? colors.badSoft : colors.surface, frame.isAttacked ? colors.bad : colors.border, colors);
+      drawSlot(context, padding, top + (slotHeight + 4) * 2, columnWidth, slotHeight, "sp+4: buffer[4–7]", frame.buffer[1] || "—", frame.isAttacked ? colors.badSoft : colors.surface, frame.isAttacked ? colors.bad : colors.border, colors);
+      drawSlot(context, padding, top + (slotHeight + 4) * 3, columnWidth, slotHeight, "sp+0: buffer[0–3]", frame.buffer[0] || "—", frame.isAttacked ? colors.badSoft : colors.surface, frame.isAttacked ? colors.bad : colors.border, colors);
+      context.restore();
+      if (frame.isReleased) book.drawText(context, "해제됨", padding + columnWidth - 8, top + 11, { size: 10, bold: true, align: "right", color: colors.faint });
+    }
+    book.drawText(context, "sp = " + formatAddress(state.stackPointer), padding, top + (slotHeight + 4) * 4 + 8, { size: 11, mono: true, color: colors.dim });
+    // 그림자 스택
+    const shadowX = padding + columnWidth + gap;
+    if (!isEnabled) {
+      book.drawText(context, "sspush/sspopchk는 MOP로", shadowX + 4, top + 20, { size: 11, color: colors.faint });
+      book.drawText(context, "실행되어 아무것도 안 한다", shadowX + 4, top + 38, { size: 11, color: colors.faint });
+    } else if (state.shadowStack.length === 0) {
+      book.drawText(context, "(비어 있음)", shadowX + 8, top + 20, { size: 12, color: colors.faint });
+    } else {
+      state.shadowStack.forEach((value, index) => {
+        drawSlot(context, shadowX, top + index * (slotHeight + 4), columnWidth, slotHeight, "ssp → ra 사본", formatAddress(value), colors.okSoft, colors.ok, colors);
+      });
+    }
+    if (isEnabled) book.drawText(context, "ssp = " + formatAddress(state.shadowPointer), shadowX, top + (slotHeight + 4) * 4 + 8, { size: 11, mono: true, color: colors.dim });
+    drawOutcome(context, width, height, colors);
+  }
+
+  function drawLanding(context, width, height, colors) {
+    const padding = 12;
+    const lampRadius = 16;
+    const isExpected = state.expectedLanding === "LP_EXPECTED";
+    book.drawText(context, "ELP (예상 착지 패드)", padding, 16, { size: 12, bold: true, color: colors.text });
+    context.beginPath();
+    context.arc(padding + lampRadius, 52, lampRadius, 0, Math.PI * 2);
+    context.fillStyle = isExpected ? colors.gold : colors.surface2;
+    context.fill();
+    book.drawText(context, isEnabled ? (isExpected ? "LP_EXPECTED — 다음 명령은 lpad여야 한다" : "NO_LP_EXPECTED") : "Zicfilp 꺼짐 (추적 안 함)", padding + lampRadius * 2 + 10, 52, { size: 12, bold: isExpected, color: isExpected ? colors.gold : colors.dim });
+    const boxTop = 88;
+    const boxWidth = width - padding * 2;
+    book.roundedRectangle(context, padding, boxTop, boxWidth, 58, 8);
+    context.fillStyle = colors.elevated;
+    context.fill();
+    context.strokeStyle = colors.border;
+    context.lineWidth = 1;
+    context.stroke();
+    book.drawText(context, "x7(t2)[31:12] 기대 라벨", padding + 10, boxTop + 18, { size: 11, color: colors.faint });
+    book.drawText(context, state.labelRegister ? "0x" + (state.labelRegister >>> 12).toString(16) : "—", padding + 10, boxTop + 40, { size: 15, bold: true, mono: true, color: colors.text });
+    book.drawText(context, "a5 (점프 목적지)", padding + boxWidth / 2, boxTop + 18, { size: 11, color: colors.faint });
+    book.drawText(context, state.targetRegister ? formatAddress(state.targetRegister) : "—", padding + boxWidth / 2, boxTop + 40, { size: 15, bold: true, mono: true, color: colors.text });
+    book.drawText(context, "규칙: jalr의 rs1이 x1·x5·x7이 아니면 ELP = LP_EXPECTED", padding, boxTop + 80, { size: 11, color: colors.dim });
+    book.drawText(context, "도착한 명령이 정렬된 lpad이고, 라벨이 0이거나 같아야 통과", padding, boxTop + 98, { size: 11, color: colors.dim });
+    drawOutcome(context, width, height, colors);
+  }
+
+  function drawOutcome(context, width, height, colors) {
+    if (!state.outcome) return;
+    const padding = 12;
+    const bannerHeight = 40;
+    const y = height - bannerHeight - 10;
+    let text = "정상 실행";
+    let fill = colors.okSoft;
+    let color = colors.ok;
+    if (state.outcome === "blocked") { text = "software-check 예외 (cause 18, xtval " + state.fault.value + ") — 차단"; fill = colors.badSoft; color = colors.bad; }
+    if (state.outcome === "hijacked") { text = "공격 성공: 제어 흐름 탈취"; fill = colors.badSoft; color = colors.bad; }
+    book.roundedRectangle(context, padding, y, width - padding * 2, bannerHeight, 8);
+    context.fillStyle = fill;
+    context.fill();
+    context.strokeStyle = color;
+    context.lineWidth = 1.5;
+    context.stroke();
+    book.drawText(context, text, width / 2, y + bannerHeight / 2, { size: width < 400 ? 11 : 13, bold: true, align: "center", color: color });
+  }
+
+  const canvas = book.createCanvas(document.getElementById("cfi-canvas"), (context, width, height, colors) => {
+    if (!state) return;
+    if (isStackScenario()) drawStacks(context, width, height, colors);
+    else drawLanding(context, width, height, colors);
+  }, { aspectRatio: 0.75, minimumHeight: 310, maximumHeight: 330 });
+
+  document.getElementById("cfi-step").addEventListener("click", step);
+  document.getElementById("cfi-reset").addEventListener("click", reset);
+  document.getElementById("cfi-enabled").addEventListener("change", (event) => { isEnabled = event.target.checked; reset(); });
+  state = freshState();
+  book.segmented("cfi-scenario", (value) => { scenario = value; reset(); });
+})();
+</script>
+</body>
+</html>

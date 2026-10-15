@@ -1,0 +1,347 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RISC-V Book · 그림으로 읽는 RISC-V ISA와 규격</title>
+<meta name="description" content="RISC-V 공식 규격(Ratified Specifications)을 그림·애니메이션·시뮬레이터로 풀어 쓴 인터랙티브 교과서. RV32I부터 벡터, 특권 아키텍처, 가상 메모리, 하이퍼바이저, 프로파일까지.">
+<link rel="icon" href="assets/img/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="assets/css/style.css">
+<script src="assets/js/book.js"></script>
+<script src="assets/js/riscv.js"></script>
+<style>
+  .stack-figure a:hover rect { stroke: var(--accent); stroke-width: 2.4; }
+  .stack-figure a { cursor: pointer; }
+  .how-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+  .how-grid div { padding: 16px 18px; border-radius: 12px; border: 1px solid var(--border); background: var(--bg-elev); font-size: 14.5px; color: var(--text-dim); }
+  .how-grid b { display: block; color: var(--text); font-size: 16px; margin: 6px 0 4px; }
+  .resume-box { margin-top: 18px; display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; justify-content: space-between; padding: 12px 16px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg-elev); box-shadow: var(--shadow); }
+  .resume-box small { display: block; font-size: 12px; color: var(--text-faint); letter-spacing: 0.05em; }
+  .resume-box button { font: inherit; border: 0; background: none; color: var(--text-faint); text-decoration: underline; cursor: pointer; padding: 0; }
+  .instruction-ticker { font-family: var(--mono); font-size: 13px; color: var(--text-dim); padding: 10px 14px; border-top: 1px solid var(--border); display: flex; gap: 12px; align-items: center; flex-wrap: wrap; min-height: 44px; }
+  .instruction-ticker b { color: var(--accent); }
+</style>
+</head>
+<body>
+
+<section class="home-hero">
+  <div class="inner">
+    <div>
+      <div class="eyebrow">Interactive RISC-V Textbook</div>
+      <h1>32비트 한 줄에 담긴<br><span class="gradient-text">열린 컴퓨터의 약속</span></h1>
+      <p>RISC-V는 누구나 자유롭게 구현할 수 있는 명령어 집합 구조(ISA)입니다. 이 책은 RISC-V International의 공식 비준 규격을 따라가며, 명령어 비트 하나하나와 CPU 안에서 벌어지는 일을 그림과 애니메이션, 직접 돌려 보는 시뮬레이터로 풀어냅니다. RV32I의 40개 남짓한 명령에서 출발해 벡터 확장, 특권 모드, 가상 메모리, 하이퍼바이저, RVA23 프로파일까지 올라갑니다.</p>
+      <div class="call-to-action">
+        <a class="primary" href="chapters/intro.html">1장부터 시작하기 →</a>
+        <a class="ghost" href="chapters/rv32i.html">RV32I 에뮬레이터 돌려 보기</a>
+      </div>
+      <div class="hero-badges">
+        <span>24개 장</span><span>장마다 시뮬레이터</span><span>규격 v20260120 기준</span><span>설치 없이 브라우저에서</span><span>다크 모드</span>
+      </div>
+      <div class="resume-box" id="resume-box" hidden></div>
+    </div>
+    <div class="hero-visual">
+      <canvas id="hero-canvas" aria-label="RISC-V 하트(hart)의 구성 요소. 누르면 해당 장으로 이동합니다."></canvas>
+      <div class="instruction-ticker" id="hero-ticker">명령어를 해독하는 중…</div>
+      <span class="hint" style="bottom:54px">부품을 누르면 해당 장으로 · 흐르는 점은 명령과 데이터</span>
+    </div>
+  </div>
+</section>
+
+<section class="home-section">
+  <h2>RISC-V는 블록을 쌓는 ISA다</h2>
+  <p class="subtitle">아주 작은 정수 베이스 ISA 위에 필요한 확장만 골라 얹습니다. 마이크로컨트롤러는 RV32I에 C 정도만, 리눅스를 돌리는 서버 코어는 RVA23 프로파일 전체를 갖춥니다. 블록을 누르면 해당 장으로 갑니다.</p>
+  <figure class="diagram stack-figure">
+    <div class="scroll-x"><svg viewBox="0 0 960 430" role="img" aria-label="RISC-V ISA의 계층: 베이스 ISA, 표준 확장, 특권 아키텍처, 플랫폼">
+      <defs>
+        <linearGradient id="base-gradient" x1="0" x2="1"><stop offset="0" stop-color="var(--accent)"/><stop offset="1" stop-color="var(--violet)"/></linearGradient>
+      </defs>
+      <!-- 플랫폼 -->
+      <a href="chapters/platform.html"><rect x="40" y="12" width="880" height="46" rx="10" class="f-surface"/><text x="480" y="41" text-anchor="middle" class="t t-bold">플랫폼 · 부팅 · SBI · AIA · IOMMU · 디버그 · 트레이스</text><text x="900" y="41" text-anchor="end" class="t-faint">22장</text></a>
+      <a href="chapters/profiles.html"><rect x="40" y="66" width="880" height="40" rx="10" class="f-gold-soft"/><text x="480" y="92" text-anchor="middle" class="t t-bold">프로파일: RVI20 · RVA20 · RVA22 · RVA23 · RVB23</text><text x="900" y="92" text-anchor="end" class="t-faint">23장</text></a>
+      <!-- 특권 -->
+      <a href="chapters/privilege.html"><rect x="40" y="114" width="210" height="64" rx="10" class="f-violet-soft"/><text x="145" y="141" text-anchor="middle" class="t t-bold">M · S · U 모드, CSR</text><text x="145" y="162" text-anchor="middle" class="t-faint">17장</text></a>
+      <a href="chapters/trap.html"><rect x="258" y="114" width="210" height="64" rx="10" class="f-violet-soft"/><text x="363" y="141" text-anchor="middle" class="t t-bold">트랩 · 인터럽트</text><text x="363" y="162" text-anchor="middle" class="t-faint">18장</text></a>
+      <a href="chapters/virtual-memory.html"><rect x="476" y="114" width="150" height="64" rx="10" class="f-violet-soft"/><text x="551" y="141" text-anchor="middle" class="t t-bold">Sv39/48/57</text><text x="551" y="162" text-anchor="middle" class="t-faint">19장</text></a>
+      <a href="chapters/memory-protection.html"><rect x="634" y="114" width="130" height="64" rx="10" class="f-violet-soft"/><text x="699" y="141" text-anchor="middle" class="t t-bold">PMP</text><text x="699" y="162" text-anchor="middle" class="t-faint">20장</text></a>
+      <a href="chapters/hypervisor.html"><rect x="772" y="114" width="148" height="64" rx="10" class="f-violet-soft"/><text x="846" y="141" text-anchor="middle" class="t t-bold">H 하이퍼바이저</text><text x="846" y="162" text-anchor="middle" class="t-faint">21장</text></a>
+      <text x="20" y="150" class="t-violet" style="font-size:12px" transform="rotate(-90 20 150)" text-anchor="middle">특권</text>
+      <!-- 표준 확장 -->
+      <a href="chapters/multiply.html"><rect x="40" y="190" width="100" height="72" rx="10" class="f-teal-soft"/><text x="90" y="222" text-anchor="middle" class="t t-bold" style="font-size:20px">M</text><text x="90" y="246" text-anchor="middle" class="t-faint">곱셈·나눗셈</text></a>
+      <a href="chapters/atomic.html"><rect x="148" y="190" width="100" height="72" rx="10" class="f-teal-soft"/><text x="198" y="222" text-anchor="middle" class="t t-bold" style="font-size:20px">A</text><text x="198" y="246" text-anchor="middle" class="t-faint">원자적 연산</text></a>
+      <a href="chapters/floating-point.html"><rect x="256" y="190" width="120" height="72" rx="10" class="f-teal-soft"/><text x="316" y="222" text-anchor="middle" class="t t-bold" style="font-size:20px">F · D · Q</text><text x="316" y="246" text-anchor="middle" class="t-faint">부동소수점</text></a>
+      <a href="chapters/compressed.html"><rect x="384" y="190" width="100" height="72" rx="10" class="f-teal-soft"/><text x="434" y="222" text-anchor="middle" class="t t-bold" style="font-size:20px">C</text><text x="434" y="246" text-anchor="middle" class="t-faint">16비트 압축</text></a>
+      <a href="chapters/bit-manipulation.html"><rect x="492" y="190" width="100" height="72" rx="10" class="f-teal-soft"/><text x="542" y="222" text-anchor="middle" class="t t-bold" style="font-size:20px">B · K</text><text x="542" y="246" text-anchor="middle" class="t-faint">비트·암호</text></a>
+      <a href="chapters/vector.html"><rect x="600" y="190" width="100" height="72" rx="10" class="f-teal-soft"/><text x="650" y="222" text-anchor="middle" class="t t-bold" style="font-size:20px">V</text><text x="650" y="246" text-anchor="middle" class="t-faint">벡터</text></a>
+      <a href="chapters/small-extensions.html"><rect x="708" y="190" width="212" height="72" rx="10" class="f-teal-soft"/><text x="814" y="222" text-anchor="middle" class="t t-bold" style="font-size:18px">Zicsr · Zicond · CMO …</text><text x="814" y="246" text-anchor="middle" class="t-faint">작은 Z 확장들</text></a>
+      <a href="chapters/memory-model.html"><rect x="40" y="270" width="880" height="34" rx="10" class="f-surface"/><text x="480" y="292" text-anchor="middle" class="t">RVWMO 메모리 모델 — 모든 하트가 메모리를 바라보는 공통 규칙 (11장)</text></a>
+      <text x="20" y="236" class="t-teal" style="font-size:12px" transform="rotate(-90 20 236)" text-anchor="middle">확장</text>
+      <!-- 베이스 -->
+      <a href="chapters/rv32i.html"><rect x="40" y="314" width="880" height="64" rx="12" fill="url(#base-gradient)"/><text x="480" y="345" text-anchor="middle" class="t-on-accent" style="font-size:20px">베이스 정수 ISA: RV32I · RV64I · RV32E · RV64E</text><text x="480" y="366" text-anchor="middle" style="fill:var(--on-accent);opacity:.8;font-size:13px">레지스터 32개(E는 16개) · 명령 형식 6가지 · 3–8장</text></a>
+      <a href="chapters/pipeline.html"><rect x="40" y="386" width="880" height="34" rx="10" class="f-elev" stroke-dasharray="5 4"/><text x="480" y="408" text-anchor="middle" class="t-dim">구현(마이크로아키텍처): 파이프라인 · 캐시 · 비순차 실행 — ISA 아래에 숨겨진 자유 (8장)</text></a>
+    </svg></div>
+    <figcaption><b>그림 0-1.</b> RISC-V ISA의 층. 베이스 ISA는 절대 바뀌지 않는 바닥이고, 그 위에 표준 확장과 특권 아키텍처, 프로파일과 플랫폼 규격이 쌓인다. 맨 아래 점선 상자는 ISA가 정하지 않는 영역, 곧 구현자의 자유다.</figcaption>
+  </figure>
+</section>
+
+<section class="home-section" style="padding-top:8px">
+  <h2>숫자로 보는 RISC-V</h2>
+  <p class="subtitle">이 책을 끝내면 아래 숫자가 각각 무엇을 뜻하고 왜 그 값인지 설명할 수 있습니다.</p>
+  <div class="stat-strip">
+    <div><b>40</b><span>RV32I의 고유 명령어 수. 이것만으로 리눅스 사용자 프로그램을 돌릴 수 있다</span></div>
+    <div><b>x0 = 0</b><span>값이 언제나 0인 레지스터 하나가 수많은 의사 명령을 공짜로 만든다</span></div>
+    <div><b>6가지</b><span>R·I·S·B·U·J. 레지스터 칸의 위치는 모든 형식에서 같다</span></div>
+    <div><b>4096</b><span>CSR 주소 공간. 주소 비트 자체가 접근 권한을 말해 준다</span></div>
+    <div><b>3단계</b><span>Sv39의 페이지 테이블 깊이. 39비트 가상 주소 = 512 GiB</span></div>
+    <div><b>VLEN 무관</b><span>같은 벡터 바이너리가 128비트에서도 1024비트 하드웨어에서도 돈다</span></div>
+  </div>
+</section>
+
+<section class="home-section" style="padding-top:8px">
+  <h2>이 책을 읽는 방법</h2>
+  <p class="subtitle">각 장은 같은 흐름으로 진행됩니다. 규격 원문을 옆에 펴 두고 함께 읽으면 가장 좋습니다.</p>
+  <div class="how-grid">
+    <div><span class="pill gold">그림</span><b>비트부터 눈으로</b>명령어 인코딩, 레지스터, 페이지 테이블을 모두 그림으로 먼저 보여 줍니다. 움직이는 그림은 데이터가 흐르는 방향을 보여 줍니다.</div>
+    <div><span class="sim-tag">SIMULATOR</span><b>직접 돌려 보기</b>어셈블러·에뮬레이터·페이지 워크·트랩 흐름을 한 단계씩 실행합니다. “해볼 것”을 따라 하면 핵심이 보입니다.</div>
+    <div><span class="pill accent">§ 규격</span><b>원문으로 이어지기</b>각 절의 § 링크는 docs.riscv.org의 해당 규격 장으로 연결됩니다. 이 책은 규격을 대신하지 않고 읽기 쉽게 안내합니다.</div>
+    <div><span class="pill ok">정리</span><b>핵심 정리와 퀴즈</b>장 끝의 요약과 퀴즈로 확인하고, 24장의 명령어 카드와 종합 퀴즈로 복습합니다.</div>
+  </div>
+</section>
+
+<section class="home-section" style="padding-top:8px">
+  <h2>추천 학습 경로</h2>
+  <p class="subtitle">처음이라면 순서대로 읽는 것을 권합니다. 목적이 분명하다면 아래 경로로 골라 읽어도 됩니다.</p>
+  <div class="path-grid" id="path-grid"></div>
+</section>
+
+<section class="home-section" style="padding-top:8px;padding-bottom:40px" id="chapters">
+  <h2>전체 목차</h2>
+  <p class="subtitle">모든 장에 그림과 직접 조작하는 시뮬레이터가 들어 있습니다.</p>
+  <div id="chapter-parts"></div>
+</section>
+
+<script>
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+
+  /* ---------------------------------------------------------- 학습 경로 */
+  const LEARNING_PATHS = [
+    { title: "🧭 전체 일주 (추천)", description: "RISC-V를 처음 배운다면 1장부터 차례로. 각 장이 앞 장 위에 쌓입니다.", slugs: book.CHAPTERS.map((chapter) => chapter.slug), isShort: true },
+    { title: "🧑‍💻 어셈블리 프로그래머", description: "RISC-V 어셈블리를 읽고 쓰고 싶다면.", slugs: ["registers", "encoding", "rv32i", "rv64", "abi", "multiply", "compressed", "reference"] },
+    { title: "🔧 CPU 설계자", description: "RISC-V 코어를 만들거나 검증한다면. ISA가 하드웨어에 요구하는 것.", slugs: ["encoding", "pipeline", "atomic", "memory-model", "compressed", "vector", "privilege", "trap", "virtual-memory"] },
+    { title: "🐧 운영체제·펌웨어 개발자", description: "부트로더, 커널, 하이퍼바이저를 RISC-V로 옮긴다면.", slugs: ["privilege", "trap", "virtual-memory", "memory-protection", "hypervisor", "platform", "profiles"] },
+  ];
+  const pathGrid = document.getElementById("path-grid");
+  pathGrid.innerHTML = LEARNING_PATHS.map((path) => {
+    const links = path.slugs.map((slug) => {
+      const chapter = book.CHAPTERS.find((item) => item.slug === slug);
+      const label = path.isShort ? chapter.number : chapter.number + " " + chapter.title.split(":")[0].split(" ")[0];
+      return '<a href="' + book.chapterUrl(slug) + '" title="' + chapter.title + '">' + label + "</a>";
+    }).join("");
+    return '<div class="path-card"><h3>' + path.title + "</h3><p>" + path.description + '</p><div class="steps">' + links + "</div></div>";
+  }).join("");
+
+  /* ---------------------------------------------------------- 목차 카드 */
+  let partsHtml = "";
+  let lastPart = "";
+  book.CHAPTERS.forEach((chapter) => {
+    if (chapter.part !== lastPart) {
+      if (lastPart) partsHtml += "</div>";
+      partsHtml += '<div class="part-title">' + chapter.part + '</div><div class="chapter-grid">';
+      lastPart = chapter.part;
+    }
+    const tags = chapter.tags.map((tag) => (tag === "simulator" ? '<span class="simulator">시뮬레이터</span>' : "<span>" + tag + "</span>")).join("");
+    const doneClass = book.progress.isDone(chapter.slug) ? " is-done" : "";
+    partsHtml += '<a class="chapter-card' + doneClass + '" href="' + book.chapterUrl(chapter.slug) + '"><span class="number">CHAPTER ' + chapter.number + "</span><h3>" + chapter.title + "</h3><p>" + chapter.description + '</p><div class="tags">' + tags + "</div></a>";
+  });
+  document.getElementById("chapter-parts").innerHTML = partsHtml + "</div>";
+
+  /* ---------------------------------------------------------- 이어 읽기 */
+  const lastSlug = book.progress.lastSlug();
+  const lastChapter = book.CHAPTERS.find((chapter) => chapter.slug === lastSlug);
+  if (lastChapter) {
+    const resumeBox = document.getElementById("resume-box");
+    resumeBox.hidden = false;
+    resumeBox.innerHTML = '<div><small>이어 읽기</small><a href="' + book.chapterUrl(lastChapter.slug) + '"><b>' + lastChapter.number + " " + lastChapter.title + "</b> →</a></div>" +
+      '<div style="font-size:13.5px;color:var(--text-dim)">' + book.CHAPTERS.length + "장 중 <b>" + book.progress.doneCount() + '</b>장 다 읽음 · <button type="button" id="reset-progress">기록 지우기</button></div>';
+    document.getElementById("reset-progress").addEventListener("click", () => {
+      if (confirm("이 브라우저에 저장된 읽기 기록을 지울까요?")) { book.progress.reset(); location.reload(); }
+    });
+  }
+
+  /* ---------------------------------------------------------- 첫 화면 그림: 살아 있는 하트(hart)
+     명령어가 메모리에서 들어와 해독기를 거쳐 각 실행 장치로 흩어지는 모습을 보여 준다.
+     위치는 캔버스 너비·높이에 대한 비율(0~1)로 적어 두어 화면 크기와 무관하게 배치한다. */
+  const PARTS = [
+    { key: "memory", x: 0.13, y: 0.5, width: 0.18, height: 0.62, label: "메모리", sublabel: "11·19장", slug: "memory-model" },
+    { key: "fetch", x: 0.38, y: 0.14, width: 0.22, height: 0.14, label: "PC · 명령 가져오기", sublabel: "5장", slug: "rv32i" },
+    { key: "decode", x: 0.38, y: 0.4, width: 0.22, height: 0.16, label: "해독기", sublabel: "4장 인코딩", slug: "encoding", isMain: true },
+    { key: "registers", x: 0.38, y: 0.68, width: 0.22, height: 0.16, label: "x0–x31", sublabel: "3장", slug: "registers" },
+    { key: "integer", x: 0.66, y: 0.14, width: 0.18, height: 0.13, label: "ALU", sublabel: "5장", slug: "rv32i" },
+    { key: "multiply", x: 0.87, y: 0.14, width: 0.16, height: 0.13, label: "M · B", sublabel: "9·14장", slug: "multiply" },
+    { key: "float", x: 0.66, y: 0.38, width: 0.18, height: 0.13, label: "F · D", sublabel: "12장", slug: "floating-point" },
+    { key: "vector", x: 0.87, y: 0.38, width: 0.16, height: 0.13, label: "V", sublabel: "15장", slug: "vector" },
+    { key: "csr", x: 0.66, y: 0.62, width: 0.18, height: 0.13, label: "CSR", sublabel: "17장", slug: "privilege" },
+    { key: "trap", x: 0.87, y: 0.62, width: 0.16, height: 0.13, label: "트랩", sublabel: "18장", slug: "trap" },
+    { key: "mmu", x: 0.76, y: 0.86, width: 0.36, height: 0.12, label: "MMU · PMP", sublabel: "19·20장", slug: "virtual-memory" },
+  ];
+  const LINKS = [
+    ["memory", "fetch"], ["fetch", "decode"], ["decode", "registers"], ["decode", "integer"], ["decode", "multiply"],
+    ["decode", "float"], ["decode", "vector"], ["decode", "csr"], ["csr", "trap"], ["registers", "integer"],
+    ["mmu", "memory"], ["registers", "mmu"],
+  ];
+  const partsByKey = Object.fromEntries(PARTS.map((part) => [part.key, part]));
+  const UNIT_FOR_EXTENSION = { I: "integer", M: "multiply", Zicsr: "csr" };
+
+  // 실제 인코딩된 예제 명령들. 해독기 부분에서 비트가 흐르는 모습과 아래 글줄에 쓴다.
+  const SAMPLE_PROGRAM = [
+    "addi a0, zero, 42", "lw t0, 8(sp)", "add a1, a0, t0", "mul a2, a1, a1", "sw a2, 12(sp)",
+    "beq a0, a1, -8", "csrrs t1, 0xc00, zero", "lui a3, 0x10000", "jal ra, 256", "srai a4, a2, 3",
+  ];
+  const sampleWords = SAMPLE_PROGRAM.map((text) => {
+    const assembled = window.Riscv.assemble(text);
+    return assembled.words[0];
+  });
+
+  const movingDots = Array.from({ length: 22 }, (_, index) => ({ linkIndex: index % LINKS.length, progress: Math.random(), speed: 0.3 + Math.random() * 0.45 }));
+  let hoveredKey = null;
+  let elapsedSeconds = 0;
+  let sampleIndex = 0;
+  let sampleTimer = 0;
+  const SAMPLE_INTERVAL_SECONDS = 1.6;
+  const tickerElement = document.getElementById("hero-ticker");
+  const canvasElement = document.getElementById("hero-canvas");
+
+  function rectangleOf(part, width, height) {
+    return [part.x * width - (part.width * width) / 2, part.y * height - (part.height * height) / 2, part.width * width, part.height * height];
+  }
+
+  function activeUnitKey() {
+    const entry = sampleWords[sampleIndex];
+    const decoded = window.Riscv.decode(entry.word);
+    if (decoded.opcode === window.Riscv.OPCODES.LOAD || decoded.opcode === window.Riscv.OPCODES.STORE) return "mmu";
+    return UNIT_FOR_EXTENSION[decoded.instruction.extension] || "integer";
+  }
+
+  const hero = book.createCanvas(canvasElement, (context, width, height, colors) => {
+    const activeKey = activeUnitKey();
+    // 배경 격자
+    context.strokeStyle = colors.grid;
+    context.lineWidth = 1;
+    for (let gridX = 0; gridX < width; gridX += 24) { context.beginPath(); context.moveTo(gridX, 0); context.lineTo(gridX, height); context.stroke(); }
+    for (let gridY = 0; gridY < height; gridY += 24) { context.beginPath(); context.moveTo(0, gridY); context.lineTo(width, gridY); context.stroke(); }
+    // 연결선
+    LINKS.forEach(([fromKey, toKey]) => {
+      const from = partsByKey[fromKey];
+      const to = partsByKey[toKey];
+      const isActiveLink = (fromKey === "decode" && toKey === activeKey) || (toKey === "decode" && fromKey === "fetch");
+      context.strokeStyle = isActiveLink ? colors.gold : colors.border;
+      context.lineWidth = isActiveLink ? 3 : 2;
+      context.beginPath();
+      context.moveTo(from.x * width, from.y * height);
+      context.lineTo(to.x * width, to.y * height);
+      context.stroke();
+    });
+    // 흐르는 점
+    movingDots.forEach((dot) => {
+      const [fromKey, toKey] = LINKS[dot.linkIndex];
+      const from = partsByKey[fromKey];
+      const to = partsByKey[toKey];
+      const x = book.linearInterpolate(from.x * width, to.x * width, dot.progress);
+      const y = book.linearInterpolate(from.y * height, to.y * height, dot.progress);
+      context.fillStyle = dot.linkIndex % 3 === 0 ? colors.gold : colors.accent;
+      context.globalAlpha = 0.85;
+      context.beginPath();
+      context.arc(x, y, 3.4, 0, Math.PI * 2);
+      context.fill();
+      context.globalAlpha = 1;
+    });
+    // 부품 상자
+    PARTS.forEach((part) => {
+      const [x, y, boxWidth, boxHeight] = rectangleOf(part, width, height);
+      const isHovered = hoveredKey === part.key;
+      const isActive = part.key === activeKey;
+      book.roundedRectangle(context, x, y, boxWidth, boxHeight, 10);
+      context.fillStyle = part.isMain ? colors.accent : isHovered ? colors.accentSoft : isActive ? colors.goldSoft : colors.elevated;
+      context.fill();
+      context.strokeStyle = part.isMain || isHovered ? colors.accent : isActive ? colors.gold : colors.border;
+      context.lineWidth = isHovered || isActive ? 2.4 : 1.4;
+      context.stroke();
+      const foreground = part.isMain ? colors.onAccent : colors.text;
+      const fontSize = Math.max(10.5, Math.min(15, boxWidth / 7.5));
+      const hasRoomForSublabel = boxHeight > 44;
+      if (part.key === "memory") {
+        // 메모리 상자는 안쪽에 명령 목록을 그리므로 이름을 위쪽에 둔다
+        book.drawText(context, part.label, x + boxWidth / 2, y + 16, { align: "center", size: 13, bold: true, color: colors.text });
+        return;
+      }
+      book.drawText(context, part.label, x + boxWidth / 2, y + boxHeight / 2 - (hasRoomForSublabel ? 8 : 0), { align: "center", size: fontSize, bold: true, color: foreground });
+      if (hasRoomForSublabel) book.drawText(context, part.sublabel, x + boxWidth / 2, y + boxHeight / 2 + 11, { align: "center", size: 11, color: part.isMain ? foreground : colors.faint });
+    });
+    // 해독기 위에 지금 명령의 opcode 비트를 반짝이며 보여 준다
+    const decodePart = partsByKey.decode;
+    const [decodeX, decodeY, decodeWidth] = rectangleOf(decodePart, width, height);
+    const opcodeBits = book.toBinary(sampleWords[sampleIndex].word & 0x7f, 7);
+    const pulse = 0.55 + 0.45 * Math.sin(elapsedSeconds * 5);
+    context.globalAlpha = pulse;
+    book.drawText(context, "opcode " + opcodeBits, decodeX + decodeWidth / 2, decodeY - 10, { align: "center", size: 11, mono: true, bold: true, color: colors.gold });
+    context.globalAlpha = 1;
+    // 메모리 안에 명령 목록
+    const memoryPart = partsByKey.memory;
+    const [memoryX, memoryY, memoryWidth, memoryHeight] = rectangleOf(memoryPart, width, height);
+    const rowHeight = Math.min(18, (memoryHeight - 40) / SAMPLE_PROGRAM.length);
+    if (memoryWidth > 80) {
+      sampleWords.forEach((entry, index) => {
+        const rowY = memoryY + 42 + index * rowHeight;
+        if (index === sampleIndex) {
+          book.roundedRectangle(context, memoryX + 6, rowY - rowHeight / 2 + 1, memoryWidth - 12, rowHeight - 2, 4);
+          context.fillStyle = colors.goldSoft;
+          context.fill();
+        }
+        book.drawText(context, entry.word.toString(16).padStart(8, "0"), memoryX + memoryWidth / 2, rowY, { align: "center", size: Math.min(11, memoryWidth / 9), mono: true, color: index === sampleIndex ? colors.text : colors.faint });
+      });
+    }
+  }, { aspectRatio: 0.78, minimumHeight: 320, maximumHeight: 460 });
+
+  function updateTicker() {
+    const entry = sampleWords[sampleIndex];
+    const decoded = window.Riscv.decode(entry.word);
+    tickerElement.innerHTML = "<span>" + book.toHex(entry.word) + "</span><span>→</span><b>" + entry.text + "</b><span>(" + decoded.format + " 형식, " + decoded.instruction.description + ")</span>";
+  }
+  updateTicker();
+
+  book.animationLoop(canvasElement, (deltaSeconds) => {
+    elapsedSeconds += deltaSeconds;
+    sampleTimer += deltaSeconds;
+    if (sampleTimer > SAMPLE_INTERVAL_SECONDS) {
+      sampleTimer = 0;
+      sampleIndex = (sampleIndex + 1) % sampleWords.length;
+      updateTicker();
+    }
+    movingDots.forEach((dot) => {
+      dot.progress += deltaSeconds * dot.speed;
+      if (dot.progress > 1) { dot.progress = 0; dot.linkIndex = Math.floor(Math.random() * LINKS.length); }
+    });
+    hero.redraw();
+  });
+
+  const partAtPointer = (event) => {
+    const bounds = canvasElement.getBoundingClientRect();
+    const relativeX = (event.clientX - bounds.left) / bounds.width;
+    const relativeY = (event.clientY - bounds.top) / bounds.height;
+    return PARTS.find((part) => Math.abs(relativeX - part.x) < part.width / 2 && Math.abs(relativeY - part.y) < part.height / 2);
+  };
+  canvasElement.addEventListener("pointermove", (event) => {
+    const part = partAtPointer(event);
+    hoveredKey = part ? part.key : null;
+    canvasElement.style.cursor = part ? "pointer" : "default";
+  });
+  canvasElement.addEventListener("pointerleave", () => { hoveredKey = null; });
+  canvasElement.addEventListener("click", (event) => {
+    const part = partAtPointer(event);
+    if (part) location.href = book.chapterUrl(part.slug);
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,1702 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>15 V 확장: 벡터 연산 · RISC-V Book</title>
+<meta name="description" content="RISC-V V 확장(RVV 1.0)의 벡터 레지스터, VLEN·SEW·LMUL·vl, vsetvli와 스트립 마이닝, 마스크와 꼬리 정책, 벡터 메모리 접근, 넓히기·리덕션·순열 연산, Zve*·Zvl* 부분 확장을 그림과 시뮬레이터로 익힌다.">
+<link rel="icon" href="../assets/img/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/style.css">
+<script src="../assets/js/book.js"></script>
+<style>
+  .explorer-canvas { cursor: pointer; }
+  .encoding-scroll { overflow-x: auto; }
+  .encoding-scroll .bitfield { min-width: 620px; }
+  .assembly-line { font-family: var(--mono); font-size: 15px; font-weight: 700; color: var(--accent); margin: 0 0 6px; overflow-wrap: anywhere; }
+  .encoding-note { font-size: 14px; color: var(--text-dim); margin: 8px 0 0; }
+  .lane-block { margin: 0 0 12px; }
+  .lane-title { font-size: 12.5px; font-weight: 700; color: var(--text-faint); margin: 0 0 4px; }
+  .lane-grid { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 4px; }
+  .lane-cell { border: 1px solid var(--border); border-radius: 7px; background: var(--surface); font-family: var(--mono); font-size: 13px; font-weight: 700; text-align: center; padding: 6px 0; min-width: 0; color: var(--text); transition: background 0.25s, border-color 0.25s; }
+  .lane-cell.index { background: transparent; border-color: transparent; color: var(--text-faint); font-size: 12px; padding: 2px 0; }
+  .lane-cell.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+  .lane-cell.inactive { background: var(--violet-soft); border-color: var(--violet); }
+  .lane-cell.tail { background: var(--accent-2-soft); border-color: var(--accent-2); }
+  .lane-cell.prestart { background: var(--surface-2); color: var(--text-dim); }
+  .lane-cell.agnostic { border-style: dashed; border-width: 2px; }
+  .lane-cell.all-ones { color: var(--bad); font-size: 11px; }
+  .mask-grid .bit { width: auto; height: 34px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 13px; color: var(--text-dim); margin-top: 6px; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .legend i { display: inline-block; width: 14px; height: 14px; border-radius: 4px; border: 1px solid var(--border); }
+  .legend i.active { background: var(--accent-soft); border-color: var(--accent); }
+  .legend i.inactive { background: var(--violet-soft); border-color: var(--violet); }
+  .legend i.tail { background: var(--accent-2-soft); border-color: var(--accent-2); }
+  .legend i.prestart { background: var(--surface-2); }
+  .legend i.agnostic { border: 2px dashed var(--text-dim); }
+  .control select { max-width: 100%; }
+</style>
+</head>
+<body data-chapter="vector">
+<main class="chapter">
+  <header class="chapter-hero">
+    <div class="eyebrow">Chapter 15</div>
+    <h1>V 확장: 벡터 연산</h1>
+    <p class="lead">배열 원소 수천 개에 같은 계산을 하는 일은 그래픽, 신호 처리, 머신러닝, 심지어 <code>memcpy</code>와 <code>strlen</code>에도 흔하다. 한 명령으로 여러 원소를 처리하는 방법으로 x86과 Arm은 128·256·512비트처럼 <b>폭이 정해진 SIMD</b>를 세대마다 새로 추가했다. <strong>RISC-V V 확장은 레지스터 길이를 구현에 맡기고, 프로그램은 "몇 개 남았는지"만 하드웨어에 알려 주는 벡터 길이 무관(vector-length agnostic) 방식을 택했다.</strong> 같은 바이너리가 128비트 칩에서도 1024비트 칩에서도 돌아간다. 이 장에서는 그 비밀인 VLEN·SEW·LMUL·vl과 <code>vsetvli</code>를 그림과 시뮬레이터로 해부한다.</p>
+    <ul class="objectives">
+      <li>고정 폭 SIMD와 벡터 길이 무관(VLA) 프로그래밍의 차이를 설명한다.</li>
+      <li>v0–v31, VLEN, ELEN과 일곱 개의 벡터 CSR(주소 포함)을 안다.</li>
+      <li>vtype의 vsew·vlmul·vta·vma·vill 필드와 VLMAX = LMUL × VLEN / SEW를 계산한다.</li>
+      <li><code>vsetvli</code>가 AVL로부터 vl을 정하는 규칙과 인코딩을 이해한다.</li>
+      <li>스트립 마이닝 루프가 서로 다른 VLEN에서 어떻게 동작하는지 눈으로 확인한다.</li>
+      <li>마스크(v0)와 꼬리·비활성 원소의 undisturbed/agnostic 정책을 구별한다.</li>
+      <li>단위·상수 보폭·인덱스·세그먼트·fault-only-first 메모리 접근과 넓히기·리덕션·순열 연산을 익힌다.</li>
+      <li>Zve*·Zvl* 부분 확장과 벡터 암호 확장의 위치를 안다.</li>
+    </ul>
+    <div class="spec-meta">
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/unpriv/v-st-ext.html" target="_blank" rel="noopener">"V" Vector Extension v1.0</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/unpriv/vector-examples.html" target="_blank" rel="noopener">Vector Assembly Code Examples</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/unpriv/vector-crypto.html" target="_blank" rel="noopener">Vector Cryptography v1.0</a>
+    </div>
+  </header>
+
+  <!-- ============================================================ -->
+  <section id="why-vector">
+    <h2>왜 벡터인가: 고정 폭 SIMD와 길이 무관 벡터</h2>
+    <p>스칼라 코드로 <code>z[i] = x[i] + y[i]</code>를 n번 계산하면 매 원소마다 로드 두 번, 덧셈 한 번, 저장 한 번, 포인터 증가와 분기가 따라온다. 계산 자체보다 <b>명령을 가져오고 해독하는 비용</b>이 더 크다. 한 명령에 여러 원소를 실으면 이 비용이 원소 수만큼 나뉜다. 여기까지는 SIMD와 벡터가 같다. 차이는 <b>몇 개를 싣느냐를 누가 정하느냐</b>에 있다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 340" role="img" aria-label="고정 폭 SIMD와 RISC-V 벡터의 비교">
+        <defs>
+          <path id="why-path-left" d="M640 104 C640 160 520 170 512 222"/>
+          <path id="why-path-middle" d="M645 104 L645 222"/>
+          <path id="why-path-right" d="M650 104 C650 160 770 170 778 222"/>
+        </defs>
+        <text x="20" y="26" class="t t-bold">고정 폭 SIMD: 폭이 바뀌면 명령도 바뀐다</text>
+        <text x="20" y="62" class="t-dim">SSE · 128비트 레지스터 (32비트 원소 4개)</text>
+        <g transform="translate(20,70)"><rect width="80" height="26" rx="5" class="f-accent-soft"/><path d="M20 0 V26 M40 0 V26 M60 0 V26" class="s-line"/></g>
+        <text x="20" y="128" class="t-dim">AVX · 256비트 레지스터 (원소 8개, 새 명령)</text>
+        <g transform="translate(20,136)"><rect width="160" height="26" rx="5" class="f-teal-soft"/><path d="M20 0 V26 M40 0 V26 M60 0 V26 M80 0 V26 M100 0 V26 M120 0 V26 M140 0 V26" class="s-line"/></g>
+        <text x="20" y="194" class="t-dim">AVX-512 · 512비트 레지스터 (원소 16개, 또 새 명령)</text>
+        <g transform="translate(20,202)"><rect width="320" height="26" rx="5" class="f-violet-soft"/><path d="M20 0 V26 M40 0 V26 M60 0 V26 M80 0 V26 M100 0 V26 M120 0 V26 M140 0 V26 M160 0 V26 M180 0 V26 M200 0 V26 M220 0 V26 M240 0 V26 M260 0 V26 M280 0 V26 M300 0 V26" class="s-line"/></g>
+        <text x="20" y="262" class="t-bad">폭마다 새 명령·새 바이너리가 필요하다</text>
+        <text x="20" y="284" class="t-faint">n이 폭의 배수가 아니면 남은 원소용 스칼라 꼬리 루프도 따로 쓴다</text>
+        <line x1="420" y1="16" x2="420" y2="320" stroke="var(--border)" stroke-width="1.5" stroke-dasharray="4 5"/>
+        <text x="440" y="26" class="t t-bold">RISC-V V: 길이에 얽매이지 않는 한 바이너리</text>
+        <rect x="540" y="40" width="210" height="64" rx="10" class="f-elev"/>
+        <text x="645" y="62" text-anchor="middle" class="t-mono">vsetvli t0, a0, e32, m1</text>
+        <text x="645" y="82" text-anchor="middle" class="t-mono">vle32.v · vadd.vv · vse32.v</text>
+        <text x="645" y="98" text-anchor="middle" class="t-faint">같은 기계어</text>
+        <use href="#why-path-left" class="s-accent flow-dash"/>
+        <use href="#why-path-middle" class="s-accent flow-dash"/>
+        <use href="#why-path-right" class="s-accent flow-dash"/>
+        <circle r="5" fill="var(--accent-2)"><animateMotion dur="2.4s" begin="-0.3s" repeatCount="indefinite"><mpath href="#why-path-left"/></animateMotion></circle>
+        <circle r="5" fill="var(--accent-2)"><animateMotion dur="2.4s" begin="-1.1s" repeatCount="indefinite"><mpath href="#why-path-middle"/></animateMotion></circle>
+        <circle r="5" fill="var(--accent-2)"><animateMotion dur="2.4s" begin="-1.9s" repeatCount="indefinite"><mpath href="#why-path-right"/></animateMotion></circle>
+        <g transform="translate(445,222)">
+          <rect width="130" height="78" rx="10" class="f-accent-soft"/>
+          <text x="65" y="22" text-anchor="middle" class="t t-bold">VLEN = 128</text>
+          <rect x="12" y="34" width="106" height="18" rx="3" class="f-elev"/>
+          <path d="M38.5 34 V52 M65 34 V52 M91.5 34 V52" class="s-line"/>
+          <text x="65" y="70" text-anchor="middle" class="t-faint">한 번에 4원소</text>
+        </g>
+        <g transform="translate(580,222)">
+          <rect width="130" height="78" rx="10" class="f-teal-soft"/>
+          <text x="65" y="22" text-anchor="middle" class="t t-bold">VLEN = 256</text>
+          <rect x="12" y="34" width="106" height="18" rx="3" class="f-elev"/>
+          <path d="M25.25 34 V52 M38.5 34 V52 M51.75 34 V52 M65 34 V52 M78.25 34 V52 M91.5 34 V52 M104.75 34 V52" class="s-line"/>
+          <text x="65" y="70" text-anchor="middle" class="t-faint">한 번에 8원소</text>
+        </g>
+        <g transform="translate(715,222)">
+          <rect width="130" height="78" rx="10" class="f-violet-soft"/>
+          <text x="65" y="22" text-anchor="middle" class="t t-bold">VLEN = 512</text>
+          <rect x="12" y="34" width="106" height="18" rx="3" class="f-elev"/>
+          <path d="M18.6 34 V52 M25.25 34 V52 M31.9 34 V52 M38.5 34 V52 M45.1 34 V52 M51.75 34 V52 M58.4 34 V52 M65 34 V52 M71.6 34 V52 M78.25 34 V52 M84.9 34 V52 M91.5 34 V52 M98.1 34 V52 M104.75 34 V52 M111.4 34 V52" class="s-line"/>
+          <text x="65" y="70" text-anchor="middle" class="t-faint">한 번에 16원소</text>
+        </g>
+        <text x="645" y="326" text-anchor="middle" class="t-ok">하드웨어가 "이번에 vl개 처리한다"고 알려 준다</text>
+      </svg></div>
+      <figcaption><b>그림 15-1.</b> 고정 폭 SIMD(왼쪽)는 레지스터 폭이 넓어질 때마다 새 명령 집합과 새 바이너리가 필요하다. RISC-V 벡터(오른쪽)는 같은 기계어가 VLEN이 다른 세 칩에서 각자 할 수 있는 만큼(4, 8, 16원소)씩 처리한다. 금색 점은 같은 명령어가 세 구현으로 흘러가는 모습이다.</figcaption>
+    </figure>
+    <p>RISC-V V 확장은 1970년대 Cray-1에서 시작한 <b>벡터 머신</b>의 전통을 잇는다. 레지스터 하나의 길이 VLEN은 구현이 정하는 상수이고, 프로그램은 처리할 원소 수(<span class="term">응용 벡터 길이</span><span class="english">(AVL, application vector length)</span>)를 <code>vsetvli</code>로 건네 하드웨어가 이번 반복에 처리할 개수 <code>vl</code>을 돌려받는다. 이렇게 짠 코드를 <span class="term">벡터 길이 무관</span><span class="english">(VLA, vector-length agnostic)</span> 코드라 한다.</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th></th><th>고정 폭 SIMD (예: SSE/AVX)</th><th>RISC-V V</th></tr></thead>
+      <tbody>
+        <tr><td><b>레지스터 폭</b></td><td>명령 집합마다 고정 (128/256/512)</td><td>구현마다 다른 VLEN (2의 거듭제곱, 최대 2<sup>16</sup>비트)</td></tr>
+        <tr><td><b>원소 폭</b></td><td>명령마다 따로 (addps, addpd …)</td><td>vtype의 SEW가 정한다. 명령은 하나 (<code>vadd.vv</code>)</td></tr>
+        <tr><td><b>남은 원소 처리</b></td><td>별도의 스칼라 꼬리 루프</td><td>마지막 반복에서 vl이 줄어들 뿐, 같은 루프</td></tr>
+        <tr><td><b>하드웨어가 넓어지면</b></td><td>새 명령으로 다시 컴파일</td><td>같은 바이너리가 그대로 빨라진다</td></tr>
+        <tr><td><b>명령 인코딩</b></td><td>폭·형식 정보가 opcode에 들어간다</td><td>32비트 명령 안에 다 못 넣는 정보는 vtype CSR로 뺐다</td></tr>
+      </tbody>
+    </table></div>
+    <div class="callout history"><strong>오래 걸린 비준</strong><p>RISC-V 벡터 확장은 여러 해에 걸쳐 여러 초안(v0.7, v0.8, v0.9 …)을 거친 끝에 <b>2021년 v1.0으로 비준</b>되었다. 초안 v0.7.1을 구현한 칩이 먼저 시장에 나오기도 해서, "RVV 0.7.1"과 "RVV 1.0"은 서로 호환되지 않는다는 점을 기억해 두면 좋다. 이 장은 비준된 v1.0만 다룬다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="state">
+    <h2>벡터 레지스터와 CSR</h2>
+    <p>V 확장은 정수·부동소수점 레지스터와 별도로 <b>32개의 벡터 레지스터 v0–v31</b>을 더한다. 각 레지스터는 VLEN비트다. 규격은 구현마다 두 상수를 정하게 한다.</p>
+    <ul>
+      <li><b>ELEN</b> — 어떤 연산이든 만들거나 쓸 수 있는 원소의 최대 폭. 8 이상, 2의 거듭제곱. V 확장은 64다.</li>
+      <li><b>VLEN</b> — 벡터 레지스터 하나의 비트 수. ELEN 이상, 2의 거듭제곱, 2<sup>16</sup> 이하. V 확장은 최소 128이다.</li>
+    </ul>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 360" role="img" aria-label="벡터 레지스터 32개와 벡터 CSR 7개">
+        <text x="20" y="24" class="t t-bold">벡터 레지스터 32개</text>
+        <text x="295" y="40" text-anchor="middle" class="t-dim">VLEN 비트 (구현이 정하는 상수: 128, 256, 512, …)</text>
+        <path d="M70 52 V46 H520 V52" class="s-line"/>
+        <text x="58" y="77" text-anchor="end" class="t-mono">v0</text>
+        <rect x="70" y="58" width="450" height="28" rx="5" class="f-gold-soft"/>
+        <text x="295" y="77" text-anchor="middle" class="t-dim">마스크(v0.t)로도 쓰인다</text>
+        <text x="58" y="111" text-anchor="end" class="t-mono">v1</text>
+        <rect x="70" y="92" width="450" height="28" rx="5" class="f-surface"/>
+        <text x="295" y="111" text-anchor="middle" class="t-faint">원소 폭(SEW)과 묶음(LMUL)은 vtype이 정한다</text>
+        <text x="58" y="145" text-anchor="end" class="t-mono">v2</text>
+        <rect x="70" y="126" width="450" height="28" rx="5" class="f-surface"/>
+        <path d="M126.25 126 V154 M182.5 126 V154 M238.75 126 V154 M295 126 V154 M351.25 126 V154 M407.5 126 V154 M463.75 126 V154" class="s-line" stroke-dasharray="3 3"/>
+        <text x="58" y="179" text-anchor="end" class="t-mono">v3</text>
+        <rect x="70" y="160" width="450" height="28" rx="5" class="f-surface"/>
+        <path d="M182.5 160 V188 M295 160 V188 M407.5 160 V188" class="s-line" stroke-dasharray="3 3"/>
+        <text x="295" y="212" text-anchor="middle" class="t-dim">⋮</text>
+        <text x="58" y="241" text-anchor="end" class="t-mono">v30</text>
+        <rect x="70" y="222" width="450" height="28" rx="5" class="f-surface"/>
+        <text x="58" y="275" text-anchor="end" class="t-mono">v31</text>
+        <rect x="70" y="256" width="450" height="28" rx="5" class="f-surface"/>
+        <text x="20" y="314" class="t-dim">ELEN: 원소 하나의 최대 폭 (V 확장은 64) · VLEN ≥ ELEN</text>
+        <text x="20" y="338" class="t-faint">mstatus.VS[10:9] = Off 이면 모든 벡터 명령과 벡터 CSR 접근이 illegal-instruction 예외</text>
+        <text x="560" y="24" class="t t-bold">벡터 CSR 7개</text>
+        <g class="t-faint"><text x="568" y="48" class="t-faint">주소</text><text x="628" y="48" class="t-faint">이름</text><text x="690" y="48" class="t-faint">뜻</text></g>
+        <g>
+          <rect x="556" y="56" width="294" height="30" rx="5" class="f-surface"/><text x="568" y="76" class="t-mono">0x008</text><text x="628" y="76" class="t-mono t-bold">vstart</text><text x="690" y="76" class="t-dim">시작 원소 번호</text>
+          <rect x="556" y="90" width="294" height="30" rx="5" class="f-surface"/><text x="568" y="110" class="t-mono">0x009</text><text x="628" y="110" class="t-mono t-bold">vxsat</text><text x="690" y="110" class="t-dim">고정소수점 포화 플래그</text>
+          <rect x="556" y="124" width="294" height="30" rx="5" class="f-surface"/><text x="568" y="144" class="t-mono">0x00A</text><text x="628" y="144" class="t-mono t-bold">vxrm</text><text x="690" y="144" class="t-dim">고정소수점 반올림 모드</text>
+          <rect x="556" y="158" width="294" height="30" rx="5" class="f-surface"/><text x="568" y="178" class="t-mono">0x00F</text><text x="628" y="178" class="t-mono t-bold">vcsr</text><text x="690" y="178" class="t-dim">vxrm + vxsat 묶음</text>
+          <rect x="556" y="192" width="294" height="30" rx="5" class="f-accent-soft"/><text x="568" y="212" class="t-mono">0xC20</text><text x="628" y="212" class="t-mono t-bold">vl</text><text x="690" y="212" class="t-dim">벡터 길이 (원소 수)</text>
+          <rect x="556" y="226" width="294" height="30" rx="5" class="f-accent-soft"/><text x="568" y="246" class="t-mono">0xC21</text><text x="628" y="246" class="t-mono t-bold">vtype</text><text x="690" y="246" class="t-dim">원소 폭 · 묶음 · 정책</text>
+          <rect x="556" y="260" width="294" height="30" rx="5" class="f-accent-soft"/><text x="568" y="280" class="t-mono">0xC22</text><text x="628" y="280" class="t-mono t-bold">vlenb</text><text x="690" y="280" class="t-dim">VLEN/8 (바이트)</text>
+        </g>
+        <rect x="560" y="304" width="14" height="14" rx="3" class="f-surface"/><text x="580" y="316" class="t-faint">URW 사용자 읽기·쓰기</text>
+        <rect x="712" y="304" width="14" height="14" rx="3" class="f-accent-soft"/><text x="732" y="316" class="t-faint">URO 읽기 전용</text>
+      </svg></div>
+      <figcaption><b>그림 15-2.</b> V 확장의 프로그래머 모델. 벡터 레지스터 32개는 모두 VLEN비트이며, 그 안을 몇 비트짜리 원소로 나눌지는 vtype이 정한다(v2는 8칸, v3는 4칸으로 나눈 예). 오른쪽은 규격 표 그대로의 CSR 주소다. vl·vtype·vlenb는 읽기 전용 CSR이다. vl과 vtype은 <code>vset{i}vl{i}</code> 명령으로 바뀌고(vl은 fault-only-first 로드로도 줄어든다), vlenb는 설계 시점 상수다.</figcaption>
+    </figure>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>CSR</th><th>주소</th><th>권한</th><th>설명</th></tr></thead>
+      <tbody>
+        <tr><td><code>vstart</code></td><td class="number">0x008</td><td>URW</td><td>벡터 명령이 시작할 원소 번호. 트랩이 난 원소를 기록해 재개에 쓴다. 모든 벡터 명령은 끝나면 0으로 되돌린다.</td></tr>
+        <tr><td><code>vxsat</code></td><td class="number">0x009</td><td>URW</td><td>고정소수점 연산이 포화(saturate)되었는지 표시하는 1비트 플래그.</td></tr>
+        <tr><td><code>vxrm</code></td><td class="number">0x00A</td><td>URW</td><td>고정소수점 반올림 모드 2비트(rnu, rne, rdn, rod).</td></tr>
+        <tr><td><code>vcsr</code></td><td class="number">0x00F</td><td>URW</td><td>vxrm(비트 2:1)과 vxsat(비트 0)을 한꺼번에 읽고 쓰는 창.</td></tr>
+        <tr><td><code>vl</code></td><td class="number">0xC20</td><td>URO</td><td>이번 명령이 갱신할 원소 수.</td></tr>
+        <tr><td><code>vtype</code></td><td class="number">0xC21</td><td>URO</td><td>원소 폭(SEW), 레지스터 묶음(LMUL), 꼬리·마스크 정책, vill.</td></tr>
+        <tr><td><code>vlenb</code></td><td class="number">0xC22</td><td>URO</td><td>VLEN/8. 레지스터 하나의 바이트 수. 설계 시점 상수다.</td></tr>
+      </tbody>
+    </table></div>
+    <div class="callout deep"><strong>vlenb가 따로 있는 이유</strong><p>문맥 교환 코드는 벡터 레지스터를 저장할 스택 공간을 계산해야 한다. vlenb가 없으면 <code>vsetvli</code>로 VLMAX를 알아내야 하는데, 그러면 저장하려던 vl과 vtype이 망가진다. 그래서 규격은 VLEN/8을 그냥 읽을 수 있는 CSR을 두었다. 운영체제가 쓰는 <code>mstatus.VS</code> 필드(Off/Initial/Clean/Dirty)는 부동소수점의 FS와 같은 방식으로, 벡터 상태가 더러워졌을 때만 저장하게 해 문맥 교환 비용을 줄인다(<a href="privilege.html">17장</a>).</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="vtype">
+    <h2>SEW·LMUL·vtype: 레지스터를 어떻게 나누고 묶을까</h2>
+    <p>벡터 명령의 32비트 인코딩에는 원소 폭이나 레지스터 묶음 정보를 넣을 자리가 없다. 그래서 RISC-V는 이 정보를 <b>vtype CSR</b>로 빼냈다. <code>vadd.vv</code>는 하나뿐이지만, 직전에 <code>vsetvli</code>로 정한 vtype에 따라 8비트 덧셈이 되기도 하고 64비트 덧셈이 되기도 한다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 220" role="img" aria-label="vtype 레지스터의 비트 배치">
+        <text x="60" y="42" text-anchor="middle" class="t-faint">XLEN-1</text>
+        <text x="230" y="42" text-anchor="middle" class="t-faint">XLEN-2 … 8</text>
+        <text x="400" y="42" text-anchor="middle" class="t-faint">7</text>
+        <text x="480" y="42" text-anchor="middle" class="t-faint">6</text>
+        <text x="600" y="42" text-anchor="middle" class="t-faint">5 … 3</text>
+        <text x="760" y="42" text-anchor="middle" class="t-faint">2 … 0</text>
+        <rect x="20" y="50" width="80" height="50" class="f-bad-soft"/>
+        <rect x="100" y="50" width="260" height="50" class="f-surface"/>
+        <rect x="360" y="50" width="80" height="50" class="f-violet-soft"/>
+        <rect x="440" y="50" width="80" height="50" class="f-gold-soft"/>
+        <rect x="520" y="50" width="160" height="50" class="f-accent-soft"/>
+        <rect x="680" y="50" width="160" height="50" class="f-teal-soft"/>
+        <text x="60" y="80" text-anchor="middle" class="t t-bold">vill</text>
+        <text x="230" y="80" text-anchor="middle" class="t-dim">0 (예약)</text>
+        <text x="400" y="80" text-anchor="middle" class="t t-bold">vma</text>
+        <text x="480" y="80" text-anchor="middle" class="t t-bold">vta</text>
+        <text x="600" y="80" text-anchor="middle" class="t t-bold">vsew[2:0]</text>
+        <text x="760" y="80" text-anchor="middle" class="t t-bold">vlmul[2:0]</text>
+        <text x="60" y="122" text-anchor="middle" class="t-faint">잘못된 설정</text>
+        <text x="230" y="122" text-anchor="middle" class="t-faint">0으로 둔다</text>
+        <text x="400" y="122" text-anchor="middle" class="t-faint">마스크 정책</text>
+        <text x="480" y="122" text-anchor="middle" class="t-faint">꼬리 정책</text>
+        <text x="600" y="122" text-anchor="middle" class="t-faint">SEW 선택</text>
+        <text x="760" y="122" text-anchor="middle" class="t-faint">LMUL 선택</text>
+        <text x="20" y="160" class="t-dim">예: vsetvli t0, a0, e32, m4, ta, ma 가 쓰는 vtype = 0xD2</text>
+        <rect x="20" y="172" width="80" height="34" rx="4" class="f-elev"/><text x="60" y="194" text-anchor="middle" class="t-mono">0</text>
+        <rect x="100" y="172" width="260" height="34" rx="4" class="f-elev"/><text x="230" y="194" text-anchor="middle" class="t-mono">0 … 0</text>
+        <rect x="360" y="172" width="80" height="34" rx="4" class="f-elev"/><text x="400" y="194" text-anchor="middle" class="t-mono">1</text>
+        <rect x="440" y="172" width="80" height="34" rx="4" class="f-elev"/><text x="480" y="194" text-anchor="middle" class="t-mono">1</text>
+        <rect x="520" y="172" width="160" height="34" rx="4" class="f-elev"/><text x="600" y="194" text-anchor="middle" class="t-mono">010 → SEW=32</text>
+        <rect x="680" y="172" width="160" height="34" rx="4" class="f-elev"/><text x="760" y="194" text-anchor="middle" class="t-mono">010 → LMUL=4</text>
+      </svg></div>
+      <figcaption><b>그림 15-3.</b> vtype의 비트 배치. vill은 맨 위 비트(XLEN-1)에 있어서, 소프트웨어는 vtype을 읽어 "음수인가"만 분기로 확인하면 설정이 거부되었는지 알 수 있다. vill이 1이면 나머지 비트는 모두 0이고 vl도 0이 된다.</figcaption>
+    </figure>
+    <div class="figure-row">
+      <div class="table-wrap"><table class="compact">
+        <thead><tr><th>vsew[2:0]</th><th>SEW</th><th>어셈블러</th></tr></thead>
+        <tbody>
+          <tr><td><code>000</code></td><td>8</td><td><code>e8</code></td></tr>
+          <tr><td><code>001</code></td><td>16</td><td><code>e16</code></td></tr>
+          <tr><td><code>010</code></td><td>32</td><td><code>e32</code></td></tr>
+          <tr><td><code>011</code></td><td>64</td><td><code>e64</code></td></tr>
+          <tr><td><code>1xx</code></td><td>예약</td><td></td></tr>
+        </tbody>
+      </table></div>
+      <div class="table-wrap"><table class="compact">
+        <thead><tr><th>vlmul[2:0]</th><th>LMUL</th><th>VLMAX</th></tr></thead>
+        <tbody>
+          <tr><td><code>100</code></td><td>예약</td><td>—</td></tr>
+          <tr><td><code>101</code></td><td><code>mf8</code> 1/8</td><td>VLEN/SEW/8</td></tr>
+          <tr><td><code>110</code></td><td><code>mf4</code> 1/4</td><td>VLEN/SEW/4</td></tr>
+          <tr><td><code>111</code></td><td><code>mf2</code> 1/2</td><td>VLEN/SEW/2</td></tr>
+          <tr><td><code>000</code></td><td><code>m1</code> 1</td><td>VLEN/SEW</td></tr>
+          <tr><td><code>001</code></td><td><code>m2</code> 2</td><td>2·VLEN/SEW</td></tr>
+          <tr><td><code>010</code></td><td><code>m4</code> 4</td><td>4·VLEN/SEW</td></tr>
+          <tr><td><code>011</code></td><td><code>m8</code> 8</td><td>8·VLEN/SEW</td></tr>
+        </tbody>
+      </table></div>
+    </div>
+    <p>vlmul은 부호 있는 3비트 값으로, LMUL = 2<sup>vlmul</sup>이다. 그래서 111(−1)이 1/2, 110(−2)이 1/4, 101(−3)이 1/8이 된다. 여기서 이 장의 핵심 공식이 나온다.</p>
+    <div class="codebox" data-title="한 명령이 다룰 수 있는 최대 원소 수">VLMAX = LMUL × VLEN / SEW</div>
+    <h3>LMUL: 레지스터 여러 개를 하나처럼</h3>
+    <p><span class="term">LMUL</span><span class="english">(length multiplier)</span>이 1보다 크면 연속된 레지스터 여러 개가 <span class="term">레지스터 그룹</span><span class="english">(vector register group)</span> 하나가 된다. 명령에는 그룹의 첫 레지스터 번호만 적고, 원소는 그 레지스터부터 차례로 채워진 뒤 다음 번호로 넘어간다. 그룹 시작 번호는 LMUL의 배수여야 한다. 아니면 그 인코딩은 예약(reserved)이다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 300" role="img" aria-label="LMUL=4 레지스터 그룹에 원소가 채워지는 순서">
+        <defs><path id="group-order-path" d="M180 77 H600 L180 127 H600 L180 177 H600 L180 227 H600"/></defs>
+        <text x="390" y="24" text-anchor="middle" class="t t-bold">VLEN=128, SEW=32, LMUL=4 → v8–v11 네 개가 피연산자 하나</text>
+        <g>
+          <text x="96" y="69" text-anchor="end" class="t-mono">v8</text>
+          <text x="96" y="119" text-anchor="end" class="t-mono">v9</text>
+          <text x="96" y="169" text-anchor="end" class="t-mono">v10</text>
+          <text x="96" y="219" text-anchor="end" class="t-mono">v11</text>
+          <rect x="110" y="44" width="560" height="40" rx="6" class="f-accent-soft"/>
+          <rect x="110" y="94" width="560" height="40" rx="6" class="f-accent-soft"/>
+          <rect x="110" y="144" width="560" height="40" rx="6" class="f-accent-soft"/>
+          <rect x="110" y="194" width="560" height="40" rx="6" class="f-accent-soft"/>
+          <path d="M250 44 V84 M390 44 V84 M530 44 V84 M250 94 V134 M390 94 V134 M530 94 V134 M250 144 V184 M390 144 V184 M530 144 V184 M250 194 V234 M390 194 V234 M530 194 V234" class="s-line"/>
+          <text x="180" y="69" text-anchor="middle" class="t">원소 0</text><text x="320" y="69" text-anchor="middle" class="t">원소 1</text><text x="460" y="69" text-anchor="middle" class="t">원소 2</text><text x="600" y="69" text-anchor="middle" class="t">원소 3</text>
+          <text x="180" y="119" text-anchor="middle" class="t">원소 4</text><text x="320" y="119" text-anchor="middle" class="t">원소 5</text><text x="460" y="119" text-anchor="middle" class="t">원소 6</text><text x="600" y="119" text-anchor="middle" class="t">원소 7</text>
+          <text x="180" y="169" text-anchor="middle" class="t">원소 8</text><text x="320" y="169" text-anchor="middle" class="t">원소 9</text><text x="460" y="169" text-anchor="middle" class="t">원소 10</text><text x="600" y="169" text-anchor="middle" class="t">원소 11</text>
+          <text x="180" y="219" text-anchor="middle" class="t">원소 12</text><text x="320" y="219" text-anchor="middle" class="t">원소 13</text><text x="460" y="219" text-anchor="middle" class="t">원소 14</text><text x="600" y="219" text-anchor="middle" class="t">원소 15</text>
+        </g>
+        <path d="M180 77 H600 M180 127 H600 M180 177 H600 M180 227 H600" class="s-gold flow-dash" stroke-opacity="0.6"/>
+        <circle r="7" fill="var(--accent-2)"><animateMotion dur="6s" begin="-0.5s" repeatCount="indefinite"><mpath href="#group-order-path"/></animateMotion></circle>
+        <path d="M686 44 Q700 44 700 60 V124 Q700 139 712 139 Q700 139 700 154 V218 Q700 234 686 234" class="s-accent"/>
+        <text x="722" y="120" class="t-accent">레지스터 그룹</text>
+        <text x="722" y="144" class="t-dim">VLMAX</text>
+        <text x="722" y="164" class="t-dim">= 4×128/32 = 16</text>
+        <text x="20" y="266" class="t-dim">LMUL=2는 짝수 번호, LMUL=4는 4의 배수, LMUL=8은 v0·v8·v16·v24에서만 그룹이 시작한다.</text>
+        <text x="20" y="288" class="t-faint">LMUL=1/2이면 레지스터 하나의 앞쪽 절반만 쓰고, 나머지 절반은 꼬리(tail)로 취급한다.</text>
+      </svg></div>
+      <figcaption><b>그림 15-4.</b> LMUL=4 레지스터 그룹. 원소는 v8을 다 채운 뒤 v9로 넘어간다(금색 점의 순서). 규격의 그림은 최하위 바이트(0번 원소)를 오른쪽에 그리지만, 이 장의 그림과 시뮬레이터는 읽기 편하게 0번을 왼쪽에 둔다.</figcaption>
+    </figure>
+    <p>LMUL을 키우는 첫째 이유는 <b>폭이 다른 데이터를 같은 원소 수로 맞추기 위해서</b>다. 16비트 값을 32비트로 넓히면 같은 원소 수를 담는 데 레지스터가 두 배 필요하다. 그래서 규격은 루프 안에서 <b>SEW/LMUL 비율을 일정하게</b> 유지하라고 권한다. 비율이 같으면 VLMAX도 같아서, 한 번 정한 vl을 모든 폭에 그대로 쓸 수 있다. 분수 LMUL은 반대로 좁은 데이터가 레지스터 하나를 통째로 차지하지 않게 해, 32개 레지스터 이름을 더 많이 쓰게 해 준다. ELEN=64인 구현은 1/2, 1/4, 1/8을 반드시 지원해야 한다.</p>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>SEW/LMUL →</th><th class="number">1</th><th class="number">2</th><th class="number">4</th><th class="number">8</th><th class="number">16</th><th class="number">32</th><th class="number">64</th></tr></thead>
+      <tbody>
+        <tr><td>SEW=8</td><td class="number">8</td><td class="number">4</td><td class="number">2</td><td class="number">1</td><td class="number">1/2</td><td class="number">1/4</td><td class="number">1/8</td></tr>
+        <tr><td>SEW=16</td><td></td><td class="number">8</td><td class="number">4</td><td class="number">2</td><td class="number">1</td><td class="number">1/2</td><td class="number">1/4</td></tr>
+        <tr><td>SEW=32</td><td></td><td></td><td class="number">8</td><td class="number">4</td><td class="number">2</td><td class="number">1</td><td class="number">1/2</td></tr>
+        <tr><td>SEW=64</td><td></td><td></td><td></td><td class="number">8</td><td class="number">4</td><td class="number">2</td><td class="number">1</td></tr>
+      </tbody>
+    </table></div>
+    <p>위 표의 한 열에 있는 설정들은 VLMAX가 모두 같다(규격 표를 그대로 옮겼다). 예를 들어 SEW/LMUL=16 열에서는 e8·mf2, e16·m1, e32·m2, e64·m4가 같은 원소 수를 다룬다.</p>
+
+    <div class="sim" id="vlmax-explorer">
+      <div class="sim-head"><span class="sim-tag">EXPLORER</span><h3>VLEN · SEW · LMUL 탐색기</h3></div>
+      <div class="sim-view"><canvas id="explorer-canvas" class="explorer-canvas" aria-label="벡터 레지스터 파일 32개와 선택한 레지스터 그룹"></canvas></div>
+      <div class="step-description" id="explorer-description"></div>
+      <div class="sim-controls">
+        <div class="control"><span>VLEN (구현)</span><div class="segmented" id="explorer-vlen"><button data-value="128" class="on">128</button><button data-value="256">256</button><button data-value="512">512</button><button data-value="1024">1024</button></div></div>
+        <div class="control"><span>SEW</span><div class="segmented" id="explorer-sew"><button data-value="8">e8</button><button data-value="16">e16</button><button data-value="32" class="on">e32</button><button data-value="64">e64</button></div></div>
+        <div class="control"><span>LMUL</span><div class="segmented" id="explorer-lmul"><button data-value="0.125">mf8</button><button data-value="0.25">mf4</button><button data-value="0.5">mf2</button><button data-value="1">m1</button><button data-value="2">m2</button><button data-value="4" class="on">m4</button><button data-value="8">m8</button></div></div>
+        <label class="control"><span>그룹 시작 레지스터</span><select id="explorer-base"></select></label>
+        <label class="control"><span>AVL (남은 원소 수)</span><input type="number" id="explorer-avl" min="0" max="4096" value="20"></label>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">레지스터당 원소 (VLEN/SEW)</span><span class="value" id="explorer-per-register">4</span></div>
+        <div class="stat"><span class="key">VLMAX</span><span class="value" id="explorer-vlmax">16</span></div>
+        <div class="stat"><span class="key">vl (AVL 반영)</span><span class="value" id="explorer-vl">16</span></div>
+        <div class="stat"><span class="key">그룹</span><span class="value" id="explorer-group">v8–v11</span></div>
+        <div class="stat"><span class="key">vlenb</span><span class="value" id="explorer-vlenb">16</span></div>
+      </div>
+      <div class="sim-note">캔버스의 레지스터 줄을 누르면 그 레지스터가 그룹의 시작이 된다. LMUL=4에서 v9를 눌러 보자(예약된 인코딩 경고). VLEN만 128 → 1024로 바꾸면 같은 vsetvli가 돌려주는 VLMAX가 8배가 된다. e64·mf8처럼 SEW가 LMUL×ELEN보다 큰 조합도 골라 보자.</div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="vsetvl">
+    <h2>vsetvli: 하드웨어와 길이를 협상하기</h2>
+    <p>설정 명령은 세 가지다. 셋 다 새 vtype을 쓰고, AVL로부터 vl을 정해 vl CSR과 <code>rd</code>에 함께 쓴다. 모두 OP-V 주 opcode(<code>1010111</code>)의 funct3=<code>111</code>(OPCFG)을 쓴다.</p>
+    <div class="codebox" data-title="설정 명령 세 가지" data-highlight="vector">vsetvli  rd, rs1, vtypei   # rd = 새 vl, rs1 = AVL, vtypei = 새 vtype (즉시값)
+vsetivli rd, uimm, vtypei  # rd = 새 vl, uimm = AVL (5비트, 0–31)
+vsetvl   rd, rs1, rs2      # rd = 새 vl, rs1 = AVL, rs2 = 새 vtype 값 (문맥 복원용)</div>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 260" role="img" aria-label="vsetvli, vsetivli, vsetvl의 인코딩">
+        <g>
+          <text x="30" y="22" class="t t-bold">vsetvli rd, rs1, vtypei</text>
+          <rect x="30" y="30" width="25" height="40" class="f-surface"/><text x="42.5" y="55" text-anchor="middle" class="t-mono">0</text>
+          <rect x="55" y="30" width="275" height="40" class="f-gold-soft"/><text x="192.5" y="55" text-anchor="middle" class="t-mono">zimm[10:0] = vtypei</text>
+          <rect x="330" y="30" width="125" height="40" class="f-teal-soft"/><text x="392.5" y="55" text-anchor="middle" class="t-mono">rs1 (AVL)</text>
+          <rect x="455" y="30" width="75" height="40" class="f-violet-soft"/><text x="492.5" y="55" text-anchor="middle" class="t-mono">111</text>
+          <rect x="530" y="30" width="125" height="40" class="f-teal-soft"/><text x="592.5" y="55" text-anchor="middle" class="t-mono">rd</text>
+          <rect x="655" y="30" width="175" height="40" class="f-accent-soft"/><text x="742.5" y="55" text-anchor="middle" class="t-mono">1010111 (OP-V)</text>
+          <g class="t-faint"><text x="42.5" y="86" text-anchor="middle" class="t-faint">31</text><text x="62" y="86" class="t-faint">30</text><text x="324" y="86" text-anchor="end" class="t-faint">20</text><text x="336" y="86" class="t-faint">19</text><text x="449" y="86" text-anchor="end" class="t-faint">15</text><text x="461" y="86" class="t-faint">14</text><text x="524" y="86" text-anchor="end" class="t-faint">12</text><text x="536" y="86" class="t-faint">11</text><text x="649" y="86" text-anchor="end" class="t-faint">7</text><text x="661" y="86" class="t-faint">6</text><text x="824" y="86" text-anchor="end" class="t-faint">0</text></g>
+        </g>
+        <g>
+          <text x="30" y="108" class="t t-bold">vsetivli rd, uimm, vtypei</text>
+          <rect x="30" y="116" width="50" height="40" class="f-surface"/><text x="55" y="141" text-anchor="middle" class="t-mono">11</text>
+          <rect x="80" y="116" width="250" height="40" class="f-gold-soft"/><text x="205" y="141" text-anchor="middle" class="t-mono">zimm[9:0] = vtypei</text>
+          <rect x="330" y="116" width="125" height="40" class="f-gold-soft"/><text x="392.5" y="141" text-anchor="middle" class="t-mono">uimm[4:0]</text>
+          <rect x="455" y="116" width="75" height="40" class="f-violet-soft"/><text x="492.5" y="141" text-anchor="middle" class="t-mono">111</text>
+          <rect x="530" y="116" width="125" height="40" class="f-teal-soft"/><text x="592.5" y="141" text-anchor="middle" class="t-mono">rd</text>
+          <rect x="655" y="116" width="175" height="40" class="f-accent-soft"/><text x="742.5" y="141" text-anchor="middle" class="t-mono">1010111 (OP-V)</text>
+          <g><text x="36" y="172" class="t-faint">31</text><text x="74" y="172" text-anchor="end" class="t-faint">30</text><text x="86" y="172" class="t-faint">29</text><text x="324" y="172" text-anchor="end" class="t-faint">20</text><text x="336" y="172" class="t-faint">19</text><text x="449" y="172" text-anchor="end" class="t-faint">15</text></g>
+        </g>
+        <g>
+          <text x="30" y="194" class="t t-bold">vsetvl rd, rs1, rs2</text>
+          <rect x="30" y="202" width="25" height="40" class="f-surface"/><text x="42.5" y="227" text-anchor="middle" class="t-mono">1</text>
+          <rect x="55" y="202" width="150" height="40" class="f-surface"/><text x="130" y="227" text-anchor="middle" class="t-mono">000000</text>
+          <rect x="205" y="202" width="125" height="40" class="f-teal-soft"/><text x="267.5" y="227" text-anchor="middle" class="t-mono">rs2 (vtype)</text>
+          <rect x="330" y="202" width="125" height="40" class="f-teal-soft"/><text x="392.5" y="227" text-anchor="middle" class="t-mono">rs1 (AVL)</text>
+          <rect x="455" y="202" width="75" height="40" class="f-violet-soft"/><text x="492.5" y="227" text-anchor="middle" class="t-mono">111</text>
+          <rect x="530" y="202" width="125" height="40" class="f-teal-soft"/><text x="592.5" y="227" text-anchor="middle" class="t-mono">rd</text>
+          <rect x="655" y="202" width="175" height="40" class="f-accent-soft"/><text x="742.5" y="227" text-anchor="middle" class="t-mono">1010111 (OP-V)</text>
+          <g><text x="42.5" y="258" text-anchor="middle" class="t-faint">31</text><text x="62" y="258" class="t-faint">30</text><text x="199" y="258" text-anchor="end" class="t-faint">25</text><text x="211" y="258" class="t-faint">24</text><text x="324" y="258" text-anchor="end" class="t-faint">20</text></g>
+        </g>
+      </svg></div>
+      <figcaption><b>그림 15-5.</b> 설정 명령 세 가지의 인코딩. 비트 31(과 30)이 셋을 구별한다. vsetvli는 vtype의 아래 11비트를, vsetivli는 아래 10비트를 즉시값으로 담는다. 명령 안에서 vlmul은 비트 22:20, vsew는 25:23, vta는 26, vma는 27에 놓인다.</figcaption>
+    </figure>
+    <h3>AVL은 어디서 오나</h3>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>rd</th><th>rs1</th><th>AVL</th><th>효과</th></tr></thead>
+      <tbody>
+        <tr><td>아무거나</td><td>x0 아님</td><td>x[rs1]의 값</td><td>보통의 스트립 마이닝</td></tr>
+        <tr><td>x0 아님</td><td>x0</td><td>~0 (가장 큰 부호 없는 수)</td><td>vl = VLMAX로 설정하고 rd에도 쓴다</td></tr>
+        <tr><td>x0</td><td>x0</td><td>현재 vl 값</td><td>vl은 그대로 두고 vtype만 바꾼다. 새 SEW/LMUL 비율 때문에 VLMAX가 바뀌면 예약</td></tr>
+      </tbody>
+    </table></div>
+    <h3>vl을 정하는 규칙</h3>
+    <p>AVL이 VLMAX 이하면 vl = AVL이다. AVL이 VLMAX의 두 배 이상이면 vl = VLMAX다. 그 사이, 즉 <b>VLMAX &lt; AVL &lt; 2·VLMAX</b>인 경우에만 구현에 재량이 있다. vl은 ceil(AVL/2) 이상 VLMAX 이하 중 아무 값이나 될 수 있다. 같은 구현에서 같은 입력이면 늘 같은 값이어야 한다.</p>
+    <div class="callout spec"><strong>규격 원문에서</strong>
+      <blockquote>"vl = AVL if AVL ≤ VLMAX; ceil(AVL / 2) ≤ vl ≤ VLMAX if AVL &lt; (2 * VLMAX); vl = VLMAX if AVL ≥ (2 * VLMAX)" … "this permits an implementation to set vl = ceil(AVL / 2) for VLMAX &lt; AVL &lt; 2*VLMAX in order to evenly distribute work over the last two iterations of a strip-mine loop."</blockquote>
+      <p><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/v-st-ext.html" target="_blank" rel="noopener">Volume I, "V" Extension — Constraints on Setting vl</a> — 마지막 두 반복에 일을 고르게 나누는 구현을 허용하려는 규칙이다. 소프트웨어는 vl이 VLMAX라고 가정하지 말고 반드시 돌려받은 값을 써야 한다.</p></div>
+    <p>이 규칙에서 유용한 성질이 따라 나온다. AVL=0이면 vl=0, AVL&gt;0이면 vl&gt;0, 그리고 vl은 VLMAX와 AVL을 넘지 않는다. 또 첫 반복의 vl이 모든 반복 중 가장 크다는 것이 보장되므로, 리덕션 루프가 vl의 최댓값을 따로 기억할 필요가 없다.</p>
+
+    <div class="sim" id="vsetvli-encoder">
+      <div class="sim-head"><span class="sim-tag">SIMULATOR</span><h3>vsetvli 인코딩 만들기</h3></div>
+      <div class="sim-pad">
+        <p class="assembly-line" id="encoder-assembly">vsetvli t0, a0, e32, m4, ta, ma</p>
+        <div class="encoding-scroll"><div class="bitfield" id="encoder-bitfield"></div></div>
+        <p class="encoding-note" id="encoder-note"></p>
+      </div>
+      <div class="sim-controls">
+        <div class="control"><span>명령</span><div class="segmented" id="encoder-form"><button data-value="vsetvli" class="on">vsetvli</button><button data-value="vsetivli">vsetivli</button><button data-value="vsetvl">vsetvl</button></div></div>
+        <label class="control"><span>rd</span><select id="encoder-rd"><option value="0">zero (x0)</option><option value="5" selected>t0 (x5)</option><option value="11">a1 (x11)</option><option value="14">a4 (x14)</option></select></label>
+        <label class="control" id="encoder-rs1-control"><span>rs1 (AVL)</span><select id="encoder-rs1"><option value="0">zero (x0)</option><option value="10" selected>a0 (x10)</option><option value="12">a2 (x12)</option></select></label>
+        <label class="control" id="encoder-uimm-control" hidden><span>uimm (AVL) <output id="encoder-uimm-output"></output></span><input type="range" id="encoder-uimm" min="0" max="31" value="4"></label>
+        <label class="control" id="encoder-rs2-control" hidden><span>rs2 (vtype 값)</span><select id="encoder-rs2"><option value="6" selected>t1 (x6)</option><option value="13">a3 (x13)</option></select></label>
+        <div class="control"><span>SEW</span><div class="segmented" id="encoder-sew"><button data-value="0">e8</button><button data-value="1">e16</button><button data-value="2" class="on">e32</button><button data-value="3">e64</button></div></div>
+        <div class="control"><span>LMUL</span><div class="segmented" id="encoder-lmul"><button data-value="5">mf8</button><button data-value="6">mf4</button><button data-value="7">mf2</button><button data-value="0">m1</button><button data-value="1">m2</button><button data-value="2" class="on">m4</button><button data-value="3">m8</button></div></div>
+        <div class="control"><span>꼬리</span><div class="segmented" id="encoder-tail"><button data-value="1" class="on">ta</button><button data-value="0">tu</button></div></div>
+        <div class="control"><span>마스크</span><div class="segmented" id="encoder-mask"><button data-value="1" class="on">ma</button><button data-value="0">mu</button></div></div>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">기계어</span><span class="value" id="encoder-word">0x0d2572d7</span></div>
+        <div class="stat"><span class="key">vtype 값</span><span class="value" id="encoder-vtype">0xd2</span></div>
+        <div class="stat"><span class="key">AVL</span><span class="value" id="encoder-avl">x[a0]</span></div>
+        <div class="stat"><span class="key">VLMAX (VLEN=128)</span><span class="value" id="encoder-vlmax">16</span></div>
+      </div>
+      <div class="sim-note">기본값 <code>vsetvli t0, a0, e32, m1, ta, ma</code>(LMUL을 m1로)가 <code>0x0d0572d7</code>이 되는지 확인해 보자. rd와 rs1을 모두 zero로 두면 어떤 뜻이 되는지, vsetivli에서 uimm이 비트 19:15에 들어가는 모습도 살펴보자.</div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="strip-mining">
+    <h2>스트립 마이닝: 길이 무관 루프</h2>
+    <p>n개짜리 배열을 VLMAX개씩 잘라 처리하는 기법을 <span class="term">스트립 마이닝</span><span class="english">(strip mining)</span>이라 한다. RISC-V에서는 <code>vsetvli</code>가 자르는 일을 맡는다. 아래는 규격 부록의 32비트 정수 벡터 덧셈 예제다. 반복 횟수도, 마지막 꼬리 처리도 코드에 드러나지 않는다. <code>t0</code>에 돌아온 vl만큼 포인터를 옮기고 남은 수 <code>a0</code>를 줄일 뿐이다.</p>
+    <div class="codebox" data-title="vvaddint32 — z[i] = x[i] + y[i] (규격 부록 예제)" data-highlight="vector"># a0 = n, a1 = x, a2 = y, a3 = z
+vvaddint32:
+    vsetvli t0, a0, e32, m1, ta, ma  # 32비트 원소로 vl 정하기
+    vle32.v v0, (a1)                 # x 벡터 로드
+    sub a0, a0, t0                   # 남은 수 -= vl
+    slli t0, t0, 2                   # vl × 4바이트
+    add a1, a1, t0                   # x 포인터 이동
+    vle32.v v1, (a2)                 # y 벡터 로드
+    add a2, a2, t0
+    vadd.vv v2, v0, v1               # 원소별 덧셈
+    vse32.v v2, (a3)                 # z 저장
+    add a3, a3, t0
+    bnez a0, vvaddint32              # 남았으면 반복
+    ret</div>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 220" role="img" aria-label="AVL 37, VLMAX 16일 때 두 가지 구현의 vl 분배">
+        <text x="430" y="24" text-anchor="middle" class="t t-bold">AVL = 37, VLMAX = 16 (VLEN=128 · e32 · m4)</text>
+        <text x="20" y="84" class="t t-bold">구현 ①</text>
+        <rect x="110" y="56" width="288" height="44" rx="6" class="f-accent-soft"/><text x="254" y="83" text-anchor="middle" class="t">1회 vl=16</text>
+        <rect x="400" y="56" width="288" height="44" rx="6" class="f-teal-soft"/><text x="544" y="83" text-anchor="middle" class="t">2회 vl=16</text>
+        <rect x="690" y="56" width="90" height="44" rx="6" class="f-violet-soft"/><text x="735" y="83" text-anchor="middle" class="t">3회 vl=5</text>
+        <text x="110" y="122" class="t-faint">남은 AVL=21 은 2×16보다 작지만 VLMAX를 고른다 → 마지막 반복이 5개뿐</text>
+        <text x="20" y="168" class="t t-bold">구현 ②</text>
+        <rect x="110" y="140" width="288" height="44" rx="6" class="f-accent-soft"/><text x="254" y="167" text-anchor="middle" class="t">1회 vl=16</text>
+        <rect x="400" y="140" width="198" height="44" rx="6" class="f-teal-soft"/><text x="499" y="167" text-anchor="middle" class="t">2회 vl=11</text>
+        <rect x="600" y="140" width="180" height="44" rx="6" class="f-violet-soft"/><text x="690" y="167" text-anchor="middle" class="t">3회 vl=10</text>
+        <text x="110" y="206" class="t-faint">AVL=21 &lt; 2×16 이므로 ceil(21/2)=11 도 허용 → 마지막 두 반복이 고르게 나뉜다</text>
+      </svg></div>
+      <figcaption><b>그림 15-6.</b> 같은 바이너리, 같은 VLEN이라도 구현에 따라 vl 분배가 다를 수 있다. 두 구현 모두 규격을 지킨다. 코드는 <code>t0</code>에 돌아온 값만 쓰므로 어느 쪽이든 결과가 같다.</figcaption>
+    </figure>
+
+    <div class="sim" id="strip-mining-sim">
+      <div class="sim-head"><span class="sim-tag animation">ANIMATION</span><h3>스트립 마이닝 루프 돌려 보기</h3></div>
+      <div class="sim-view"><canvas id="strip-canvas" aria-label="배열 원소가 vl개씩 벡터 레지스터로 들어가 처리되는 애니메이션"></canvas></div>
+      <div class="step-description" id="strip-description"></div>
+      <div class="sim-controls">
+        <label class="control"><span>원소 수 n <output id="strip-count-output"></output></span><input type="range" id="strip-count" min="1" max="128" value="37"></label>
+        <div class="control"><span>VLEN (하드웨어)</span><div class="segmented" id="strip-vlen"><button data-value="128" class="on">128</button><button data-value="256">256</button><button data-value="512">512</button><button data-value="1024">1024</button></div></div>
+        <div class="control"><span>LMUL (e32)</span><div class="segmented" id="strip-lmul"><button data-value="1">m1</button><button data-value="2">m2</button><button data-value="4" class="on">m4</button></div></div>
+        <div class="control"><span>vl 정책 (VLMAX &lt; AVL &lt; 2·VLMAX)</span><div class="segmented" id="strip-policy"><button data-value="maximum" class="on">VLMAX</button><button data-value="even">ceil(AVL/2)</button></div></div>
+        <div class="control"><span>실행</span><div class="button-row"><button class="button primary" id="strip-step">한 반복</button><button class="button" id="strip-play">자동 재생</button><button class="button" id="strip-reset">처음으로</button></div></div>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">VLMAX</span><span class="value" id="strip-vlmax">16</span></div>
+        <div class="stat"><span class="key">이번 vl (t0)</span><span class="value" id="strip-vl">—</span></div>
+        <div class="stat"><span class="key">남은 원소 (a0)</span><span class="value" id="strip-remaining">37</span></div>
+        <div class="stat"><span class="key">반복 / 전체</span><span class="value" id="strip-iterations">0 / 3</span></div>
+      </div>
+      <div class="sim-note">n을 그대로 두고 VLEN만 128 → 1024로 바꿔 보자. 코드는 한 글자도 바뀌지 않았는데 반복 횟수가 줄어든다. vl 정책을 ceil(AVL/2)로 바꾸면 n=37, VLMAX=16에서 마지막 두 반복이 11개와 10개로 나뉜다.</div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="masking">
+    <h2>마스크와 꼬리 정책</h2>
+    <p><code>if</code>가 들어 있는 루프를 벡터로 바꾸려면 원소마다 연산을 할지 말지 고를 수 있어야 한다. V 확장은 이를 <span class="term">마스크</span><span class="english">(mask)</span>로 한다. 마스크는 항상 <b>v0</b>에서 오고, 원소 i의 마스크 비트는 SEW·LMUL과 상관없이 v0의 비트 i다. 명령의 비트 25인 <b>vm</b>이 0이면 마스크를 쓰고(어셈블리에서 <code>v0.t</code>), 1이면 쓰지 않는다.</p>
+    <div class="codebox" data-highlight="vector">vmslt.vi v0, v8, 5             # v0[i] = (v8[i] &lt; 5)
+vadd.vv  v4, v8, v12, v0.t     # vm=0: v0[i]=1 인 원소만 더한다
+vadd.vv  v4, v8, v12           # vm=1: 모든 원소</div>
+    <p>한 명령이 다루는 원소 번호는 네 부류로 나뉜다. vstart보다 앞은 <b>prestart</b>, vstart부터 vl 앞까지는 <b>body</b>, vl부터 끝까지는 <b>tail</b>이다. body는 다시 마스크가 켜진 <b>active</b>와 꺼진 <b>inactive</b>로 나뉜다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 260" role="img" aria-label="prestart, body, tail 원소의 구분">
+        <g>
+          <text x="242" y="28" text-anchor="middle" class="t-accent">vstart=3</text>
+          <text x="594" y="28" text-anchor="middle" class="t-accent">vl=11</text>
+          <text x="814" y="28" text-anchor="end" class="t-dim">VLMAX=16</text>
+          <path d="M242 34 V150 M594 34 V150" class="s-accent s-dashed"/>
+        </g>
+        <text x="100" y="60" text-anchor="end" class="t-dim">원소</text>
+        <text x="100" y="92" text-anchor="end" class="t-dim">v0.mask</text>
+        <text x="100" y="136" text-anchor="end" class="t-dim">분류</text>
+        <g class="t-mono">
+          <text x="132" y="60" text-anchor="middle" class="t-mono">0</text><text x="176" y="60" text-anchor="middle" class="t-mono">1</text><text x="220" y="60" text-anchor="middle" class="t-mono">2</text><text x="264" y="60" text-anchor="middle" class="t-mono">3</text><text x="308" y="60" text-anchor="middle" class="t-mono">4</text><text x="352" y="60" text-anchor="middle" class="t-mono">5</text><text x="396" y="60" text-anchor="middle" class="t-mono">6</text><text x="440" y="60" text-anchor="middle" class="t-mono">7</text><text x="484" y="60" text-anchor="middle" class="t-mono">8</text><text x="528" y="60" text-anchor="middle" class="t-mono">9</text><text x="572" y="60" text-anchor="middle" class="t-mono">10</text><text x="616" y="60" text-anchor="middle" class="t-mono">11</text><text x="660" y="60" text-anchor="middle" class="t-mono">12</text><text x="704" y="60" text-anchor="middle" class="t-mono">13</text><text x="748" y="60" text-anchor="middle" class="t-mono">14</text><text x="792" y="60" text-anchor="middle" class="t-mono">15</text>
+        </g>
+        <g>
+          <rect x="112" y="72" width="40" height="30" rx="4" class="f-surface"/><text x="132" y="92" text-anchor="middle" class="t-mono">1</text>
+          <rect x="156" y="72" width="40" height="30" rx="4" class="f-surface"/><text x="176" y="92" text-anchor="middle" class="t-mono">0</text>
+          <rect x="200" y="72" width="40" height="30" rx="4" class="f-surface"/><text x="220" y="92" text-anchor="middle" class="t-mono">1</text>
+          <rect x="244" y="72" width="40" height="30" rx="4" class="f-surface"/><text x="264" y="92" text-anchor="middle" class="t-mono">1</text>
+          <rect x="288" y="72" width="40" height="30" rx="4" class="f-surface"/><text x="308" y="92" text-anchor="middle" class="t-mono">0</text>
+          <rect x="332" y="72" width="40" height="30" rx="4" class="f-surface"/><text x="352" y="92" text-anchor="middle" class="t-mono">1</text>
+          <rect x="376" y="72" width="40" height="30" rx="4" class="f-surface"/><text x="396" y="92" text-anchor="middle" class="t-mono">1</text>
+          <rect x="420" y="72" width="40" height="30" rx="4" class="f-surface"/><text x="440" y="92" text-anchor="middle" class="t-mono">0</text>
+          <rect x="464" y="72" width="40" height="30" rx="4" class="f-surface"/><text x="484" y="92" text-anchor="middle" class="t-mono">1</text>
+          <rect x="508" y="72" width="40" height="30" rx="4" class="f-surface"/><text x="528" y="92" text-anchor="middle" class="t-mono">0</text>
+          <rect x="552" y="72" width="40" height="30" rx="4" class="f-surface"/><text x="572" y="92" text-anchor="middle" class="t-mono">1</text>
+          <rect x="596" y="72" width="40" height="30" rx="4" class="f-surface"/><text x="616" y="92" text-anchor="middle" class="t-mono">1</text>
+          <rect x="640" y="72" width="40" height="30" rx="4" class="f-surface"/><text x="660" y="92" text-anchor="middle" class="t-mono">0</text>
+          <rect x="684" y="72" width="40" height="30" rx="4" class="f-surface"/><text x="704" y="92" text-anchor="middle" class="t-mono">1</text>
+          <rect x="728" y="72" width="40" height="30" rx="4" class="f-surface"/><text x="748" y="92" text-anchor="middle" class="t-mono">0</text>
+          <rect x="772" y="72" width="40" height="30" rx="4" class="f-surface"/><text x="792" y="92" text-anchor="middle" class="t-mono">1</text>
+        </g>
+        <g>
+          <rect x="112" y="116" width="40" height="30" rx="4" class="f-surface-2"/><text x="132" y="136" text-anchor="middle" class="t-faint">유지</text>
+          <rect x="156" y="116" width="40" height="30" rx="4" class="f-surface-2"/><text x="176" y="136" text-anchor="middle" class="t-faint">유지</text>
+          <rect x="200" y="116" width="40" height="30" rx="4" class="f-surface-2"/><text x="220" y="136" text-anchor="middle" class="t-faint">유지</text>
+          <rect x="244" y="116" width="40" height="30" rx="4" class="f-accent-soft"/><text x="264" y="136" text-anchor="middle" class="t-faint">새값</text>
+          <rect x="288" y="116" width="40" height="30" rx="4" class="f-violet-soft"/><text x="308" y="136" text-anchor="middle" class="t-faint">비활성</text>
+          <rect x="332" y="116" width="40" height="30" rx="4" class="f-accent-soft"/><text x="352" y="136" text-anchor="middle" class="t-faint">새값</text>
+          <rect x="376" y="116" width="40" height="30" rx="4" class="f-accent-soft"/><text x="396" y="136" text-anchor="middle" class="t-faint">새값</text>
+          <rect x="420" y="116" width="40" height="30" rx="4" class="f-violet-soft"/><text x="440" y="136" text-anchor="middle" class="t-faint">비활성</text>
+          <rect x="464" y="116" width="40" height="30" rx="4" class="f-accent-soft"/><text x="484" y="136" text-anchor="middle" class="t-faint">새값</text>
+          <rect x="508" y="116" width="40" height="30" rx="4" class="f-violet-soft"/><text x="528" y="136" text-anchor="middle" class="t-faint">비활성</text>
+          <rect x="552" y="116" width="40" height="30" rx="4" class="f-accent-soft"/><text x="572" y="136" text-anchor="middle" class="t-faint">새값</text>
+          <rect x="596" y="116" width="40" height="30" rx="4" class="f-gold-soft"/><text x="616" y="136" text-anchor="middle" class="t-faint">꼬리</text>
+          <rect x="640" y="116" width="40" height="30" rx="4" class="f-gold-soft"/><text x="660" y="136" text-anchor="middle" class="t-faint">꼬리</text>
+          <rect x="684" y="116" width="40" height="30" rx="4" class="f-gold-soft"/><text x="704" y="136" text-anchor="middle" class="t-faint">꼬리</text>
+          <rect x="728" y="116" width="40" height="30" rx="4" class="f-gold-soft"/><text x="748" y="136" text-anchor="middle" class="t-faint">꼬리</text>
+          <rect x="772" y="116" width="40" height="30" rx="4" class="f-gold-soft"/><text x="792" y="136" text-anchor="middle" class="t-faint">꼬리</text>
+        </g>
+        <path d="M112 160 V168 H240 V160" class="s-line"/>
+        <path d="M244 160 V168 H592 V160" class="s-accent"/>
+        <path d="M596 160 V168 H812 V160" class="s-gold"/>
+        <text x="176" y="188" text-anchor="middle" class="t t-bold">prestart</text>
+        <text x="176" y="206" text-anchor="middle" class="t-faint">갱신하지 않음</text>
+        <text x="418" y="188" text-anchor="middle" class="t t-bold">body = active + inactive</text>
+        <text x="418" y="206" text-anchor="middle" class="t-faint">inactive 는 vma 정책을 따른다</text>
+        <text x="704" y="188" text-anchor="middle" class="t t-bold">tail</text>
+        <text x="704" y="206" text-anchor="middle" class="t-faint">vta 정책을 따른다</text>
+        <text x="430" y="244" text-anchor="middle" class="t-dim">active 원소만 예외를 일으킬 수 있고, 새 결과를 쓴다</text>
+      </svg></div>
+      <figcaption><b>그림 15-7.</b> 원소 번호의 네 부류. vstart=3, vl=11, VLMAX=16인 마스크 명령의 예다. vstart는 보통 0이고, 트랩 뒤 재개할 때만 0이 아니다.</figcaption>
+    </figure>
+    <p>그렇다면 inactive와 tail 자리의 목적지 레지스터에는 무엇이 남을까? vtype의 두 비트가 정한다.</p>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>vta</th><th>vma</th><th>어셈블러</th><th>tail 원소</th><th>inactive 원소</th></tr></thead>
+      <tbody>
+        <tr><td><code>0</code></td><td><code>0</code></td><td><code>tu, mu</code></td><td>undisturbed (이전 값 유지)</td><td>undisturbed</td></tr>
+        <tr><td><code>0</code></td><td><code>1</code></td><td><code>tu, ma</code></td><td>undisturbed</td><td>agnostic</td></tr>
+        <tr><td><code>1</code></td><td><code>0</code></td><td><code>ta, mu</code></td><td>agnostic</td><td>undisturbed</td></tr>
+        <tr><td><code>1</code></td><td><code>1</code></td><td><code>ta, ma</code></td><td>agnostic</td><td>agnostic</td></tr>
+      </tbody>
+    </table></div>
+    <div class="callout spec"><strong>규격 원문에서</strong>
+      <blockquote>"When a set is marked agnostic, the corresponding set of destination elements in any vector destination operand can either retain the value they previously held, or are overwritten with 1s."</blockquote>
+      <p><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/v-st-ext.html" target="_blank" rel="noopener">Volume I, "V" Extension — vta and vma</a> — agnostic은 "아무 값"이 아니라 "이전 값 또는 모두 1"이다. 원소마다 둘 중 어느 쪽이 될지는 정해지지 않으며, 같은 입력으로 다시 실행해도 달라질 수 있다.</p></div>
+    <div class="callout deep"><strong>왜 agnostic이 필요한가</strong><p>레지스터 이름 바꾸기(renaming)를 하는 비순차 코어에서 결과는 새 물리 레지스터에 쓰인다. undisturbed라면 쓰지 않는 원소까지 옛 물리 레지스터에서 읽어 복사해야 한다. agnostic이면 그 복사를 생략할 수 있다. 0이 아니라 "모두 1"로 정한 것은 소프트웨어가 그 값에 기대지 않게 하려는 의도다. 단순한 순차 코어는 설정을 무시하고 늘 undisturbed로 동작해도 된다. 마스크를 만드는 명령의 tail은 vta와 상관없이 항상 agnostic이다.</p></div>
+
+    <div class="sim" id="mask-policy-sim">
+      <div class="sim-head"><span class="sim-tag">SIMULATOR</span><h3>마스크와 꼬리 정책 시각화</h3></div>
+      <div class="sim-pad">
+        <p class="assembly-line" id="mask-assembly"></p>
+        <div class="lane-block"><div class="lane-title">원소 번호 (VLEN=128, e16, m1 → VLMAX=8)</div><div class="lane-grid" id="mask-index-row"></div></div>
+        <div class="lane-block"><div class="lane-title">v0.mask — 눌러서 바꾸기</div><div class="lane-grid mask-grid" id="mask-bit-row"></div></div>
+        <div class="lane-block"><div class="lane-title">새 결과 v8[i] + v12[i]</div><div class="lane-grid" id="mask-new-row"></div></div>
+        <div class="lane-block"><div class="lane-title">실행 전 v4[i]</div><div class="lane-grid" id="mask-old-row"></div></div>
+        <div class="lane-block"><div class="lane-title">실행 후 v4[i]</div><div class="lane-grid" id="mask-result-row"></div></div>
+        <div class="legend"><span><i class="active"></i>active: 새 값</span><span><i class="inactive"></i>inactive</span><span><i class="tail"></i>tail</span><span><i class="prestart"></i>prestart</span><span><i class="agnostic"></i>agnostic: 이전 값 또는 FFFF</span></div>
+      </div>
+      <div class="step-description" id="mask-description"></div>
+      <div class="sim-controls">
+        <div class="control"><span>마스크 사용</span><div class="segmented" id="mask-vm"><button data-value="0" class="on">v0.t (vm=0)</button><button data-value="1">없음 (vm=1)</button></div></div>
+        <label class="control"><span>vl <output id="mask-vl-output"></output></span><input type="range" id="mask-vl" min="0" max="8" value="6"></label>
+        <label class="control"><span>vstart <output id="mask-vstart-output"></output></span><input type="range" id="mask-vstart" min="0" max="7" value="0"></label>
+        <div class="control"><span>꼬리</span><div class="segmented" id="mask-tail"><button data-value="undisturbed" class="on">tu</button><button data-value="agnostic">ta</button></div></div>
+        <div class="control"><span>비활성</span><div class="segmented" id="mask-inactive"><button data-value="undisturbed" class="on">mu</button><button data-value="agnostic">ma</button></div></div>
+        <div class="control"><span>agnostic</span><div class="button-row"><button class="button" id="mask-reroll">다시 실행</button></div></div>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">active</span><span class="value" id="mask-active-count">0</span></div>
+        <div class="stat"><span class="key">inactive</span><span class="value" id="mask-inactive-count">0</span></div>
+        <div class="stat"><span class="key">tail</span><span class="value" id="mask-tail-count">0</span></div>
+      </div>
+      <div class="sim-note">ta·ma로 바꾸고 "다시 실행"을 여러 번 눌러 보자. 점선 칸은 실행할 때마다 이전 값이 남기도 하고 FFFF(SEW=16의 모두 1)가 되기도 한다. vstart를 vl 이상으로 올리면 아무 원소도 바뀌지 않는다는 규칙도 확인하자.</div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="memory">
+    <h2>벡터 메모리 접근</h2>
+    <p>벡터 로드·저장은 새 opcode를 만들지 않고 스칼라 부동소수점 로드·저장 opcode(LOAD-FP, STORE-FP) 안의 남는 width 값을 썼다. 메모리 원소 폭 EEW는 명령에 직접 적혀 있어서(<code>vle8</code>, <code>vle16</code>, <code>vle32</code>, <code>vle64</code>) 폭이 섞인 루프에서도 vtype을 덜 바꿔도 된다. 주소 지정 방식은 <code>mop[1:0]</code> 필드가 정한다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 380" role="img" aria-label="단위 보폭, 상수 보폭, 인덱스 주소 지정">
+        <defs><marker id="memory-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker></defs>
+        <g transform="translate(0,10)">
+          <text x="20" y="28" class="t-mono t-bold">vle32.v v8, (a0)</text>
+          <text x="20" y="50" class="t-dim">단위 보폭 (unit-stride)</text>
+          <text x="20" y="68" class="t-faint">연속된 원소</text>
+          <g>
+            <rect x="230" y="8" width="38" height="30" class="f-accent-soft"/><rect x="268" y="8" width="38" height="30" class="f-accent-soft"/><rect x="306" y="8" width="38" height="30" class="f-accent-soft"/><rect x="344" y="8" width="38" height="30" class="f-accent-soft"/>
+            <rect x="382" y="8" width="456" height="30" class="f-surface"/>
+            <text x="249" y="28" text-anchor="middle" class="t-faint">+0</text><text x="287" y="28" text-anchor="middle" class="t-faint">+4</text><text x="325" y="28" text-anchor="middle" class="t-faint">+8</text><text x="363" y="28" text-anchor="middle" class="t-faint">+12</text>
+            <text x="610" y="28" text-anchor="middle" class="t-faint">메모리 (4바이트 칸)</text>
+          </g>
+          <path d="M249 40 L370 78 M287 40 L470 78 M325 40 L570 78 M363 40 L670 78" class="s-accent" stroke-width="1.6" marker-end="url(#memory-arrow)"/>
+          <rect x="320" y="80" width="100" height="28" rx="4" class="f-elev"/><rect x="420" y="80" width="100" height="28" rx="4" class="f-elev"/><rect x="520" y="80" width="100" height="28" rx="4" class="f-elev"/><rect x="620" y="80" width="100" height="28" rx="4" class="f-elev"/>
+          <text x="370" y="99" text-anchor="middle" class="t">v8[0]</text><text x="470" y="99" text-anchor="middle" class="t">v8[1]</text><text x="570" y="99" text-anchor="middle" class="t">v8[2]</text><text x="670" y="99" text-anchor="middle" class="t">v8[3]</text>
+        </g>
+        <g transform="translate(0,135)">
+          <text x="20" y="28" class="t-mono t-bold">vlse32.v v8, (a0), t1</text>
+          <text x="20" y="50" class="t-dim">상수 보폭 (strided)</text>
+          <text x="20" y="68" class="t-faint">t1 = 12바이트 간격</text>
+          <g>
+            <rect x="230" y="8" width="608" height="30" class="f-surface"/>
+            <rect x="230" y="8" width="38" height="30" class="f-teal-soft"/><rect x="344" y="8" width="38" height="30" class="f-teal-soft"/><rect x="458" y="8" width="38" height="30" class="f-teal-soft"/><rect x="572" y="8" width="38" height="30" class="f-teal-soft"/>
+            <text x="249" y="28" text-anchor="middle" class="t-faint">+0</text><text x="363" y="28" text-anchor="middle" class="t-faint">+12</text><text x="477" y="28" text-anchor="middle" class="t-faint">+24</text><text x="591" y="28" text-anchor="middle" class="t-faint">+36</text>
+          </g>
+          <path d="M249 40 L370 78 M363 40 L470 78 M477 40 L570 78 M591 40 L670 78" class="s-accent" stroke-width="1.6" marker-end="url(#memory-arrow)"/>
+          <rect x="320" y="80" width="100" height="28" rx="4" class="f-elev"/><rect x="420" y="80" width="100" height="28" rx="4" class="f-elev"/><rect x="520" y="80" width="100" height="28" rx="4" class="f-elev"/><rect x="620" y="80" width="100" height="28" rx="4" class="f-elev"/>
+          <text x="370" y="99" text-anchor="middle" class="t">v8[0]</text><text x="470" y="99" text-anchor="middle" class="t">v8[1]</text><text x="570" y="99" text-anchor="middle" class="t">v8[2]</text><text x="670" y="99" text-anchor="middle" class="t">v8[3]</text>
+        </g>
+        <g transform="translate(0,260)">
+          <text x="20" y="28" class="t-mono t-bold">vluxei32.v v8, (a0), v4</text>
+          <text x="20" y="50" class="t-dim">인덱스 (indexed)</text>
+          <text x="20" y="68" class="t-faint">v4 = {20, 4, 44, 32}</text>
+          <g>
+            <rect x="230" y="8" width="608" height="30" class="f-surface"/>
+            <rect x="268" y="8" width="38" height="30" class="f-violet-soft"/><rect x="420" y="8" width="38" height="30" class="f-violet-soft"/><rect x="534" y="8" width="38" height="30" class="f-violet-soft"/><rect x="648" y="8" width="38" height="30" class="f-violet-soft"/>
+            <text x="287" y="28" text-anchor="middle" class="t-faint">+4</text><text x="439" y="28" text-anchor="middle" class="t-faint">+20</text><text x="553" y="28" text-anchor="middle" class="t-faint">+32</text><text x="667" y="28" text-anchor="middle" class="t-faint">+44</text>
+          </g>
+          <path d="M439 40 L370 78 M287 40 L470 78 M667 40 L570 78 M553 40 L670 78" class="s-accent" stroke-width="1.6" marker-end="url(#memory-arrow)"/>
+          <rect x="320" y="80" width="100" height="28" rx="4" class="f-elev"/><rect x="420" y="80" width="100" height="28" rx="4" class="f-elev"/><rect x="520" y="80" width="100" height="28" rx="4" class="f-elev"/><rect x="620" y="80" width="100" height="28" rx="4" class="f-elev"/>
+          <text x="370" y="99" text-anchor="middle" class="t">v8[0]</text><text x="470" y="99" text-anchor="middle" class="t">v8[1]</text><text x="570" y="99" text-anchor="middle" class="t">v8[2]</text><text x="670" y="99" text-anchor="middle" class="t">v8[3]</text>
+        </g>
+      </svg></div>
+      <figcaption><b>그림 15-8.</b> 세 가지 주소 지정 방식. 상수 보폭은 x 레지스터의 바이트 간격(음수·0도 가능)을, 인덱스 방식은 벡터 레지스터에 담긴 바이트 오프셋을 기준 주소에 더한다. 인덱스 방식은 흩어 모으기(gather/scatter)라고도 부른다.</figcaption>
+    </figure>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>mop[1:0]</th><th>로드</th><th>저장</th><th>설명</th></tr></thead>
+      <tbody>
+        <tr><td><code>00</code></td><td><code>vle&lt;EEW&gt;.v</code></td><td><code>vse&lt;EEW&gt;.v</code></td><td>단위 보폭. lumop로 마스크 로드(<code>vlm.v</code>), 통째 레지스터 로드, fault-only-first를 구별</td></tr>
+        <tr><td><code>01</code></td><td><code>vluxei&lt;EEW&gt;.v</code></td><td><code>vsuxei&lt;EEW&gt;.v</code></td><td>인덱스, 순서 보장 없음 (EEW는 <b>인덱스</b> 폭, 데이터는 SEW)</td></tr>
+        <tr><td><code>10</code></td><td><code>vlse&lt;EEW&gt;.v</code></td><td><code>vsse&lt;EEW&gt;.v</code></td><td>상수 보폭</td></tr>
+        <tr><td><code>11</code></td><td><code>vloxei&lt;EEW&gt;.v</code></td><td><code>vsoxei&lt;EEW&gt;.v</code></td><td>인덱스, 원소 순서대로 접근 (입출력 장치 영역용)</td></tr>
+      </tbody>
+    </table></div>
+    <h3>세그먼트 로드: 구조체 배열을 필드별로</h3>
+    <p>RGB 픽셀처럼 필드 여러 개가 반복되는 "구조체의 배열"은 <span class="term">세그먼트</span><span class="english">(segment)</span> 로드로 한 번에 풀 수 있다. <code>nf</code> 필드가 세그먼트당 필드 수(2–8)를 정하고, 각 필드가 연속된 번호의 레지스터(그룹)로 들어간다. EMUL × 필드 수는 8을 넘을 수 없다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 250" role="img" aria-label="vlseg3e8로 RGB 바이트를 세 레지스터로 나누는 모습">
+        <text x="20" y="22" class="t t-bold">vlseg3e8.v v8, (a0) — 3바이트 세그먼트(R, G, B)를 레지스터 세 개로</text>
+        <text x="100" y="60" text-anchor="end" class="t-dim">메모리</text>
+        <g>
+          <rect x="110" y="40" width="52" height="30" class="f-bad-soft"/><text x="136" y="60" text-anchor="middle" class="t-mono">R0</text>
+          <rect x="162" y="40" width="52" height="30" class="f-ok-soft"/><text x="188" y="60" text-anchor="middle" class="t-mono">G0</text>
+          <rect x="214" y="40" width="52" height="30" class="f-accent-soft"/><text x="240" y="60" text-anchor="middle" class="t-mono">B0</text>
+          <rect x="266" y="40" width="52" height="30" class="f-bad-soft"/><text x="292" y="60" text-anchor="middle" class="t-mono">R1</text>
+          <rect x="318" y="40" width="52" height="30" class="f-ok-soft"/><text x="344" y="60" text-anchor="middle" class="t-mono">G1</text>
+          <rect x="370" y="40" width="52" height="30" class="f-accent-soft"/><text x="396" y="60" text-anchor="middle" class="t-mono">B1</text>
+          <rect x="422" y="40" width="52" height="30" class="f-bad-soft"/><text x="448" y="60" text-anchor="middle" class="t-mono">R2</text>
+          <rect x="474" y="40" width="52" height="30" class="f-ok-soft"/><text x="500" y="60" text-anchor="middle" class="t-mono">G2</text>
+          <rect x="526" y="40" width="52" height="30" class="f-accent-soft"/><text x="552" y="60" text-anchor="middle" class="t-mono">B2</text>
+          <rect x="578" y="40" width="52" height="30" class="f-bad-soft"/><text x="604" y="60" text-anchor="middle" class="t-mono">R3</text>
+          <rect x="630" y="40" width="52" height="30" class="f-ok-soft"/><text x="656" y="60" text-anchor="middle" class="t-mono">G3</text>
+          <rect x="682" y="40" width="52" height="30" class="f-accent-soft"/><text x="708" y="60" text-anchor="middle" class="t-mono">B3</text>
+        </g>
+        <g stroke-width="1.6">
+          <path d="M136 72 L86 166 M292 72 L138 166 M448 72 L190 166 M604 72 L242 166" stroke="var(--bad)" fill="none" class="flow-dash"/>
+          <path d="M188 72 L356 166 M344 72 L408 166 M500 72 L460 166 M656 72 L512 166" stroke="var(--ok)" fill="none" class="flow-dash"/>
+          <path d="M240 72 L626 166 M396 72 L678 166 M552 72 L730 166 M708 72 L782 166" stroke="var(--accent)" fill="none" class="flow-dash"/>
+        </g>
+        <g>
+          <rect x="60" y="168" width="208" height="32" rx="4" class="f-bad-soft"/><text x="86" y="189" text-anchor="middle" class="t-mono">R0</text><text x="138" y="189" text-anchor="middle" class="t-mono">R1</text><text x="190" y="189" text-anchor="middle" class="t-mono">R2</text><text x="242" y="189" text-anchor="middle" class="t-mono">R3</text>
+          <rect x="330" y="168" width="208" height="32" rx="4" class="f-ok-soft"/><text x="356" y="189" text-anchor="middle" class="t-mono">G0</text><text x="408" y="189" text-anchor="middle" class="t-mono">G1</text><text x="460" y="189" text-anchor="middle" class="t-mono">G2</text><text x="512" y="189" text-anchor="middle" class="t-mono">G3</text>
+          <rect x="600" y="168" width="208" height="32" rx="4" class="f-accent-soft"/><text x="626" y="189" text-anchor="middle" class="t-mono">B0</text><text x="678" y="189" text-anchor="middle" class="t-mono">B1</text><text x="730" y="189" text-anchor="middle" class="t-mono">B2</text><text x="782" y="189" text-anchor="middle" class="t-mono">B3</text>
+          <text x="164" y="224" text-anchor="middle" class="t-dim">v8 ← 빨강</text>
+          <text x="434" y="224" text-anchor="middle" class="t-dim">v9 ← 초록</text>
+          <text x="704" y="224" text-anchor="middle" class="t-dim">v10 ← 파랑</text>
+        </g>
+      </svg></div>
+      <figcaption><b>그림 15-9.</b> 세그먼트 로드는 메모리의 R·G·B 바이트를 필드별 레지스터로 갈라 넣는다(규격 예제 1). vl은 세그먼트 수이고, 마스크도 세그먼트 단위로 적용된다. 저장 <code>vsseg3e8.v</code>는 반대 방향이다.</figcaption>
+    </figure>
+    <h3>fault-only-first: 끝을 모르는 루프</h3>
+    <p><code>strlen</code>처럼 어디서 끝날지 모르는 루프를 벡터로 돌리면, 문자열 끝 뒤의 바이트를 미리 읽다가 매핑되지 않은 페이지를 건드릴 수 있다. <code>vle8ff.v</code> 같은 <span class="term">fault-only-first</span> 로드는 <b>0번 원소의 예외만 트랩으로</b> 처리한다. 1번 이후 원소에서 예외가 날 자리라면 트랩 없이 vl을 그 원소 번호로 줄이고 끝낸다. 아래는 규격의 예제다.</p>
+    <div class="codebox" data-title="strlen — vle8ff.v 와 vfirst.m (규격 예제)" data-highlight="vector">strlen:
+    mv a3, a0                      # 시작 주소 저장
+loop:
+    vsetvli a1, x0, e8, m8, ta, ma # 바이트 벡터, 최대 길이(AVL=~0)
+    vle8ff.v v8, (a3)              # 바이트 로드 (뒤쪽 폴트는 vl만 줄인다)
+    csrr a1, vl                    # 실제로 읽은 바이트 수
+    vmseq.vi v0, v8, 0             # v8[i] == 0 이면 v0[i] = 1
+    vfirst.m a2, v0                # 첫 번째 1의 위치, 없으면 -1
+    add a3, a3, a1                 # 포인터 이동
+    bltz a2, loop                  # 0바이트를 못 찾았으면 반복
+    add a0, a0, a1
+    add a3, a3, a2
+    sub a0, a3, a0                 # 길이 = 끝 - 시작
+    ret</div>
+    <div class="callout warn"><strong>fault-only-first의 보안 고민</strong><p>트랩 없이 "어디까지 읽을 수 있는지"를 알려 주므로, 주소 공간을 몰래 탐색하는 데 쓰일 수 있다. 그래서 규격은 이 형태를 단위 보폭 로드에만 두었다. 이미 아는 영역 바로 뒤만 탐색할 수 있게 해 위험을 줄인 것이다. 14장의 <code>orc.b</code>를 쓴 스칼라 strlen(<a href="bit-manipulation.html">14장</a>)과 비교해 보면 같은 문제를 푸는 두 가지 방법이 보인다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="arithmetic">
+    <h2>넓히기·리덕션·순열</h2>
+    <p>산술 명령은 OP-V opcode에 있고, funct3가 피연산자 종류를 정한다. <code>.vv</code>(벡터-벡터), <code>.vx</code>(벡터-정수 레지스터), <code>.vi</code>(벡터-5비트 즉시값), 부동소수점의 <code>.vf</code>다. 대부분은 이름만 보면 뜻을 알 수 있으니, 여기서는 벡터만의 독특한 무리 셋을 본다.</p>
+    <h3>넓히기와 좁히기</h3>
+    <p><code>vw</code>로 시작하는 넓히기(widening) 명령은 SEW 원소 둘로 <b>2·SEW</b> 결과를 만든다. 원소 수는 그대로이므로 결과는 레지스터 그룹이 두 배로 커진다. 규격의 표현으로 목적지의 EEW = 2·SEW, EMUL = 2·LMUL이다. 그래서 LMUL=8에서의 넓히기는 EMUL=16이 되어 예약이다. 반대로 <code>vn</code>으로 시작하는 좁히기(narrowing)는 2·SEW 원본을 SEW로 줄인다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 300" role="img" aria-label="vwadd.vv 넓히기 연산의 원소 배치">
+        <defs>
+          <path id="widen-path-two" d="M300 134 C300 160 500 152 500 178"/>
+          <path id="widen-path-five" d="M540 134 C540 160 420 160 420 186 L410 223"/>
+          <path id="widen-path-seven" d="M700 134 L700 223"/>
+        </defs>
+        <text x="20" y="22" class="t t-bold">vwadd.vv v8, v4, v6 (SEW=16, LMUL=1, VLEN=128) — 결과는 두 배 폭, 두 배 레지스터</text>
+        <text x="90" y="69" text-anchor="end" class="t-mono">v4</text>
+        <text x="90" y="119" text-anchor="end" class="t-mono">v6</text>
+        <text x="90" y="203" text-anchor="end" class="t-mono">v8</text>
+        <text x="90" y="248" text-anchor="end" class="t-mono">v9</text>
+        <g>
+          <rect x="100" y="44" width="640" height="40" rx="5" class="f-teal-soft"/>
+          <path d="M180 44 V84 M260 44 V84 M340 44 V84 M420 44 V84 M500 44 V84 M580 44 V84 M660 44 V84" class="s-line"/>
+          <text x="140" y="69" text-anchor="middle" class="t-mono">a0</text><text x="220" y="69" text-anchor="middle" class="t-mono">a1</text><text x="300" y="69" text-anchor="middle" class="t-mono">a2</text><text x="380" y="69" text-anchor="middle" class="t-mono">a3</text><text x="460" y="69" text-anchor="middle" class="t-mono">a4</text><text x="540" y="69" text-anchor="middle" class="t-mono">a5</text><text x="620" y="69" text-anchor="middle" class="t-mono">a6</text><text x="700" y="69" text-anchor="middle" class="t-mono">a7</text>
+          <rect x="100" y="94" width="640" height="40" rx="5" class="f-teal-soft"/>
+          <path d="M180 94 V134 M260 94 V134 M340 94 V134 M420 94 V134 M500 94 V134 M580 94 V134 M660 94 V134" class="s-line"/>
+          <text x="140" y="119" text-anchor="middle" class="t-mono">b0</text><text x="220" y="119" text-anchor="middle" class="t-mono">b1</text><text x="300" y="119" text-anchor="middle" class="t-mono">b2</text><text x="380" y="119" text-anchor="middle" class="t-mono">b3</text><text x="460" y="119" text-anchor="middle" class="t-mono">b4</text><text x="540" y="119" text-anchor="middle" class="t-mono">b5</text><text x="620" y="119" text-anchor="middle" class="t-mono">b6</text><text x="700" y="119" text-anchor="middle" class="t-mono">b7</text>
+          <rect x="100" y="178" width="640" height="40" rx="5" class="f-gold-soft"/>
+          <path d="M260 178 V218 M420 178 V218 M580 178 V218" class="s-line"/>
+          <text x="180" y="203" text-anchor="middle" class="t-mono">a0+b0</text><text x="340" y="203" text-anchor="middle" class="t-mono">a1+b1</text><text x="500" y="203" text-anchor="middle" class="t-mono">a2+b2</text><text x="660" y="203" text-anchor="middle" class="t-mono">a3+b3</text>
+          <rect x="100" y="223" width="640" height="40" rx="5" class="f-gold-soft"/>
+          <path d="M260 223 V263 M420 223 V263 M580 223 V263" class="s-line"/>
+          <text x="180" y="248" text-anchor="middle" class="t-mono">a4+b4</text><text x="340" y="248" text-anchor="middle" class="t-mono">a5+b5</text><text x="500" y="248" text-anchor="middle" class="t-mono">a6+b6</text><text x="660" y="248" text-anchor="middle" class="t-mono">a7+b7</text>
+        </g>
+        <use href="#widen-path-two" class="s-gold flow-dash"/>
+        <use href="#widen-path-five" class="s-gold flow-dash"/>
+        <use href="#widen-path-seven" class="s-gold flow-dash"/>
+        <circle r="5" fill="var(--accent-2)"><animateMotion dur="2.2s" begin="-0.4s" repeatCount="indefinite"><mpath href="#widen-path-two"/></animateMotion></circle>
+        <circle r="5" fill="var(--accent-2)"><animateMotion dur="2.2s" begin="-1.2s" repeatCount="indefinite"><mpath href="#widen-path-five"/></animateMotion></circle>
+        <circle r="5" fill="var(--accent-2)"><animateMotion dur="2.2s" begin="-1.8s" repeatCount="indefinite"><mpath href="#widen-path-seven"/></animateMotion></circle>
+        <text x="750" y="84" class="t-faint">EEW=16</text><text x="750" y="102" class="t-faint">EMUL=1</text>
+        <text x="750" y="214" class="t-faint">EEW=32</text><text x="750" y="232" class="t-faint">EMUL=2</text>
+        <text x="20" y="290" class="t-dim">원소 8개는 그대로인데 폭이 두 배라서 v8·v9 두 레지스터를 차지한다. 그래서 목적지는 짝수 번호여야 한다.</text>
+      </svg></div>
+      <figcaption><b>그림 15-10.</b> 넓히기 덧셈 <code>vwadd.vv</code>. 원소 i의 결과는 원소 i 자리에 그대로 놓이지만, 폭이 두 배여서 앞의 넷은 v8, 뒤의 넷은 v9에 들어간다. 금색 점은 a2·b2, a5·b5, a7·b7의 결과가 가는 길이다.</figcaption>
+    </figure>
+    <h3>리덕션: 벡터를 스칼라 하나로</h3>
+    <p><code>vredsum.vs vd, vs2, vs1</code>은 vs2의 active 원소를 모두 더하고 vs1[0]을 보탠 값을 vd[0]에 쓴다. 스칼라 입력과 출력이 x 레지스터가 아니라 <b>벡터 레지스터의 0번 원소</b>에 있는 것이 특징이다. 벡터 유닛과 스칼라 유닛을 느슨하게 분리해 두려는 설계다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 260" role="img" aria-label="vredsum 리덕션 트리">
+        <text x="430" y="20" text-anchor="middle" class="t t-bold">vredsum.vs v1, v8, v2 — v1[0] = v2[0] + Σ v8[i] (vl=8)</text>
+        <g class="s-line">
+          <path d="M95 74 L142.5 100 M190 74 L142.5 100 M285 74 L332.5 100 M380 74 L332.5 100 M475 74 L522.5 100 M570 74 L522.5 100 M665 74 L712.5 100 M760 74 L712.5 100" class="s-line"/>
+          <path d="M142.5 130 L237.5 150 M332.5 130 L237.5 150 M522.5 130 L617.5 150 M712.5 130 L617.5 150" class="s-line"/>
+          <path d="M237.5 180 L427.5 200 M617.5 180 L427.5 200" class="s-line"/>
+        </g>
+        <g>
+          <rect x="60" y="40" width="70" height="34" rx="5" class="f-teal-soft"/><text x="95" y="62" text-anchor="middle" class="t-mono">3</text>
+          <rect x="155" y="40" width="70" height="34" rx="5" class="f-teal-soft"/><text x="190" y="62" text-anchor="middle" class="t-mono">1</text>
+          <rect x="250" y="40" width="70" height="34" rx="5" class="f-teal-soft"/><text x="285" y="62" text-anchor="middle" class="t-mono">4</text>
+          <rect x="345" y="40" width="70" height="34" rx="5" class="f-teal-soft"/><text x="380" y="62" text-anchor="middle" class="t-mono">1</text>
+          <rect x="440" y="40" width="70" height="34" rx="5" class="f-teal-soft"/><text x="475" y="62" text-anchor="middle" class="t-mono">5</text>
+          <rect x="535" y="40" width="70" height="34" rx="5" class="f-teal-soft"/><text x="570" y="62" text-anchor="middle" class="t-mono">9</text>
+          <rect x="630" y="40" width="70" height="34" rx="5" class="f-teal-soft"/><text x="665" y="62" text-anchor="middle" class="t-mono">2</text>
+          <rect x="725" y="40" width="70" height="34" rx="5" class="f-teal-soft"/><text x="760" y="62" text-anchor="middle" class="t-mono">6</text>
+          <text x="20" y="62" class="t-mono">v8</text>
+        </g>
+        <g>
+          <rect x="112.5" y="100" width="60" height="30" rx="5" class="f-elev"/><text x="142.5" y="120" text-anchor="middle" class="t-mono">4</text>
+          <rect x="302.5" y="100" width="60" height="30" rx="5" class="f-elev"/><text x="332.5" y="120" text-anchor="middle" class="t-mono">5</text>
+          <rect x="492.5" y="100" width="60" height="30" rx="5" class="f-elev"/><text x="522.5" y="120" text-anchor="middle" class="t-mono">14</text>
+          <rect x="682.5" y="100" width="60" height="30" rx="5" class="f-elev"/><text x="712.5" y="120" text-anchor="middle" class="t-mono">8</text>
+          <rect x="207.5" y="150" width="60" height="30" rx="5" class="f-elev"/><text x="237.5" y="170" text-anchor="middle" class="t-mono">9</text>
+          <rect x="587.5" y="150" width="60" height="30" rx="5" class="f-elev"/><text x="617.5" y="170" text-anchor="middle" class="t-mono">22</text>
+          <rect x="397.5" y="200" width="60" height="30" rx="5" class="f-accent-soft"/><text x="427.5" y="220" text-anchor="middle" class="t-mono">31</text>
+        </g>
+        <text x="490" y="221" text-anchor="middle" class="t t-bold">+</text>
+        <rect x="520" y="200" width="120" height="30" rx="5" class="f-violet-soft"/><text x="580" y="220" text-anchor="middle" class="t-mono">v2[0] = 10</text>
+        <text x="660" y="221" text-anchor="middle" class="t t-bold">=</text>
+        <rect x="680" y="200" width="150" height="30" rx="5" class="f-gold-soft"/><text x="755" y="220" text-anchor="middle" class="t-mono t-bold">v1[0] = 41</text>
+        <text x="20" y="250" class="t-faint">정수 합은 순서와 무관해 트리로 더해도 된다. 부동소수점은 vfredosum(순서 보장)과 vfredusum이 따로 있다.</text>
+      </svg></div>
+      <figcaption><b>그림 15-11.</b> 합 리덕션. inactive 원소는 빠지지만 v2[0]은 마스크와 상관없이 늘 포함된다. vl=0이면 아무것도 쓰지 않는다. v1의 나머지 원소(1 이상)는 꼬리로 취급된다.</figcaption>
+    </figure>
+    <h3>순열: 원소의 자리를 옮기기</h3>
+    <p>원소의 위치를 바꾸는 명령은 <code>vslideup</code>/<code>vslidedown</code>(정해진 칸 수만큼 밀기), <code>vslide1up</code>/<code>vslide1down</code>(한 칸 밀며 스칼라 끼워 넣기), <code>vrgather</code>(인덱스 벡터로 아무 원소나 골라 모으기. 인덱스가 VLMAX 이상이면 0), <code>vcompress</code>(마스크로 고른 원소를 앞으로 모으기)가 있다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 260" role="img" aria-label="vslideup과 vcompress의 동작">
+        <defs><marker id="permute-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker></defs>
+        <g>
+          <text x="20" y="22" class="t t-bold">vslideup.vi v2, v1, 2 (vl=8)</text>
+          <text x="34" y="69" text-anchor="end" class="t-mono">v1</text>
+          <text x="34" y="149" text-anchor="end" class="t-mono">v2</text>
+          <g>
+            <rect x="40" y="50" width="44" height="30" class="f-teal-soft"/><text x="62" y="70" text-anchor="middle" class="t-mono">a</text>
+            <rect x="84" y="50" width="44" height="30" class="f-teal-soft"/><text x="106" y="70" text-anchor="middle" class="t-mono">b</text>
+            <rect x="128" y="50" width="44" height="30" class="f-teal-soft"/><text x="150" y="70" text-anchor="middle" class="t-mono">c</text>
+            <rect x="172" y="50" width="44" height="30" class="f-teal-soft"/><text x="194" y="70" text-anchor="middle" class="t-mono">d</text>
+            <rect x="216" y="50" width="44" height="30" class="f-teal-soft"/><text x="238" y="70" text-anchor="middle" class="t-mono">e</text>
+            <rect x="260" y="50" width="44" height="30" class="f-teal-soft"/><text x="282" y="70" text-anchor="middle" class="t-mono">f</text>
+            <rect x="304" y="50" width="44" height="30" class="f-surface"/><text x="326" y="70" text-anchor="middle" class="t-faint">g</text>
+            <rect x="348" y="50" width="44" height="30" class="f-surface"/><text x="370" y="70" text-anchor="middle" class="t-faint">h</text>
+          </g>
+          <path d="M62 82 L146 128 M106 82 L190 128 M150 82 L234 128 M194 82 L278 128 M238 82 L322 128 M282 82 L366 128" class="s-accent" stroke-width="1.4" marker-end="url(#permute-arrow)"/>
+          <g>
+            <rect x="40" y="130" width="44" height="30" class="f-surface-2"/><text x="62" y="150" text-anchor="middle" class="t-faint">이전</text>
+            <rect x="84" y="130" width="44" height="30" class="f-surface-2"/><text x="106" y="150" text-anchor="middle" class="t-faint">이전</text>
+            <rect x="128" y="130" width="44" height="30" class="f-accent-soft"/><text x="150" y="150" text-anchor="middle" class="t-mono">a</text>
+            <rect x="172" y="130" width="44" height="30" class="f-accent-soft"/><text x="194" y="150" text-anchor="middle" class="t-mono">b</text>
+            <rect x="216" y="130" width="44" height="30" class="f-accent-soft"/><text x="238" y="150" text-anchor="middle" class="t-mono">c</text>
+            <rect x="260" y="130" width="44" height="30" class="f-accent-soft"/><text x="282" y="150" text-anchor="middle" class="t-mono">d</text>
+            <rect x="304" y="130" width="44" height="30" class="f-accent-soft"/><text x="326" y="150" text-anchor="middle" class="t-mono">e</text>
+            <rect x="348" y="130" width="44" height="30" class="f-accent-soft"/><text x="370" y="150" text-anchor="middle" class="t-mono">f</text>
+          </g>
+          <text x="20" y="192" class="t-faint">0–1번은 바뀌지 않는다 (OFFSET 앞)</text>
+          <text x="20" y="212" class="t-faint">g, h는 vl 범위 밖으로 밀려나 버려진다</text>
+          <text x="20" y="232" class="t-faint">목적지와 원본은 겹칠 수 없다</text>
+        </g>
+        <line x1="420" y1="10" x2="420" y2="250" stroke="var(--border)" stroke-width="1.5" stroke-dasharray="4 5"/>
+        <g>
+          <text x="440" y="22" class="t t-bold">vcompress.vm v2, v1, v0 (vl=9, tu)</text>
+          <text x="484" y="61" text-anchor="end" class="t-mono">v0</text>
+          <text x="484" y="99" text-anchor="end" class="t-mono">v1</text>
+          <text x="484" y="173" text-anchor="end" class="t-mono">v2 후</text>
+          <text x="484" y="219" text-anchor="end" class="t-mono">v2 전</text>
+          <g>
+            <text x="509" y="61" text-anchor="middle" class="t-mono">1</text><text x="547" y="61" text-anchor="middle" class="t-faint">0</text><text x="585" y="61" text-anchor="middle" class="t-mono">1</text><text x="623" y="61" text-anchor="middle" class="t-faint">0</text><text x="661" y="61" text-anchor="middle" class="t-faint">0</text><text x="699" y="61" text-anchor="middle" class="t-mono">1</text><text x="737" y="61" text-anchor="middle" class="t-faint">0</text><text x="775" y="61" text-anchor="middle" class="t-mono">1</text><text x="813" y="61" text-anchor="middle" class="t-mono">1</text>
+          </g>
+          <g>
+            <rect x="490" y="80" width="38" height="30" class="f-teal-soft"/><text x="509" y="100" text-anchor="middle" class="t-mono">0</text>
+            <rect x="528" y="80" width="38" height="30" class="f-surface"/><text x="547" y="100" text-anchor="middle" class="t-faint">1</text>
+            <rect x="566" y="80" width="38" height="30" class="f-teal-soft"/><text x="585" y="100" text-anchor="middle" class="t-mono">2</text>
+            <rect x="604" y="80" width="38" height="30" class="f-surface"/><text x="623" y="100" text-anchor="middle" class="t-faint">3</text>
+            <rect x="642" y="80" width="38" height="30" class="f-surface"/><text x="661" y="100" text-anchor="middle" class="t-faint">4</text>
+            <rect x="680" y="80" width="38" height="30" class="f-teal-soft"/><text x="699" y="100" text-anchor="middle" class="t-mono">5</text>
+            <rect x="718" y="80" width="38" height="30" class="f-surface"/><text x="737" y="100" text-anchor="middle" class="t-faint">6</text>
+            <rect x="756" y="80" width="38" height="30" class="f-teal-soft"/><text x="775" y="100" text-anchor="middle" class="t-mono">7</text>
+            <rect x="794" y="80" width="38" height="30" class="f-teal-soft"/><text x="813" y="100" text-anchor="middle" class="t-mono">8</text>
+          </g>
+          <path d="M509 112 L509 150 M585 112 L547 150 M699 112 L585 150 M775 112 L623 150 M813 112 L661 150" class="s-accent" stroke-width="1.4" marker-end="url(#permute-arrow)"/>
+          <g>
+            <rect x="490" y="154" width="38" height="30" class="f-accent-soft"/><text x="509" y="174" text-anchor="middle" class="t-mono">0</text>
+            <rect x="528" y="154" width="38" height="30" class="f-accent-soft"/><text x="547" y="174" text-anchor="middle" class="t-mono">2</text>
+            <rect x="566" y="154" width="38" height="30" class="f-accent-soft"/><text x="585" y="174" text-anchor="middle" class="t-mono">5</text>
+            <rect x="604" y="154" width="38" height="30" class="f-accent-soft"/><text x="623" y="174" text-anchor="middle" class="t-mono">7</text>
+            <rect x="642" y="154" width="38" height="30" class="f-accent-soft"/><text x="661" y="174" text-anchor="middle" class="t-mono">8</text>
+            <rect x="680" y="154" width="38" height="30" class="f-gold-soft"/><text x="699" y="174" text-anchor="middle" class="t-mono">4</text>
+            <rect x="718" y="154" width="38" height="30" class="f-gold-soft"/><text x="737" y="174" text-anchor="middle" class="t-mono">3</text>
+            <rect x="756" y="154" width="38" height="30" class="f-gold-soft"/><text x="775" y="174" text-anchor="middle" class="t-mono">2</text>
+            <rect x="794" y="154" width="38" height="30" class="f-gold-soft"/><text x="813" y="174" text-anchor="middle" class="t-mono">1</text>
+          </g>
+          <path d="M699 198 V188 M737 198 V188 M775 198 V188 M813 198 V188" class="s-gold s-dashed" stroke-width="1.4"/>
+          <g>
+            <rect x="490" y="200" width="38" height="30" class="f-surface-2"/><text x="509" y="220" text-anchor="middle" class="t-faint">9</text>
+            <rect x="528" y="200" width="38" height="30" class="f-surface-2"/><text x="547" y="220" text-anchor="middle" class="t-faint">8</text>
+            <rect x="566" y="200" width="38" height="30" class="f-surface-2"/><text x="585" y="220" text-anchor="middle" class="t-faint">7</text>
+            <rect x="604" y="200" width="38" height="30" class="f-surface-2"/><text x="623" y="220" text-anchor="middle" class="t-faint">6</text>
+            <rect x="642" y="200" width="38" height="30" class="f-surface-2"/><text x="661" y="220" text-anchor="middle" class="t-faint">5</text>
+            <rect x="680" y="200" width="38" height="30" class="f-surface-2"/><text x="699" y="220" text-anchor="middle" class="t-mono">4</text>
+            <rect x="718" y="200" width="38" height="30" class="f-surface-2"/><text x="737" y="220" text-anchor="middle" class="t-mono">3</text>
+            <rect x="756" y="200" width="38" height="30" class="f-surface-2"/><text x="775" y="220" text-anchor="middle" class="t-mono">2</text>
+            <rect x="794" y="200" width="38" height="30" class="f-surface-2"/><text x="813" y="220" text-anchor="middle" class="t-mono">1</text>
+          </g>
+          <text x="440" y="250" class="t-faint">앞으로 모으고, 남은 자리(금색)는 tu 정책으로 이전 값</text>
+        </g>
+      </svg></div>
+      <figcaption><b>그림 15-12.</b> 왼쪽: <code>vslideup</code>은 원소를 OFFSET만큼 뒤로 민다. 오른쪽: 규격의 <code>vcompress</code> 예제를 0번 원소가 왼쪽에 오도록 다시 그렸다. 마스크가 1인 원소 0·2·5·7·8이 결과의 앞쪽 다섯 칸에 모이고, 남은 네 칸은 tu 정책이라 실행 전 v2 값이 남는다.</figcaption>
+    </figure>
+    <div class="callout tip"><strong>마스크를 다루는 명령도 있다</strong><p>마스크끼리의 논리 연산(<code>vmand.mm</code>, <code>vmnot.m</code> 등), 마스크의 1 개수(<code>vcpop.m</code>), 첫 1의 위치(<code>vfirst.m</code>), 첫 1 앞까지 켜기(<code>vmsbf.m</code>), 누적 번호(<code>viota.m</code>) 같은 명령이 조건문과 while 루프의 벡터화를 돕는다. 앞의 strlen 예제의 <code>vfirst.m</code>이 그 예다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="subsets">
+    <h2>Zve*·Zvl*와 벡터 암호 확장</h2>
+    <p>V 확장 전체는 작은 마이크로컨트롤러에게 무겁다. 64비트 원소, 배정밀도 부동소수점, VLEN 128비트를 모두 갖추어야 하기 때문이다. 그래서 규격은 임베디드용 <b>Zve*</b> 다섯 가지와 최소 VLEN을 밝히는 <b>Zvl*</b>를 따로 정의한다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 880 290" role="img" aria-label="Zve 확장들의 의존 관계와 V 확장">
+        <defs><marker id="vector-extension-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--text-faint)"/></marker></defs>
+        <text x="440" y="22" text-anchor="middle" class="t-dim">화살표 방향으로 갈수록 앞의 확장을 포함하며 기능이 늘어난다</text>
+        <g>
+          <rect x="20" y="116" width="150" height="58" rx="10" class="f-surface"/><text x="95" y="140" text-anchor="middle" class="t t-bold">Zve32x</text><text x="95" y="160" text-anchor="middle" class="t-faint">VLEN≥32 · EEW 8–32</text>
+          <rect x="215" y="40" width="150" height="58" rx="10" class="f-teal-soft"/><text x="290" y="64" text-anchor="middle" class="t t-bold">Zve32f</text><text x="290" y="84" text-anchor="middle" class="t-faint">+ FP32 (F 필요)</text>
+          <rect x="215" y="192" width="150" height="58" rx="10" class="f-surface"/><text x="290" y="216" text-anchor="middle" class="t t-bold">Zve64x</text><text x="290" y="236" text-anchor="middle" class="t-faint">VLEN≥64 · EEW 8–64</text>
+          <rect x="410" y="116" width="150" height="58" rx="10" class="f-teal-soft"/><text x="485" y="140" text-anchor="middle" class="t t-bold">Zve64f</text><text x="485" y="160" text-anchor="middle" class="t-faint">+ FP32</text>
+          <rect x="605" y="116" width="150" height="58" rx="10" class="f-violet-soft"/><text x="680" y="140" text-anchor="middle" class="t t-bold">Zve64d</text><text x="680" y="160" text-anchor="middle" class="t-faint">+ FP64 (D 필요)</text>
+          <rect x="605" y="214" width="150" height="50" rx="10" class="f-gold-soft"/><text x="680" y="236" text-anchor="middle" class="t t-bold">Zvl128b</text><text x="680" y="254" text-anchor="middle" class="t-faint">VLEN ≥ 128</text>
+          <rect x="790" y="150" width="80" height="64" rx="10" class="f-accent"/><text x="830" y="178" text-anchor="middle" class="t-on-accent" style="font-size:18px">V</text><text x="830" y="200" text-anchor="middle" class="t-on-accent" style="font-size:12px">응용 프로세서</text>
+        </g>
+        <g class="s-line">
+          <path d="M170 135 L213 80" class="s-line" marker-end="url(#vector-extension-arrow)"/>
+          <path d="M170 156 L213 210" class="s-line" marker-end="url(#vector-extension-arrow)"/>
+          <path d="M365 80 L408 132" class="s-line" marker-end="url(#vector-extension-arrow)"/>
+          <path d="M365 210 L408 160" class="s-line" marker-end="url(#vector-extension-arrow)"/>
+          <path d="M560 145 H603" class="s-line" marker-end="url(#vector-extension-arrow)"/>
+          <path d="M755 150 L788 170" class="s-line" marker-end="url(#vector-extension-arrow)"/>
+          <path d="M755 236 L788 200" class="s-line" marker-end="url(#vector-extension-arrow)"/>
+        </g>
+      </svg></div>
+      <figcaption><b>그림 15-13.</b> 벡터 확장의 가계도. Zve32f와 Zve64x는 Zve32x에, Zve64f는 그 둘에, Zve64d는 Zve64f에 의존한다. 응용 프로세서용 V는 Zve64d와 Zvl128b에 의존한다. 모든 Zve*와 V는 정밀한(precise) 트랩을 제공한다.</figcaption>
+    </figure>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>확장</th><th>최소 VLEN</th><th>지원 EEW</th><th>FP32</th><th>FP64</th></tr></thead>
+      <tbody>
+        <tr><td>Zve32x</td><td class="number">32</td><td>8, 16, 32</td><td>N</td><td>N</td></tr>
+        <tr><td>Zve32f</td><td class="number">32</td><td>8, 16, 32</td><td>Y</td><td>N</td></tr>
+        <tr><td>Zve64x</td><td class="number">64</td><td>8, 16, 32, 64</td><td>N</td><td>N</td></tr>
+        <tr><td>Zve64f</td><td class="number">64</td><td>8, 16, 32, 64</td><td>Y</td><td>N</td></tr>
+        <tr><td>Zve64d</td><td class="number">64</td><td>8, 16, 32, 64</td><td>Y</td><td>Y</td></tr>
+        <tr><td><b>V</b></td><td class="number">128</td><td>8, 16, 32, 64</td><td>Y</td><td>Y</td></tr>
+      </tbody>
+    </table></div>
+    <p>Zve64*에는 EEW=64의 <code>vmulh</code> 계열과 <code>vsmul</code>이 빠져 있다. 64비트 곱의 상위 절반을 만드는 데 게이트가 많이 들기 때문이다. Zvl 확장은 <code>Zvl32b</code>, <code>Zvl64b</code>, <code>Zvl128b</code>, <code>Zvl256b</code>, <code>Zvl512b</code>, <code>Zvl1024b</code>처럼 최소 VLEN을 밝히며, 긴 것은 짧은 것을 모두 포함한다. 프로파일은 이것으로 "이 플랫폼의 VLEN은 적어도 얼마"를 요구할 수 있다(<a href="profiles.html">23장</a>).</p>
+    <div class="callout tip"><strong>ISA 문자열 예</strong><p><code>RV64GCV</code>와 <code>RV64GCV_Zve64f</code>는 같은 뜻이다. V가 이미 Zve64f를 포함하기 때문이다. 규격은 이렇게 겹치는 확장을 함께 적는 것을 허용한다. 반대로 <code>RV32IMC_Zve32x</code>라면 정수 벡터만 있는 작은 MCU다.</p></div>
+    <h3>벡터 암호 확장</h3>
+    <p>14장의 스칼라 암호(Zk*)처럼, 벡터에도 암호 확장(Vector Cryptography v1.0)이 있다. AES 한 블록은 128비트이므로 이 명령들은 SEW=32 원소 네 개를 묶은 <span class="term">원소 그룹</span><span class="english">(element group, EGW=128)</span> 단위로 동작한다. VLEN이 128보다 작으면 LMUL로 레지스터를 묶어 그룹을 만든다.</p>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>확장</th><th>내용</th></tr></thead>
+      <tbody>
+        <tr><td>Zvbb · Zvkb</td><td>벡터 기본 비트 조작(<code>vandn</code>, <code>vbrev8</code>, <code>vrev8</code>, 회전 등). Zvkb는 Zvbb의 암호용 부분집합</td></tr>
+        <tr><td>Zvbc</td><td>벡터 캐리 없는 곱셈 <code>vclmul</code>/<code>vclmulh</code> (SEW=64 전용, Zve64x 필요)</td></tr>
+        <tr><td>Zvkg</td><td>GCM/GMAC의 GHASH</td></tr>
+        <tr><td>Zvkned</td><td>AES 암·복호화와 키 스케줄 (<code>vaesef</code>, <code>vaesem</code> …)</td></tr>
+        <tr><td>Zvknha · Zvknhb</td><td>SHA-256 / SHA-256 + SHA-512 (Zvknhb는 Zve64x 필요)</td></tr>
+        <tr><td>Zvksed · Zvksh</td><td>중국 표준 SM4 블록 암호 / SM3 해시</td></tr>
+        <tr><td>Zvkt</td><td>나열된 벡터 명령의 데이터 무관 실행 시간 보장</td></tr>
+        <tr><td>Zvkn · Zvks</td><td>묶음 이름. Zvkn = Zvkned + Zvknhb + Zvkb + Zvkt, Zvks = Zvksed + Zvksh + Zvkb + Zvkt (뒤에 c·g가 붙으면 Zvbc·Zvkg 추가)</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <section class="keypoints" id="summary">
+    <h2>핵심 정리</h2>
+    <ol>
+      <li>V 확장은 <b>벡터 길이 무관(VLA)</b> 방식이다. 프로그램은 AVL을 건네고 하드웨어가 돌려준 vl만큼 처리하므로, 같은 바이너리가 VLEN이 다른 칩에서 모두 돈다.</li>
+      <li>레지스터는 v0–v31(각 VLEN비트), CSR은 vstart(0x008), vxsat(0x009), vxrm(0x00A), vcsr(0x00F), vl(0xC20), vtype(0xC21), vlenb(0xC22)다.</li>
+      <li>vtype은 vill(XLEN-1), vma(7), vta(6), vsew(5:3), vlmul(2:0)로 이루어지며, <b>VLMAX = LMUL × VLEN / SEW</b>이다. LMUL&gt;1이면 시작 번호가 LMUL의 배수인 레지스터 그룹을 쓴다.</li>
+      <li><code>vsetvli</code>는 AVL ≤ VLMAX면 vl=AVL, AVL ≥ 2·VLMAX면 vl=VLMAX, 그 사이면 ceil(AVL/2)~VLMAX 중 하나를 고른다. 코드는 늘 돌려받은 vl을 써야 한다.</li>
+      <li>마스크는 v0에서 오고(vm=0), 원소는 prestart·active·inactive·tail로 나뉜다. agnostic 정책은 "이전 값 또는 모두 1"이다.</li>
+      <li>메모리 접근은 단위 보폭·상수 보폭·인덱스(순서 보장/비보장)·세그먼트가 있고, fault-only-first 로드로 strlen 같은 while 루프를 벡터화한다.</li>
+      <li>넓히기 결과는 EEW=2·SEW, EMUL=2·LMUL이다. 리덕션은 벡터 레지스터 0번 원소를 스칼라로 쓴다. V는 Zve64d + Zvl128b에 의존하고, 임베디드용 Zve32x~Zve64d가 따로 있다.</li>
+    </ol>
+  </section>
+
+  <section id="quiz">
+    <h2>확인 퀴즈</h2>
+    <div class="quiz">
+      <div class="quiz-question"><p>VLEN=256, SEW=16, LMUL=2일 때 VLMAX는?</p><div class="options">
+        <button class="option">8</button>
+        <button class="option">16</button>
+        <button class="option" data-correct>32</button>
+        <button class="option">64</button>
+      </div><div class="quiz-explanation">VLMAX = LMUL × VLEN / SEW = 2 × 256 / 16 = 32이다.</div></div>
+      <div class="quiz-question"><p>LMUL=4일 때 레지스터 그룹의 시작으로 쓸 수 있는 것은?</p><div class="options">
+        <button class="option">v2</button>
+        <button class="option">v6</button>
+        <button class="option" data-correct>v8</button>
+        <button class="option">v10</button>
+      </div><div class="quiz-explanation">LMUL=4 그룹은 4의 배수 번호에서만 시작한다. 다른 번호는 예약된 인코딩이다.</div></div>
+      <div class="quiz-question"><p>VLMAX=16인 설정에서 AVL=20으로 <code>vsetvli</code>를 실행했다. 규격이 허용하지 <b>않는</b> vl은?</p><div class="options">
+        <button class="option">16</button>
+        <button class="option">12</button>
+        <button class="option">10</button>
+        <button class="option" data-correct>8</button>
+      </div><div class="quiz-explanation">AVL(20) &lt; 2·VLMAX(32)이므로 ceil(20/2)=10 ≤ vl ≤ 16이어야 한다. 8은 범위 밖이다.</div></div>
+      <div class="quiz-question"><p>vta=1(tail agnostic)일 때 tail 원소의 목적지 값은?</p><div class="options">
+        <button class="option">반드시 0이 된다</button>
+        <button class="option">반드시 이전 값이 유지된다</button>
+        <button class="option" data-correct>원소마다 이전 값이 유지되거나 모두 1로 덮일 수 있다</button>
+        <button class="option">정해지지 않은 아무 값이 된다</button>
+      </div><div class="quiz-explanation">agnostic은 "이전 값 또는 모두 1" 둘 중 하나다. 어느 쪽인지는 원소마다, 실행마다 달라도 된다.</div></div>
+      <div class="quiz-question"><p><code>vle8ff.v</code>를 실행하는데 5번 원소의 주소에서 페이지 폴트가 날 상황이다. 무슨 일이 일어나나?</p><div class="options">
+        <button class="option">즉시 페이지 폴트 트랩이 난다</button>
+        <button class="option" data-correct>트랩 없이 vl이 5로 줄어든다</button>
+        <button class="option">5번 원소만 0으로 채운다</button>
+        <button class="option">vstart가 5로 설정되고 트랩이 난다</button>
+      </div><div class="quiz-explanation">fault-only-first 로드는 0번 원소의 예외만 트랩으로 처리한다. 그 뒤 원소라면 vl을 그 원소 번호로 줄인다.</div></div>
+      <div class="quiz-question"><p>LMUL=8에서 넓히기 명령 <code>vwadd.vv</code>를 쓸 수 없는 이유는?</p><div class="options">
+        <button class="option">SEW가 64를 넘어서</button>
+        <button class="option" data-correct>목적지 EMUL이 16이 되어 8을 넘기 때문에</button>
+        <button class="option">마스크 레지스터 v0와 겹치기 때문에</button>
+        <button class="option">vlenb가 부족해서</button>
+      </div><div class="quiz-explanation">넓히기 결과는 EMUL=2·LMUL이다. 레지스터 그룹은 8개를 넘을 수 없으므로 예약된 인코딩이 된다.</div></div>
+      <div class="quiz-question"><p>vill 비트가 vtype의 맨 위 비트(XLEN-1)에 있는 이유로 가장 알맞은 것은?</p><div class="options">
+        <button class="option">하드웨어 배선이 짧아서</button>
+        <button class="option" data-correct>vtype을 읽어 부호 비트로 분기하면 설정 실패를 바로 확인할 수 있어서</button>
+        <button class="option">RV32와 RV64에서 위치를 다르게 하려고</button>
+        <button class="option">vsetvl이 rs2의 맨 위 비트를 무시해서</button>
+      </div><div class="quiz-explanation">규격 비고에 그대로 나온다. <code>bltz</code> 같은 부호 분기 하나로 확인할 수 있다.</div></div>
+      <div class="quiz-question"><p>응용 프로세서용 V 확장이 의존하는 확장 조합은?</p><div class="options">
+        <button class="option">Zve32x + Zvl64b</button>
+        <button class="option">Zve64x + Zvl256b</button>
+        <button class="option" data-correct>Zve64d + Zvl128b</button>
+        <button class="option">Zve32f + Zvl128b</button>
+      </div><div class="quiz-explanation">V는 Zvl128b와 Zve64d에 의존한다. 그래서 VLEN ≥ 128이고 64비트 원소와 FP64를 모두 지원한다.</div></div>
+    </div>
+  </section>
+
+  <section id="references">
+    <h2>더 읽을거리</h2>
+    <ul class="references">
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/v-st-ext.html" target="_blank" rel="noopener">The RISC-V Instruction Set Manual, Volume I — "V" Standard Extension for Vector Operations, Version 1.0</a> (v20260120)</li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/vector-examples.html" target="_blank" rel="noopener">Volume I — Vector Assembly Code Examples</a> (vvaddint32, memcpy, saxpy, sgemm 등)</li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/vector-crypto.html" target="_blank" rel="noopener">Volume I — Cryptography Extensions: Vector Instructions, Version 1.0</a></li>
+      <li><a href="https://github.com/riscv-non-isa/rvv-intrinsic-doc" target="_blank" rel="noopener">RISC-V Vector C Intrinsics</a> — C에서 벡터 명령을 쓰는 표준 내장 함수</li>
+      <li>Richard M. Russell, "The CRAY-1 Computer System", <i>Communications of the ACM</i> 21(1), 1978 — 벡터 레지스터 머신의 원형</li>
+      <li>이 책의 <a href="bit-manipulation.html">14장</a>(스칼라 비트 조작과 암호), <a href="floating-point.html">12장</a>(부동소수점), <a href="profiles.html">23장</a>(RVA23에서의 V)</li>
+    </ul>
+  </section>
+</main>
+
+<script>
+/* ---------------------------------------------------------------------------
+   벡터 어셈블리 강조: riscv.js 의 강조기는 숫자가 든 명령 이름(vle32.v)을
+   명령으로 알아보지 못하므로, 이 장에서는 토큰 단위로 직접 색을 입힌다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const REGISTER_PATTERN = /^(?:v(?:[12]?[0-9]|3[01])(?:\.t)?|x(?:[12]?[0-9]|3[01])|zero|ra|sp|gp|tp|fp|a[0-7]|t[0-6]|s(?:[0-9]|1[01])|f(?:a[0-7]|t(?:[0-9]|1[01])|s(?:[0-9]|1[01])))$/;
+  const VECTOR_TYPE_PATTERN = /^(?:e(?:8|16|32|64)|m[1248]|mf[248]|t[au]|m[au])$/;
+  const NUMBER_PATTERN = /^-?(?:0x[0-9a-fA-F]+|\d+)$/;
+  const SEPARATOR_PATTERN = /(\s+|,|\(|\))/;
+
+  function escapeHtml(text) {
+    return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+  function wrap(className, text) {
+    return '<span class="' + className + '">' + escapeHtml(text) + "</span>";
+  }
+  function highlightLine(line) {
+    const commentIndex = line.indexOf("#");
+    let codePart = line;
+    let commentPart = "";
+    if (commentIndex >= 0) {
+      codePart = line.slice(0, commentIndex);
+      commentPart = line.slice(commentIndex);
+    }
+    let hasMnemonic = false;
+    const html = codePart.split(SEPARATOR_PATTERN).map((token) => {
+      if (!token) return "";
+      if (SEPARATOR_PATTERN.test(token)) return escapeHtml(token);
+      if (token.endsWith(":")) return wrap("label", token);
+      if (!hasMnemonic) {
+        hasMnemonic = true;
+        return wrap("keyword", token);
+      }
+      if (REGISTER_PATTERN.test(token)) return wrap("register", token);
+      if (VECTOR_TYPE_PATTERN.test(token)) return wrap("directive", token);
+      if (NUMBER_PATTERN.test(token)) return wrap("number", token);
+      return escapeHtml(token);
+    }).join("");
+    if (commentPart) return html + wrap("comment", commentPart);
+    return html;
+  }
+  document.querySelectorAll('.codebox[data-highlight="vector"]').forEach((box) => {
+    box.innerHTML = box.textContent.split("\n").map(highlightLine).join("\n");
+  });
+})();
+
+/* ---------------------------------------------------------------------------
+   VLEN · SEW · LMUL 탐색기: 레지스터 파일 32줄을 그리고 선택한 그룹과
+   그 안의 원소 번호, vl 이후의 꼬리를 표시한다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const REGISTER_COUNT = 32;
+  const ELEMENT_LENGTH_LIMIT = 64;          // V 확장의 ELEN
+  const LABEL_WIDTH = 44;
+  const RIGHT_MARGIN = 10;
+  const HEADER_HEIGHT = 30;
+  const FOOTER_HEIGHT = 6;
+  const MINIMUM_CELL_WIDTH_FOR_LINES = 3;
+  const MINIMUM_CELL_WIDTH_FOR_NUMBERS = 17;
+  const WIDE_LAYOUT_WIDTH = 520;
+  const MAXIMUM_APPLICATION_VECTOR_LENGTH = 4096;
+
+  const state = { registerLength: 128, elementWidth: 32, groupMultiplier: 4, baseRegister: 8, applicationVectorLength: 20 };
+
+  /** AVL과 VLMAX로 vl 을 고른다. 이 탐색기는 "가능하면 VLMAX"를 고르는 구현을 흉내 내고, 허용 범위도 함께 돌려준다. */
+  function chooseVectorLength(applicationVectorLength, maximumVectorLength) {
+    if (maximumVectorLength < 1) return { value: 0, minimumAllowed: 0, maximumAllowed: 0 };
+    if (applicationVectorLength <= maximumVectorLength) {
+      return { value: applicationVectorLength, minimumAllowed: applicationVectorLength, maximumAllowed: applicationVectorLength };
+    }
+    if (applicationVectorLength < 2 * maximumVectorLength) {
+      return { value: maximumVectorLength, minimumAllowed: Math.ceil(applicationVectorLength / 2), maximumAllowed: maximumVectorLength };
+    }
+    return { value: maximumVectorLength, minimumAllowed: maximumVectorLength, maximumAllowed: maximumVectorLength };
+  }
+
+  function formatMultiplier(multiplier) {
+    if (multiplier < 1) return "1/" + Math.round(1 / multiplier);
+    return String(multiplier);
+  }
+  function multiplierAssemblyName(multiplier) {
+    if (multiplier < 1) return "mf" + Math.round(1 / multiplier);
+    return "m" + multiplier;
+  }
+
+  function computeConfiguration() {
+    const elementsPerRegister = state.registerLength / state.elementWidth;
+    const maximumVectorLength = state.groupMultiplier * state.registerLength / state.elementWidth;
+    const groupSize = Math.max(1, state.groupMultiplier);
+    const isAligned = state.baseRegister % groupSize === 0;
+    const isSupportRequired = state.elementWidth <= state.groupMultiplier * ELEMENT_LENGTH_LIMIT;
+    const canHoldElement = maximumVectorLength >= 1;
+    const vectorLength = chooseVectorLength(state.applicationVectorLength, Math.floor(maximumVectorLength));
+    return { elementsPerRegister, maximumVectorLength, groupSize, isAligned, isSupportRequired, canHoldElement, vectorLength };
+  }
+
+  const canvasElement = document.getElementById("explorer-canvas");
+  let rowGeometry = { top: HEADER_HEIGHT, pitch: 12 };
+
+  function draw(context, width, height, colors) {
+    const configuration = computeConfiguration();
+    const rowWidth = width - LABEL_WIDTH - RIGHT_MARGIN;
+    const pitch = (height - HEADER_HEIGHT - FOOTER_HEIGHT) / REGISTER_COUNT;
+    const rowHeight = Math.max(4, pitch - 2);
+    rowGeometry = { top: HEADER_HEIGHT, pitch };
+    const cellWidth = rowWidth / configuration.elementsPerRegister;
+
+    book.drawText(context, "v0–v31 (각 " + state.registerLength + "비트)", LABEL_WIDTH, 15, { size: 12, color: colors.dim, bold: true });
+    if (width >= WIDE_LAYOUT_WIDTH) {
+      const legendX = width - RIGHT_MARGIN - 210;
+      context.fillStyle = colors.accent;
+      context.fillRect(legendX, 9, 12, 12);
+      book.drawText(context, "body (< vl)", legendX + 17, 15, { size: 12, color: colors.dim });
+      context.fillStyle = colors.goldSoft;
+      context.fillRect(legendX + 105, 9, 12, 12);
+      book.drawText(context, "tail", legendX + 122, 15, { size: 12, color: colors.dim });
+    }
+
+    for (let registerNumber = 0; registerNumber < REGISTER_COUNT; registerNumber += 1) {
+      const rowY = HEADER_HEIGHT + registerNumber * pitch;
+      const isInGroup = registerNumber >= state.baseRegister && registerNumber < state.baseRegister + configuration.groupSize;
+      let labelColor = colors.faint;
+      if (isInGroup) labelColor = configuration.isAligned ? colors.accent : colors.bad;
+      book.drawText(context, "v" + registerNumber, LABEL_WIDTH - 8, rowY + rowHeight / 2, { size: 11, color: labelColor, align: "right", mono: true, bold: isInGroup });
+
+      context.fillStyle = colors.surface;
+      context.fillRect(LABEL_WIDTH, rowY, rowWidth, rowHeight);
+
+      if (isInGroup && configuration.canHoldElement) {
+        for (let slot = 0; slot < configuration.elementsPerRegister; slot += 1) {
+          const elementIndex = (registerNumber - state.baseRegister) * configuration.elementsPerRegister + slot;
+          const cellX = LABEL_WIDTH + slot * cellWidth;
+          const isBody = elementIndex < configuration.vectorLength.value;
+          context.fillStyle = isBody ? colors.accent : colors.goldSoft;
+          context.fillRect(cellX, rowY, cellWidth, rowHeight);
+          if (cellWidth >= MINIMUM_CELL_WIDTH_FOR_NUMBERS && rowHeight >= 9) {
+            let label = String(elementIndex);
+            if (elementIndex >= configuration.maximumVectorLength) label = "·";
+            book.drawText(context, label, cellX + cellWidth / 2, rowY + rowHeight / 2 + 0.5, { size: 9.5, color: isBody ? colors.onAccent : colors.dim, align: "center", mono: true });
+          }
+        }
+        if (!configuration.isAligned) {
+          context.strokeStyle = colors.bad;
+          context.lineWidth = 2;
+          context.strokeRect(LABEL_WIDTH + 1, rowY + 1, rowWidth - 2, rowHeight - 2);
+        }
+      }
+      if (cellWidth >= MINIMUM_CELL_WIDTH_FOR_LINES) {
+        context.strokeStyle = isInGroup ? colors.background : colors.border;
+        context.lineWidth = 1;
+        context.beginPath();
+        for (let slot = 1; slot < configuration.elementsPerRegister; slot += 1) {
+          const lineX = Math.round(LABEL_WIDTH + slot * cellWidth) + 0.5;
+          context.moveTo(lineX, rowY);
+          context.lineTo(lineX, rowY + rowHeight);
+        }
+        context.stroke();
+      }
+    }
+    if (!configuration.canHoldElement) {
+      const messageY = HEADER_HEIGHT + (state.baseRegister + 0.5) * pitch;
+      book.drawText(context, "원소 하나도 담을 수 없는 조합 (vill=1, vl=0)", LABEL_WIDTH + rowWidth / 2, messageY, { size: 12, bold: true, color: colors.bad, align: "center" });
+    }
+  }
+
+  const canvas = book.createCanvas(canvasElement, draw, { aspectRatio: 0.62, minimumHeight: 440, maximumHeight: 520 });
+
+  const baseSelect = document.getElementById("explorer-base");
+  for (let registerNumber = 0; registerNumber < REGISTER_COUNT; registerNumber += 1) {
+    const option = document.createElement("option");
+    option.value = String(registerNumber);
+    option.textContent = "v" + registerNumber;
+    baseSelect.appendChild(option);
+  }
+  baseSelect.value = String(state.baseRegister);
+
+  function render() {
+    const configuration = computeConfiguration();
+    const groupLast = state.baseRegister + configuration.groupSize - 1;
+    let groupText = "v" + state.baseRegister;
+    if (configuration.groupSize > 1) groupText = "v" + state.baseRegister + "–v" + Math.min(groupLast, REGISTER_COUNT - 1);
+    if (state.groupMultiplier < 1) groupText += " 일부";
+    document.getElementById("explorer-per-register").textContent = String(configuration.elementsPerRegister);
+    document.getElementById("explorer-vlmax").textContent = configuration.canHoldElement ? String(configuration.maximumVectorLength) : "< 1";
+    let vectorLengthText = String(configuration.vectorLength.value);
+    if (configuration.vectorLength.minimumAllowed !== configuration.vectorLength.maximumAllowed) {
+      vectorLengthText += " (" + configuration.vectorLength.minimumAllowed + "–" + configuration.vectorLength.maximumAllowed + " 허용)";
+    }
+    document.getElementById("explorer-vl").textContent = vectorLengthText;
+    document.getElementById("explorer-group").textContent = groupText;
+    document.getElementById("explorer-vlenb").textContent = String(state.registerLength / 8);
+
+    const assembly = "vsetvli t0, a0, e" + state.elementWidth + ", " + multiplierAssemblyName(state.groupMultiplier) + ", ta, ma";
+    let text = "<code>" + assembly + "</code> (a0 = " + state.applicationVectorLength + ") → VLMAX = " + formatMultiplier(state.groupMultiplier) + " × " + state.registerLength + " / " + state.elementWidth + " = <b>" + (configuration.canHoldElement ? configuration.maximumVectorLength : "1 미만") + "</b>. ";
+    if (!configuration.canHoldElement) {
+      text += '<span style="color:var(--bad)">레지스터 일부에 원소 하나도 들어가지 않는다. 구현은 vill을 1로 만들고 vl=0이 된다.</span>';
+    } else if (!configuration.isSupportRequired) {
+      text += '<span style="color:var(--warn)">SEW(' + state.elementWidth + ') &gt; LMUL × ELEN(' + (state.groupMultiplier * ELEMENT_LENGTH_LIMIT) + ')이라 구현이 지원할 의무가 없는 조합이다. 지원하지 않으면 vill=1.</span> ';
+    }
+    if (configuration.canHoldElement && !configuration.isAligned) {
+      text += '<span style="color:var(--bad)">LMUL=' + configuration.groupSize + ' 그룹은 ' + configuration.groupSize + '의 배수 번호에서만 시작한다. v' + state.baseRegister + '를 지정한 명령은 예약된 인코딩이다.</span>';
+    } else if (configuration.canHoldElement) {
+      if (configuration.vectorLength.minimumAllowed !== configuration.vectorLength.maximumAllowed) {
+        text += "AVL이 VLMAX와 2·VLMAX 사이라서 구현은 vl을 " + configuration.vectorLength.minimumAllowed + "–" + configuration.vectorLength.maximumAllowed + " 중에서 고를 수 있다(그림은 VLMAX를 고른 경우). ";
+      }
+      if (state.groupMultiplier < 1) text += "분수 LMUL이라 v" + state.baseRegister + "의 앞쪽 " + formatMultiplier(state.groupMultiplier) + "만 쓰고 나머지는 꼬리다.";
+    }
+    document.getElementById("explorer-description").innerHTML = text;
+    canvas.redraw();
+  }
+
+  book.segmented("explorer-vlen", (value) => { state.registerLength = Number(value); render(); });
+  book.segmented("explorer-sew", (value) => { state.elementWidth = Number(value); render(); });
+  book.segmented("explorer-lmul", (value) => { state.groupMultiplier = Number(value); render(); });
+  baseSelect.addEventListener("change", () => { state.baseRegister = Number(baseSelect.value); render(); });
+  const lengthInput = document.getElementById("explorer-avl");
+  lengthInput.addEventListener("input", () => {
+    const parsed = Math.floor(Number(lengthInput.value));
+    state.applicationVectorLength = book.clamp(Number.isFinite(parsed) ? parsed : 0, 0, MAXIMUM_APPLICATION_VECTOR_LENGTH);
+    render();
+  });
+  canvasElement.addEventListener("click", (event) => {
+    const bounds = canvasElement.getBoundingClientRect();
+    const offsetY = event.clientY - bounds.top;
+    const registerNumber = Math.floor((offsetY - rowGeometry.top) / rowGeometry.pitch);
+    if (registerNumber < 0 || registerNumber >= REGISTER_COUNT) return;
+    state.baseRegister = registerNumber;
+    baseSelect.value = String(registerNumber);
+    render();
+  });
+  render();
+})();
+
+/* ---------------------------------------------------------------------------
+   vsetvli 인코딩 만들기: 선택한 필드로 32비트 기계어를 조립한다.
+   비트 위치는 규격의 인코딩 그림(vsetvli/vsetivli/vsetvl)을 따른다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const OPCODE_VECTOR = 0b1010111;
+  const FUNCT3_CONFIGURATION = 0b111;
+  const DEMONSTRATION_REGISTER_LENGTH = 128;
+  const ELEMENT_WIDTH_BY_CODE = [8, 16, 32, 64];
+  const MULTIPLIER_BY_CODE = { 0: 1, 1: 2, 2: 4, 3: 8, 5: 0.125, 6: 0.25, 7: 0.5 };
+  const MULTIPLIER_NAME_BY_CODE = { 0: "m1", 1: "m2", 2: "m4", 3: "m8", 5: "mf8", 6: "mf4", 7: "mf2" };
+  const REGISTER_NAMES = { 0: "zero", 5: "t0", 6: "t1", 10: "a0", 11: "a1", 12: "a2", 13: "a3", 14: "a4" };
+
+  const state = { form: "vsetvli", destination: 5, source: 10, immediateLength: 4, typeSource: 6, elementCode: 2, multiplierCode: 2, isTailAgnostic: true, isMaskAgnostic: true };
+
+  /** vtype 의 아래 8비트: vma(7) vta(6) vsew(5:3) vlmul(2:0) */
+  function encodeVectorType(elementCode, multiplierCode, isTailAgnostic, isMaskAgnostic) {
+    let value = (elementCode << 3) | multiplierCode;
+    if (isTailAgnostic) value |= 1 << 6;
+    if (isMaskAgnostic) value |= 1 << 7;
+    return value;
+  }
+
+  function encodeConfiguration(form, destination, source, immediateLength, typeSource, vectorType) {
+    const common = (FUNCT3_CONFIGURATION << 12) | (destination << 7) | OPCODE_VECTOR;
+    if (form === "vsetvli") return ((vectorType << 20) | (source << 15) | common) >>> 0;
+    if (form === "vsetivli") return ((0b11 << 30) | (vectorType << 20) | (immediateLength << 15) | common) >>> 0;
+    return ((1 << 31) | (typeSource << 20) | (source << 15) | common) >>> 0;
+  }
+
+  function binary(value, width) {
+    return value.toString(2).padStart(width, "0");
+  }
+  function field(high, low, name, value, className) {
+    const width = high - low + 1;
+    let range = "<span>" + high + "</span>";
+    if (width > 1) range = "<span>" + high + "</span><span>" + low + "</span>";
+    return '<div class="field ' + className + '" style="flex-grow:' + width + '"><div class="range">' + range + '</div><div class="name">' + name + '</div><div class="value">' + value + "</div></div>";
+  }
+
+  function describeApplicationLength() {
+    if (state.form === "vsetivli") return { label: String(state.immediateLength), note: "AVL은 즉시값 " + state.immediateLength + "이다." };
+    if (state.source !== 0) return { label: "x[" + REGISTER_NAMES[state.source] + "]", note: "AVL은 " + REGISTER_NAMES[state.source] + "에 든 값이다(보통의 스트립 마이닝)." };
+    if (state.destination !== 0) return { label: "~0 → VLMAX", note: "rs1=x0, rd≠x0: AVL을 최대 부호 없는 수로 보아 vl=VLMAX로 만들고 rd에도 쓴다." };
+    return { label: "현재 vl", note: "rs1=x0, rd=x0: vl은 그대로 두고 vtype만 바꾼다. 새 설정의 VLMAX가 달라지면 예약된 사용이다." };
+  }
+
+  function render() {
+    const vectorType = encodeVectorType(state.elementCode, state.multiplierCode, state.isTailAgnostic, state.isMaskAgnostic);
+    const word = encodeConfiguration(state.form, state.destination, state.source, state.immediateLength, state.typeSource, vectorType);
+    const typeText = "e" + ELEMENT_WIDTH_BY_CODE[state.elementCode] + ", " + MULTIPLIER_NAME_BY_CODE[state.multiplierCode] + ", " + (state.isTailAgnostic ? "ta" : "tu") + ", " + (state.isMaskAgnostic ? "ma" : "mu");
+    let assembly = "";
+    const fields = [];
+    const typeFields = [
+      field(27, 27, "vma", state.isMaskAgnostic ? "1" : "0", "function"),
+      field(26, 26, "vta", state.isTailAgnostic ? "1" : "0", "function"),
+      field(25, 23, "vsew", binary(state.elementCode, 3), "immediate"),
+      field(22, 20, "vlmul", binary(state.multiplierCode, 3), "immediate"),
+    ];
+    const tailFields = [
+      field(14, 12, "funct3", "111", "function"),
+      field(11, 7, "rd", binary(state.destination, 5), "register"),
+      field(6, 0, "OP-V", binary(OPCODE_VECTOR, 7), "opcode"),
+    ];
+    if (state.form === "vsetvli") {
+      assembly = "vsetvli " + REGISTER_NAMES[state.destination] + ", " + REGISTER_NAMES[state.source] + ", " + typeText;
+      fields.push(field(31, 31, "0", "0", "plain"), field(30, 28, "zimm[10:8]", "000", "plain"));
+      fields.push(...typeFields, field(19, 15, "rs1", binary(state.source, 5), "register"), ...tailFields);
+    } else if (state.form === "vsetivli") {
+      assembly = "vsetivli " + REGISTER_NAMES[state.destination] + ", " + state.immediateLength + ", " + typeText;
+      fields.push(field(31, 30, "11", "11", "plain"), field(29, 28, "zimm[9:8]", "00", "plain"));
+      fields.push(...typeFields, field(19, 15, "uimm", binary(state.immediateLength, 5), "immediate"), ...tailFields);
+    } else {
+      assembly = "vsetvl " + REGISTER_NAMES[state.destination] + ", " + REGISTER_NAMES[state.source] + ", " + REGISTER_NAMES[state.typeSource];
+      fields.push(field(31, 31, "1", "1", "plain"), field(30, 25, "000000", "000000", "plain"));
+      fields.push(field(24, 20, "rs2", binary(state.typeSource, 5), "register"), field(19, 15, "rs1", binary(state.source, 5), "register"), ...tailFields);
+    }
+    document.getElementById("encoder-assembly").textContent = assembly;
+    document.getElementById("encoder-bitfield").innerHTML = fields.join("");
+    const lengthDescription = describeApplicationLength();
+    let note = lengthDescription.note;
+    if (state.form === "vsetvl") note += " vtype 값 " + book.toHex(vectorType, 8) + " (" + typeText + ")은 명령이 아니라 " + REGISTER_NAMES[state.typeSource] + " 레지스터에 미리 넣어 둔다. 문맥 복원에 쓰는 형태다.";
+    document.getElementById("encoder-note").textContent = note;
+    document.getElementById("encoder-word").textContent = book.toHex(word, 32);
+    document.getElementById("encoder-vtype").textContent = book.toHex(vectorType, 8);
+    document.getElementById("encoder-avl").textContent = lengthDescription.label;
+    const maximumVectorLength = MULTIPLIER_BY_CODE[state.multiplierCode] * DEMONSTRATION_REGISTER_LENGTH / ELEMENT_WIDTH_BY_CODE[state.elementCode];
+    document.getElementById("encoder-vlmax").textContent = maximumVectorLength >= 1 ? String(maximumVectorLength) : "< 1 (vill)";
+  }
+
+  const sourceControl = document.getElementById("encoder-rs1-control");
+  const immediateControl = document.getElementById("encoder-uimm-control");
+  const typeSourceControl = document.getElementById("encoder-rs2-control");
+  book.segmented("encoder-form", (value) => {
+    state.form = value;
+    sourceControl.hidden = value === "vsetivli";
+    immediateControl.hidden = value !== "vsetivli";
+    typeSourceControl.hidden = value !== "vsetvl";
+    render();
+  });
+  document.getElementById("encoder-rd").addEventListener("change", (event) => { state.destination = Number(event.target.value); render(); });
+  document.getElementById("encoder-rs1").addEventListener("change", (event) => { state.source = Number(event.target.value); render(); });
+  document.getElementById("encoder-rs2").addEventListener("change", (event) => { state.typeSource = Number(event.target.value); render(); });
+  book.range("encoder-uimm", (value) => { state.immediateLength = value; render(); });
+  book.segmented("encoder-sew", (value) => { state.elementCode = Number(value); render(); });
+  book.segmented("encoder-lmul", (value) => { state.multiplierCode = Number(value); render(); });
+  book.segmented("encoder-tail", (value) => { state.isTailAgnostic = value === "1"; render(); });
+  book.segmented("encoder-mask", (value) => { state.isMaskAgnostic = value === "1"; render(); });
+  render();
+})();
+
+/* ---------------------------------------------------------------------------
+   스트립 마이닝 애니메이션: 배열 원소가 vl개씩 벡터 레지스터 레인으로
+   내려가 더해진 뒤 돌아온다. VLEN 을 바꿔도 코드는 같다는 것을 보여 준다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const ELEMENT_WIDTH = 32;
+  const SECONDS_PER_ITERATION = 1.7;
+  const MOVE_DOWN_END = 0.35;
+  const COMPUTE_END = 0.65;
+  const MARGIN = 14;
+  const ARRAY_TOP = 30;
+  const NARROW_COLUMNS = 16;
+  const WIDE_COLUMNS = 32;
+  const WIDE_LAYOUT_WIDTH = 520;
+  const LANE_HEIGHT = 30;
+  const MINIMUM_WIDTH_FOR_NUMBERS = 17;
+  const COMPARED_REGISTER_LENGTHS = [128, 256, 512, 1024];
+
+  const state = { elementCount: 37, registerLength: 128, groupMultiplier: 4, policy: "maximum", completedCount: 0, progress: 0, isAnimating: false, isAutoPlaying: false, chunks: [] };
+
+  /** 스트립 마이닝이 만드는 반복별 (시작, vl) 목록. policy 가 "even" 이면 VLMAX < AVL < 2·VLMAX 에서 ceil(AVL/2) 를 고른다. */
+  function buildChunks(elementCount, maximumVectorLength, policy) {
+    const chunks = [];
+    let remaining = elementCount;
+    let start = 0;
+    while (remaining > 0) {
+      let length = maximumVectorLength;
+      if (remaining <= maximumVectorLength) {
+        length = remaining;
+      } else if (remaining < 2 * maximumVectorLength && policy === "even") {
+        length = Math.ceil(remaining / 2);
+      }
+      chunks.push({ start, length });
+      start += length;
+      remaining -= length;
+    }
+    return chunks;
+  }
+
+  function maximumVectorLength() {
+    return state.groupMultiplier * state.registerLength / ELEMENT_WIDTH;
+  }
+
+  const canvasElement = document.getElementById("strip-canvas");
+  function chunkColor(colors, chunkIndex) {
+    const chunkColors = [colors.accent, colors.teal, colors.violet, colors.gold];
+    return chunkColors[chunkIndex % chunkColors.length];
+  }
+
+  function draw(context, width, height, colors) {
+    const columns = width < WIDE_LAYOUT_WIDTH ? NARROW_COLUMNS : WIDE_COLUMNS;
+    const cellPitch = (width - 2 * MARGIN) / columns;
+    const cellSize = Math.min(cellPitch - 3, 24);
+    const rows = Math.ceil(state.elementCount / columns);
+    const arrayBottom = ARRAY_TOP + rows * (cellSize + 4);
+    const vectorMaximum = maximumVectorLength();
+    const freeSpace = height - arrayBottom - LANE_HEIGHT - 34;
+    const laneTop = arrayBottom + Math.max(44, freeSpace / 2 + 22);
+    const lanePitch = (width - 2 * MARGIN) / vectorMaximum;
+
+    book.drawText(context, "메모리의 배열 x[0.." + (state.elementCount - 1) + "] (e32)", MARGIN, 14, { size: 12, bold: true, color: colors.dim });
+
+    const arrayPosition = (elementIndex) => ({
+      x: MARGIN + (elementIndex % columns) * cellPitch,
+      y: ARRAY_TOP + Math.floor(elementIndex / columns) * (cellSize + 4),
+      width: cellSize,
+      height: cellSize,
+    });
+    const lanePosition = (laneIndex) => ({ x: MARGIN + laneIndex * lanePitch + 0.5, y: laneTop, width: Math.max(1, lanePitch - 1), height: LANE_HEIGHT });
+
+    const currentChunk = state.isAnimating ? state.chunks[state.completedCount] : null;
+    const chunkOfElement = (elementIndex) => state.chunks.findIndex((chunk) => elementIndex >= chunk.start && elementIndex < chunk.start + chunk.length);
+
+    // 배열 칸: 끝난 반복은 그 반복의 색, 아직 안 한 칸은 회색
+    for (let elementIndex = 0; elementIndex < state.elementCount; elementIndex += 1) {
+      const chunkIndex = chunkOfElement(elementIndex);
+      const position = arrayPosition(elementIndex);
+      const isMoving = currentChunk && chunkIndex === state.completedCount;
+      book.roundedRectangle(context, position.x, position.y, position.width, position.height, 4);
+      if (chunkIndex < state.completedCount) {
+        context.fillStyle = chunkColor(colors, chunkIndex);
+        context.fill();
+      } else {
+        context.fillStyle = colors.surface;
+        context.fill();
+        context.strokeStyle = isMoving ? colors.gold : colors.border;
+        context.lineWidth = isMoving ? 1.5 : 1;
+        context.stroke();
+      }
+    }
+
+    // 배열과 레인 사이: 로드는 내려가고 저장은 올라간다
+    const gapMiddle = (arrayBottom + laneTop - 14) / 2;
+    if (laneTop - arrayBottom > 70) {
+      book.drawArrow(context, MARGIN + 30, gapMiddle - 14, MARGIN + 30, gapMiddle + 14, { color: colors.faint, width: 1.5, headSize: 7 });
+      book.drawText(context, "vle32.v", MARGIN + 42, gapMiddle, { size: 12, color: colors.faint, mono: true });
+      book.drawArrow(context, width - MARGIN - 30, gapMiddle + 14, width - MARGIN - 30, gapMiddle - 14, { color: colors.faint, width: 1.5, headSize: 7 });
+      book.drawText(context, "vse32.v", width - MARGIN - 42, gapMiddle, { size: 12, color: colors.faint, mono: true, align: "right" });
+    }
+
+    // 레인 줄
+    book.drawText(context, "벡터 레지스터 그룹: VLMAX = " + state.groupMultiplier + "×" + state.registerLength + "/32 = " + vectorMaximum + " 레인", MARGIN, laneTop - 14, { size: 12, bold: true, color: colors.dim });
+    for (let laneIndex = 0; laneIndex < vectorMaximum; laneIndex += 1) {
+      const position = lanePosition(laneIndex);
+      const isTailLane = currentChunk && laneIndex >= currentChunk.length;
+      context.fillStyle = isTailLane ? colors.goldSoft : colors.surface;
+      context.fillRect(position.x, position.y, position.width, position.height);
+    }
+
+    // 움직이는 원소: 내려가고(0–0.35) 더해지고(–0.65) 올라간다(–1)
+    if (currentChunk) {
+      const progress = state.progress;
+      for (let laneIndex = 0; laneIndex < currentChunk.length; laneIndex += 1) {
+        const from = arrayPosition(currentChunk.start + laneIndex);
+        const to = lanePosition(laneIndex);
+        let fraction = 1;
+        if (progress < MOVE_DOWN_END) fraction = book.easeInOut(progress / MOVE_DOWN_END);
+        if (progress > COMPUTE_END) fraction = 1 - book.easeInOut((progress - COMPUTE_END) / (1 - COMPUTE_END));
+        const x = book.linearInterpolate(from.x, to.x, fraction);
+        const y = book.linearInterpolate(from.y, to.y, fraction);
+        const boxWidth = book.linearInterpolate(from.width, to.width, fraction);
+        const boxHeight = book.linearInterpolate(from.height, to.height, fraction);
+        const isComputed = progress >= MOVE_DOWN_END;
+        context.fillStyle = isComputed ? chunkColor(colors, state.completedCount) : colors.gold;
+        book.roundedRectangle(context, x, y, boxWidth, boxHeight, Math.min(4, boxWidth / 2));
+        context.fill();
+        if (boxWidth >= MINIMUM_WIDTH_FOR_NUMBERS) {
+          book.drawText(context, String(currentChunk.start + laneIndex), x + boxWidth / 2, y + boxHeight / 2, { size: 10, color: colors.onAccent, align: "center", mono: true, bold: true });
+        }
+      }
+      if (progress >= MOVE_DOWN_END && progress <= COMPUTE_END) {
+        book.drawText(context, "vadd.vv — 이번 vl = " + currentChunk.length, width / 2, laneTop + LANE_HEIGHT + 16, { size: 13, bold: true, color: colors.gold, align: "center" });
+      }
+    } else if (state.completedCount >= state.chunks.length && state.chunks.length > 0) {
+      book.drawText(context, "a0 = 0 → bnez 를 지나 루프 종료", width / 2, laneTop + LANE_HEIGHT + 16, { size: 13, bold: true, color: colors.ok, align: "center" });
+    }
+  }
+
+  const canvas = book.createCanvas(canvasElement, draw, { aspectRatio: 0.42, minimumHeight: 330, maximumHeight: 390 });
+
+  function updateReadout() {
+    const vectorMaximum = maximumVectorLength();
+    let processed = 0;
+    for (let chunkIndex = 0; chunkIndex < state.completedCount; chunkIndex += 1) processed += state.chunks[chunkIndex].length;
+    const activeChunk = state.chunks[state.isAnimating ? state.completedCount : state.completedCount - 1];
+    document.getElementById("strip-vlmax").textContent = String(vectorMaximum);
+    document.getElementById("strip-vl").textContent = activeChunk ? String(activeChunk.length) : "—";
+    document.getElementById("strip-remaining").textContent = String(state.elementCount - processed);
+    document.getElementById("strip-iterations").textContent = state.completedCount + " / " + state.chunks.length;
+    const comparison = COMPARED_REGISTER_LENGTHS.map((registerLength) => {
+      const count = buildChunks(state.elementCount, state.groupMultiplier * registerLength / ELEMENT_WIDTH, state.policy).length;
+      const text = "VLEN " + registerLength + " → " + count + "회";
+      if (registerLength === state.registerLength) return "<b>" + text + "</b>";
+      return text;
+    }).join(" · ");
+    let lead = "<b>한 반복</b>을 눌러 시작하자. ";
+    if (activeChunk) {
+      lead = "반복 " + (state.isAnimating ? state.completedCount + 1 : state.completedCount) + ": vsetvli 가 AVL=" + (state.elementCount - activeChunk.start) + "에 대해 vl=" + activeChunk.length + "을 돌려준다 → x[" + activeChunk.start + "…" + (activeChunk.start + activeChunk.length - 1) + "] 처리. ";
+    }
+    if (!state.isAnimating && state.completedCount >= state.chunks.length) lead = "끝. 같은 코드가 " + state.chunks.length + "번 반복했다. ";
+    document.getElementById("strip-description").innerHTML = lead + "같은 바이너리의 반복 횟수(n=" + state.elementCount + ", " + "m" + state.groupMultiplier + "): " + comparison;
+  }
+
+  const loop = book.animationLoop(canvasElement, (deltaSeconds) => {
+    if (!state.isAnimating) return;
+    state.progress += deltaSeconds / SECONDS_PER_ITERATION;
+    if (state.progress >= 1) {
+      state.isAnimating = false;
+      state.progress = 0;
+      state.completedCount += 1;
+      if (state.isAutoPlaying && state.completedCount < state.chunks.length) startIteration();
+      else if (state.completedCount >= state.chunks.length) stopAutoPlay();
+      updateReadout();
+    }
+    canvas.redraw();
+  });
+
+  function startIteration() {
+    if (state.completedCount < state.chunks.length) {
+      state.isAnimating = true;
+      state.progress = 0;
+      // 동작 줄이기가 켜져 있으면 애니메이션 없이 곧바로 한 반복을 마친다
+      if (!loop.isRunning()) {
+        state.isAnimating = false;
+        state.completedCount += 1;
+      }
+    }
+    updateReadout();
+    canvas.redraw();
+  }
+  function finishCurrentIteration() {
+    if (!state.isAnimating) return;
+    state.isAnimating = false;
+    state.progress = 0;
+    state.completedCount += 1;
+  }
+  const playButton = document.getElementById("strip-play");
+  function stopAutoPlay() {
+    state.isAutoPlaying = false;
+    playButton.textContent = "자동 재생";
+  }
+  function restart() {
+    stopAutoPlay();
+    state.chunks = buildChunks(state.elementCount, maximumVectorLength(), state.policy);
+    state.completedCount = 0;
+    state.progress = 0;
+    state.isAnimating = false;
+    updateReadout();
+    canvas.redraw();
+  }
+
+  document.getElementById("strip-step").addEventListener("click", () => {
+    stopAutoPlay();
+    if (state.isAnimating) finishCurrentIteration();
+    else if (state.completedCount >= state.chunks.length) {
+      restart();
+      return;
+    }
+    if (!state.isAnimating) startIteration();
+  });
+  playButton.addEventListener("click", () => {
+    if (state.isAutoPlaying) {
+      stopAutoPlay();
+      return;
+    }
+    if (state.completedCount >= state.chunks.length) restart();
+    state.isAutoPlaying = true;
+    playButton.textContent = "멈춤";
+    if (!loop.isRunning()) loop.start();
+    if (!state.isAnimating) startIteration();
+  });
+  document.getElementById("strip-reset").addEventListener("click", restart);
+  book.range("strip-count", (value) => { state.elementCount = value; restart(); }, (value) => String(value));
+  book.segmented("strip-vlen", (value) => { state.registerLength = Number(value); restart(); });
+  book.segmented("strip-lmul", (value) => { state.groupMultiplier = Number(value); restart(); });
+  book.segmented("strip-policy", (value) => { state.policy = value; restart(); });
+})();
+
+/* ---------------------------------------------------------------------------
+   마스크와 꼬리 정책: 원소마다 prestart/active/inactive/tail 을 가르고
+   undisturbed/agnostic 정책에 따라 결과 v4 를 보여 준다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const ELEMENT_COUNT = 8;
+  const ALL_ONES_TEXT = "FFFF";            // SEW=16 의 모두 1
+  const INITIAL_MASK = [1, 0, 1, 1, 0, 1, 1, 0];
+  const OLD_VALUES = [100, 101, 102, 103, 104, 105, 106, 107];
+  const FIRST_SOURCE = [10, 20, 30, 40, 50, 60, 70, 80];
+  const SECOND_SOURCE = [1, 2, 3, 4, 5, 6, 7, 8];
+
+  const state = { mask: INITIAL_MASK.slice(), isMasked: true, vectorLength: 6, startIndex: 0, tailPolicy: "undisturbed", inactivePolicy: "undisturbed", agnosticChoices: [] };
+
+  function rollAgnosticChoices() {
+    state.agnosticChoices = Array.from({ length: ELEMENT_COUNT }, () => Math.random() < 0.5);
+  }
+
+  /** 원소 하나의 분류와 결과. 규격의 prestart/body/tail 정의와 "vstart ≥ vl 이면 아무것도 바꾸지 않는다" 규칙을 따른다. */
+  function classifyElement(index, configuration) {
+    if (configuration.startIndex >= configuration.vectorLength) return { kind: "unchanged", isAgnostic: false };
+    if (index < configuration.startIndex) return { kind: "prestart", isAgnostic: false };
+    if (index < configuration.vectorLength) {
+      const isEnabled = !configuration.isMasked || configuration.mask[index] === 1;
+      if (isEnabled) return { kind: "active", isAgnostic: false };
+      return { kind: "inactive", isAgnostic: configuration.inactivePolicy === "agnostic" };
+    }
+    return { kind: "tail", isAgnostic: configuration.tailPolicy === "agnostic" };
+  }
+
+  const indexRow = document.getElementById("mask-index-row");
+  const bitRow = document.getElementById("mask-bit-row");
+  const newRow = document.getElementById("mask-new-row");
+  const oldRow = document.getElementById("mask-old-row");
+  const resultRow = document.getElementById("mask-result-row");
+
+  indexRow.innerHTML = OLD_VALUES.map((value, index) => '<div class="lane-cell index">' + index + "</div>").join("");
+  newRow.innerHTML = FIRST_SOURCE.map((value, index) => '<div class="lane-cell">' + (value + SECOND_SOURCE[index]) + "</div>").join("");
+  oldRow.innerHTML = OLD_VALUES.map((value) => '<div class="lane-cell prestart">' + value + "</div>").join("");
+
+  function renderMaskBits() {
+    bitRow.innerHTML = state.mask.map((bit, index) => '<div class="bit' + (bit ? " on" : "") + '" data-index="' + index + '" role="button" tabindex="0" aria-label="v0 마스크 비트 ' + index + '">' + bit + "</div>").join("");
+  }
+  bitRow.addEventListener("click", (event) => {
+    const target = event.target.closest(".bit");
+    if (!target) return;
+    const index = Number(target.dataset.index);
+    state.mask[index] = state.mask[index] ? 0 : 1;
+    render();
+  });
+
+  function render() {
+    renderMaskBits();
+    const counts = { active: 0, inactive: 0, tail: 0 };
+    resultRow.innerHTML = OLD_VALUES.map((oldValue, index) => {
+      const classification = classifyElement(index, state);
+      let text = String(oldValue);
+      const classNames = ["lane-cell"];
+      if (classification.kind === "active") text = String(FIRST_SOURCE[index] + SECOND_SOURCE[index]);
+      if (classification.isAgnostic && state.agnosticChoices[index]) {
+        text = ALL_ONES_TEXT;
+        classNames.push("all-ones");
+      }
+      if (classification.kind === "unchanged") classNames.push("prestart");
+      else classNames.push(classification.kind);
+      if (classification.isAgnostic) classNames.push("agnostic");
+      if (counts[classification.kind] !== undefined) counts[classification.kind] += 1;
+      return '<div class="' + classNames.join(" ") + '">' + text + "</div>";
+    }).join("");
+    document.getElementById("mask-active-count").textContent = String(counts.active);
+    document.getElementById("mask-inactive-count").textContent = String(counts.inactive);
+    document.getElementById("mask-tail-count").textContent = String(counts.tail);
+
+    const tailText = state.tailPolicy === "agnostic" ? "ta" : "tu";
+    const inactiveText = state.inactivePolicy === "agnostic" ? "ma" : "mu";
+    document.getElementById("mask-assembly").textContent = "vsetvli t0, a0, e16, m1, " + tailText + ", " + inactiveText + "   →   vadd.vv v4, v8, v12" + (state.isMasked ? ", v0.t" : "");
+    let description = "vl=" + state.vectorLength + ", vstart=" + state.startIndex + ". ";
+    if (state.startIndex >= state.vectorLength) {
+      description += "<b>vstart ≥ vl</b> 이라 body가 없다. 규격에 따라 tail의 agnostic 값도 쓰지 않으므로 v4는 하나도 바뀌지 않는다.";
+    } else {
+      description += "active " + counts.active + "개만 새 값을 받는다. ";
+      if (!state.isMasked) description += "vm=1이라 body의 모든 원소가 active다. ";
+      if (state.inactivePolicy === "agnostic" && counts.inactive > 0) description += "inactive는 ma라서 원소마다 이전 값 또는 FFFF가 된다. ";
+      if (state.tailPolicy === "agnostic" && counts.tail > 0) description += "tail은 ta라서 원소마다 이전 값 또는 FFFF가 된다. ";
+      if (state.startIndex > 0) description += "앞의 " + state.startIndex + "개는 prestart라 손대지 않는다(트랩 뒤 재개하는 상황).";
+    }
+    document.getElementById("mask-description").innerHTML = description;
+  }
+
+  book.segmented("mask-vm", (value) => { state.isMasked = value === "0"; render(); });
+  book.range("mask-vl", (value) => { state.vectorLength = value; render(); });
+  book.range("mask-vstart", (value) => { state.startIndex = value; render(); });
+  book.segmented("mask-tail", (value) => { state.tailPolicy = value; render(); });
+  book.segmented("mask-inactive", (value) => { state.inactivePolicy = value; render(); });
+  document.getElementById("mask-reroll").addEventListener("click", () => { rollAgnosticChoices(); render(); });
+  rollAgnosticChoices();
+  render();
+})();
+</script>
+</body>
+</html>

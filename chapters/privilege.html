@@ -1,0 +1,1894 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>17 특권 모드와 CSR · RISC-V Book</title>
+<meta name="description" content="RISC-V의 M·S·U 특권 모드가 왜 필요한지, 12비트 CSR 주소에 접근 권한이 어떻게 새겨져 있는지, misa·mstatus·sstatus와 WARL 규칙, 카운터 접근 제어, Smstateen·Smcsrind를 그림과 시뮬레이터로 해부한다.">
+<link rel="icon" href="../assets/img/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/style.css">
+<script src="../assets/js/book.js"></script>
+<style>
+  /* CSR 주소 해독기 */
+  .decoder-layout { display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr); }
+  .bit-groups { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: flex-start; }
+  .bit-group { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+  .bit-group .bit-row { flex-wrap: nowrap; }
+  .bit-group .bit-caption { font-size: 11.5px; font-family: var(--mono); color: var(--text-faint); border-top: 2px solid var(--border); padding-top: 2px; width: 100%; text-align: center; }
+  .bit-group.access .bit-caption { border-color: var(--accent-2); color: var(--accent-2); }
+  .bit-group.privilege .bit-caption { border-color: var(--accent); color: var(--accent); }
+  .bit-group .bit-number { font-size: 10px; color: var(--text-faint); font-family: var(--mono); display: flex; gap: 3px; }
+  .bit-group .bit-number span { width: 26px; text-align: center; }
+  @media (max-width: 520px) { .bit-group .bit, .bit-group .bit-number span { width: 22px; } }
+  .access-matrix { width: 100%; border-collapse: collapse; font-size: 14px; }
+  .access-matrix th, .access-matrix td { text-align: center; padding: 7px 6px; border: 1px solid var(--border); }
+  .access-matrix th { background: var(--surface); }
+  .access-matrix td.allowed { background: var(--ok-soft); color: var(--ok); font-weight: 700; }
+  .access-matrix td.denied { background: var(--bad-soft); color: var(--bad); font-weight: 700; }
+  .access-matrix td.conditional { background: var(--warn-soft); color: var(--warn); font-weight: 700; }
+  .decoder-notes { font-size: 14.5px; color: var(--text-dim); line-height: 1.65; }
+  .decoder-notes b { color: var(--text); }
+  .csr-map-cell { cursor: pointer; }
+  .csr-map-cell:hover { stroke: var(--text); stroke-width: 2; }
+
+  /* mstatus 탐색기 */
+  .mstatus-layout { display: grid; grid-template-columns: minmax(0, 1fr); }
+  .mstatus-field { cursor: pointer; transition: opacity 0.2s; }
+  .mstatus-field:hover rect, .mstatus-field.selected rect { stroke-width: 2.6; }
+  .mstatus-field.is-dimmed { opacity: 0.16; }
+  .field-detail { padding: 16px 18px; border-top: 1px solid var(--border); font-size: 15px; min-height: 150px; }
+  .field-detail h4 { margin: 0 0 4px; font-size: 18px; }
+  .field-detail .field-bits { font-family: var(--mono); font-size: 13px; color: var(--accent-2); font-weight: 700; }
+  .field-detail p { margin: 8px 0; color: var(--text-dim); }
+  .field-detail .pill { margin-right: 4px; }
+
+  /* misa 만들기 */
+  .letter-grid { display: grid; gap: 6px; grid-template-columns: repeat(auto-fill, minmax(44px, 1fr)); }
+  .letter-button { font: inherit; font-family: var(--mono); font-weight: 700; font-size: 16px; padding: 6px 0 2px; border-radius: 9px; border: 1px solid var(--border); background: var(--surface); color: var(--text-dim); cursor: pointer; display: flex; flex-direction: column; align-items: center; line-height: 1.2; }
+  .letter-button small { font-size: 10px; font-weight: 400; color: var(--text-faint); }
+  .letter-button.on { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+  .letter-button.on small { color: var(--on-accent); opacity: 0.8; }
+  .letter-button:disabled { opacity: 0.35; cursor: not-allowed; }
+  .letter-button.is-forced { outline: 2px dashed var(--bad); outline-offset: 1px; }
+  .misa-binary { font-family: var(--mono); font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; color: var(--text-dim); }
+  .misa-binary .one { color: var(--accent); font-weight: 700; }
+  .misa-binary .mxl { color: var(--accent-2); font-weight: 700; }
+  .warning-line { color: var(--bad); font-weight: 700; }
+
+  /* 카운터 문 */
+  .gate-grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+  .gate-box { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; background: var(--bg-elev); }
+  .gate-box h4 { margin: 0 0 6px !important; font-size: 14px !important; font-family: var(--mono); }
+  .gate-box .checkbox { margin-right: 12px; }
+  .gate-result { width: 100%; border-collapse: collapse; font-size: 14px; }
+  .gate-result th, .gate-result td { padding: 6px 8px; border: 1px solid var(--border); text-align: center; }
+  .gate-result th { background: var(--surface); }
+  .gate-result td.allowed { background: var(--ok-soft); color: var(--ok); font-weight: 700; }
+  .gate-result td.denied { background: var(--bad-soft); color: var(--bad); font-weight: 700; }
+  .gate-result td.stopped { color: var(--warn); font-weight: 700; }
+</style>
+</head>
+<body data-chapter="privilege">
+<main class="chapter">
+  <header class="chapter-hero">
+    <div class="eyebrow">Chapter 17</div>
+    <h1>특권 모드와 CSR</h1>
+    <p class="lead">응용 프로그램은 운영체제를, 운영체제는 펌웨어를 함부로 건드려서는 안 된다. 누구나 실수하고, 누군가는 악의를 품기 때문이다. RISC-V는 하트가 지금 얼마만큼의 권한으로 명령을 실행하는지를 <strong>특권 모드</strong>로 나누고, 하트의 동작을 조절하는 스위치와 계기판을 <strong>CSR(제어·상태 레지스터)</strong>이라는 4096칸짜리 별도 주소 공간에 모아 두었다. 이 장에서는 M·S·U 세 모드가 왜 필요한지, CSR 주소 자체에 접근 권한이 어떻게 새겨져 있는지, 그리고 misa·mstatus 같은 핵심 레지스터를 필드 단위로 해부한다.</p>
+    <ul class="objectives">
+      <li>특권 수준이 왜 필요한지, M·S·U 모드의 역할과 허용되는 조합을 설명한다.</li>
+      <li>하트는 한 번에 한 모드로만 실행되며, 모드는 트랩과 xRET으로만 바뀐다는 점을 이해한다.</li>
+      <li>12비트 CSR 주소의 위쪽 4비트만 보고 최소 특권과 읽기 전용 여부를 판정한다.</li>
+      <li>misa로 하트의 ISA를 읽고, mstatus·sstatus의 각 필드가 하는 일을 안다.</li>
+      <li>WPRI·WLRL·WARL 규칙의 차이와, 이를 이용해 하드웨어 기능을 알아내는 방법을 안다.</li>
+      <li>카운터 접근 제어(mcounteren·scounteren·mcountinhibit), Smstateen, Smcsrind의 목적을 안다.</li>
+    </ul>
+    <div class="spec-meta">
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/priv/priv-intro.html" target="_blank" rel="noopener">Privileged · Introduction</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/priv/priv-csrs.html" target="_blank" rel="noopener">Ch.1 CSRs</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/priv/machine.html" target="_blank" rel="noopener">Ch.2 Machine-Level ISA 1.13</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/priv/supervisor.html" target="_blank" rel="noopener">Ch.11 Supervisor-Level ISA 1.13</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/priv/smstateen.html" target="_blank" rel="noopener">Smstateen</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/priv/indirect-csr.html" target="_blank" rel="noopener">Smcsrind</a>
+    </div>
+  </header>
+
+  <!-- ============================================================ -->
+  <section id="levels">
+    <h2>왜 특권 수준이 필요한가</h2>
+    <p>한 대의 컴퓨터 위에서 웹 브라우저, 운영체제 커널, 부팅 펌웨어가 함께 돈다. 브라우저의 버그가 커널 메모리를 덮어쓰거나, 악성 앱이 디스크 컨트롤러를 직접 조작할 수 있다면 시스템 전체가 위험해진다. 그래서 하드웨어는 <b>“지금 실행 중인 코드가 무엇을 할 수 있는가”</b>를 구분해야 한다. 이 구분이 <span class="term">특권 수준</span><span class="english">(privilege level)</span>이다. 규격은 특권 수준을 소프트웨어 스택의 구성 요소 사이를 보호하는 수단으로 정의하고, 현재 모드에서 허락되지 않은 일을 하려 하면 예외가 발생한다고 정한다.</p>
+    <p>RISC-V 하트는 언제나 어느 한 특권 수준에서 실행되며, 그 수준은 2비트로 표현된다. 지금 정의된 수준은 셋이다.</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th class="number">레벨</th><th>인코딩</th><th>이름</th><th>약자</th><th>주로 실행하는 것</th></tr></thead>
+      <tbody>
+        <tr><td class="number">0</td><td><code>00</code></td><td>User/Application</td><td><b>U</b></td><td>응용 프로그램</td></tr>
+        <tr><td class="number">1</td><td><code>01</code></td><td>Supervisor</td><td><b>S</b></td><td>운영체제 커널</td></tr>
+        <tr><td class="number">2</td><td><code>10</code></td><td><i>Reserved</i></td><td>—</td><td>예약 (모드로는 쓰지 않음)</td></tr>
+        <tr><td class="number">3</td><td><code>11</code></td><td>Machine</td><td><b>M</b></td><td>펌웨어, SBI 구현, 보안 모니터</td></tr>
+      </tbody>
+    </table></div>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 840 400" role="img" aria-label="특권 모드 사다리. 아래의 U에서 위의 M으로 트랩이 올라가고, sret과 mret으로 내려온다.">
+        <defs>
+          <marker id="ladder-arrow-up" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent-2)"/></marker>
+          <marker id="ladder-arrow-down" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker>
+          <path id="ladder-path-u-to-s" d="M672 332 C 740 332, 740 232, 676 232"/>
+          <path id="ladder-path-s-to-m" d="M672 222 C 740 222, 740 122, 676 122"/>
+          <path id="ladder-path-s-to-u" d="M168 232 C 100 232, 100 332, 164 332"/>
+          <path id="ladder-path-m-to-s" d="M168 122 C 100 122, 100 222, 164 222"/>
+        </defs>
+        <text x="20" y="44" class="t-faint">특권 높음 ▲</text>
+        <text x="20" y="390" class="t-faint">특권 낮음 ▼</text>
+        <!-- 디버그 모드 -->
+        <rect x="170" y="14" width="500" height="50" rx="10" fill="none" stroke="var(--violet)" stroke-dasharray="6 5" stroke-width="1.5"/>
+        <text x="420" y="36" text-anchor="middle" class="t-violet" style="font-size:14px">D 모드 (디버그) — 선택 사항</text>
+        <text x="420" y="54" text-anchor="middle" class="t-faint">외부 디버거가 하트를 멈췄을 때만 들어가며, M보다도 많은 접근 권한을 가진다</text>
+        <!-- M -->
+        <rect x="170" y="82" width="500" height="80" rx="12" class="f-gold-soft"/>
+        <rect x="186" y="104" width="58" height="36" rx="8" class="f-gold"/>
+        <text x="215" y="127" text-anchor="middle" class="t-mono t-bold" style="fill:var(--on-accent)">11</text>
+        <text x="262" y="114" class="t t-bold">M 모드 · Machine</text>
+        <text x="262" y="136" class="t-dim">펌웨어 · SBI 구현(OpenSBI 등) · 보안 모니터</text>
+        <text x="262" y="154" class="t-faint">모든 하트에 반드시 있는 유일한 모드</text>
+        <!-- S -->
+        <rect x="170" y="182" width="500" height="80" rx="12" class="f-violet-soft"/>
+        <rect x="186" y="204" width="58" height="36" rx="8" fill="var(--violet)"/>
+        <text x="215" y="227" text-anchor="middle" class="t-mono t-bold" style="fill:var(--on-accent)">01</text>
+        <text x="262" y="214" class="t t-bold">S 모드 · Supervisor</text>
+        <text x="262" y="236" class="t-dim">운영체제 커널 · 가상 메모리 관리</text>
+        <text x="262" y="254" class="t-faint">H 확장이 있으면 HS 모드로 하이퍼바이저도 실행 (21장)</text>
+        <!-- U -->
+        <rect x="170" y="282" width="500" height="80" rx="12" class="f-teal-soft"/>
+        <rect x="186" y="304" width="58" height="36" rx="8" fill="var(--teal)"/>
+        <text x="215" y="327" text-anchor="middle" class="t-mono t-bold" style="fill:var(--on-accent)">00</text>
+        <text x="262" y="314" class="t t-bold">U 모드 · User</text>
+        <text x="262" y="336" class="t-dim">응용 프로그램 — 가장 적은 권한</text>
+        <text x="262" y="354" class="t-faint">CSR은 카운터·부동소수점 상태 등 일부만 접근</text>
+        <!-- 위로 가는 트랩, 아래로 가는 xRET -->
+        <use href="#ladder-path-u-to-s" class="s-gold flow-dash" marker-end="url(#ladder-arrow-up)"/>
+        <use href="#ladder-path-s-to-m" class="s-gold flow-dash" marker-end="url(#ladder-arrow-up)"/>
+        <use href="#ladder-path-s-to-u" class="s-accent flow-dash" marker-end="url(#ladder-arrow-down)"/>
+        <use href="#ladder-path-m-to-s" class="s-accent flow-dash" marker-end="url(#ladder-arrow-down)"/>
+        <circle r="6" fill="var(--accent-2)"><animateMotion dur="2.4s" begin="-0.4s" repeatCount="indefinite"><mpath href="#ladder-path-u-to-s"/></animateMotion></circle>
+        <circle r="6" fill="var(--accent-2)"><animateMotion dur="2.4s" begin="-1.6s" repeatCount="indefinite"><mpath href="#ladder-path-s-to-m"/></animateMotion></circle>
+        <circle r="6" fill="var(--accent)"><animateMotion dur="2.4s" begin="-1.0s" repeatCount="indefinite"><mpath href="#ladder-path-s-to-u"/></animateMotion></circle>
+        <circle r="6" fill="var(--accent)"><animateMotion dur="2.4s" begin="-2.0s" repeatCount="indefinite"><mpath href="#ladder-path-m-to-s"/></animateMotion></circle>
+        <text x="748" y="268" class="t-gold" style="font-size:13px">트랩</text>
+        <text x="748" y="286" class="t-faint">ecall · 예외</text>
+        <text x="748" y="302" class="t-faint">· 인터럽트</text>
+        <text x="748" y="168" class="t-gold" style="font-size:13px">트랩</text>
+        <text x="748" y="186" class="t-faint">S의 ecall,</text>
+        <text x="748" y="202" class="t-faint">위임 안 된 것</text>
+        <text x="42" y="282" class="t-accent" style="font-size:13px">sret</text>
+        <text x="42" y="182" class="t-accent" style="font-size:13px">mret</text>
+      </svg></div>
+      <figcaption><b>그림 17-1.</b> 특권 모드 사다리. 금색 점은 트랩(ecall, 예외, 인터럽트)이 더 높은 특권으로 올라가는 길, 남색 점은 <code>sret</code>·<code>mret</code>으로 내려오는 길이다. 모드를 바꾸는 방법은 이 두 가지뿐이다. 왼쪽 칩의 숫자는 각 모드의 2비트 인코딩이다.</figcaption>
+    </figure>
+
+    <p>규격은 M 모드를 <b>가장 높은 권한을 가진, 유일한 필수 모드</b>로 정한다. M 모드 코드는 기계의 구현 세부에 낮은 수준으로 접근할 수 있으므로 본질적으로 신뢰받는 코드다. 그 위에 얼마나 많은 모드를 둘지는 구현이 고른다. 모드가 적을수록 하드웨어는 싸지지만 격리는 약해진다.</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th class="number">모드 수</th><th>지원 모드</th><th>규격이 드는 용도</th><th>예</th></tr></thead>
+      <tbody>
+        <tr><td class="number">1</td><td><b>M</b></td><td>단순한 임베디드 시스템</td><td>센서 노드의 펌웨어 하나만 도는 MCU</td></tr>
+        <tr><td class="number">2</td><td><b>M, U</b></td><td>보안이 필요한 임베디드 시스템</td><td>RTOS 커널(M) + 격리된 태스크(U)</td></tr>
+        <tr><td class="number">3</td><td><b>M, S, U</b></td><td>유닉스 계열 운영체제를 돌리는 시스템</td><td>OpenSBI(M) + 리눅스(S) + 앱(U)</td></tr>
+      </tbody>
+    </table></div>
+    <div class="callout tip"><strong>M 모드만 있어도 보호는 가능하다</strong><p>모드가 M 하나뿐이면 잘못된 응용 코드로부터 아무것도 지킬 수 없다. 그래도 PMP(물리 메모리 보호)의 <b>잠금(L) 비트</b>를 쓰면 M 모드 자신에게도 접근 제한을 걸 수 있어, 부트 ROM 같은 영역을 제한적으로나마 보호할 수 있다(<a href="memory-protection.html">20장</a>).</p></div>
+
+    <h3>“수준”과 “모드”는 다르다</h3>
+    <p>규격은 코드가 <b>어느 수준을 위해 작성되었는가</b>와 <b>어느 모드에서 실제로 실행되는가</b>를 구분한다. 보통은 같지만, 고전적인 가상 머신 모니터는 S 수준용으로 작성된 게스트 운영체제를 U 모드에서 돌린다. 이때 게스트가 S 수준 명령이나 CSR을 쓰면 모두 트랩이 걸려 더 높은 모드의 감시자가 대신 흉내 낸다. 같은 바이너리가 두 환경에서 모두 돌 수 있는 것은 운영체제가 하드웨어가 아니라 <b>SBI라는 약속</b>에 맞춰 작성되기 때문이다.</p>
+    <div class="callout deep"><strong>네 번째 모드, 디버그 모드</strong><p>구현은 칩 밖 디버깅과 제조 시험을 위해 <b>D 모드</b>를 둘 수 있다. M보다도 접근 권한이 많은 추가 특권 모드로 볼 수 있으며, CSR 주소 몇 개(0x7B0–0x7BF)를 D 모드 전용으로 예약한다. 자세한 동작은 별도의 디버그 규격이 정한다(<a href="platform.html">22장</a>).</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="execution-environment">
+    <h2>하트는 한 번에 한 모드: 실행 환경과 모드 전환</h2>
+    <p>특권 규격은 소프트웨어 스택을 “위의 소프트웨어가 아래와 대화하는 <b>인터페이스</b>”와 “그 인터페이스를 구현하는 <b>실행 환경</b>”의 짝으로 설명한다. 응용 프로그램은 <span class="term">ABI</span><span class="english">(Application Binary Interface)</span>로 응용 실행 환경(AEE)과 대화하고, 운영체제는 <span class="term">SBI</span><span class="english">(Supervisor Binary Interface)</span>로 감독자 실행 환경(SEE)과 대화한다. 하이퍼바이저가 있으면 그 아래에 HBI와 HEE가 하나 더 생긴다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 840 330" role="img" aria-label="세 가지 특권 소프트웨어 스택: 단일 응용, 운영체제, 하이퍼바이저">
+        <g>
+          <text x="130" y="22" text-anchor="middle" class="t t-bold">① 응용 하나</text>
+          <rect x="40" y="40" width="180" height="44" rx="8" class="f-elev"/><text x="130" y="67" text-anchor="middle" class="t">응용 프로그램</text>
+          <rect x="40" y="92" width="180" height="30" rx="6" class="f-accent"/><text x="130" y="112" text-anchor="middle" class="t-on-accent">ABI</text>
+          <rect x="40" y="130" width="180" height="44" rx="8" class="f-teal-soft"/><text x="130" y="157" text-anchor="middle" class="t">AEE</text>
+        </g>
+        <g>
+          <text x="420" y="22" text-anchor="middle" class="t t-bold">② 운영체제</text>
+          <rect x="310" y="40" width="82" height="44" rx="8" class="f-elev"/><text x="351" y="67" text-anchor="middle" class="t">응용</text>
+          <rect x="448" y="40" width="82" height="44" rx="8" class="f-elev"/><text x="489" y="67" text-anchor="middle" class="t">응용</text>
+          <rect x="310" y="92" width="82" height="30" rx="6" class="f-accent"/><text x="351" y="112" text-anchor="middle" class="t-on-accent">ABI</text>
+          <rect x="448" y="92" width="82" height="30" rx="6" class="f-accent"/><text x="489" y="112" text-anchor="middle" class="t-on-accent">ABI</text>
+          <rect x="310" y="130" width="220" height="44" rx="8" class="f-violet-soft"/><text x="420" y="157" text-anchor="middle" class="t">운영체제 (AEE 역할)</text>
+          <rect x="310" y="182" width="220" height="30" rx="6" class="f-accent"/><text x="420" y="202" text-anchor="middle" class="t-on-accent">SBI</text>
+          <rect x="310" y="220" width="220" height="44" rx="8" class="f-gold-soft"/><text x="420" y="247" text-anchor="middle" class="t">SEE (펌웨어 등)</text>
+        </g>
+        <g>
+          <text x="710" y="22" text-anchor="middle" class="t t-bold">③ 하이퍼바이저</text>
+          <rect x="604" y="40" width="100" height="30" rx="6" class="f-elev"/><text x="654" y="60" text-anchor="middle" class="t-dim">응용 · ABI</text>
+          <rect x="716" y="40" width="100" height="30" rx="6" class="f-elev"/><text x="766" y="60" text-anchor="middle" class="t-dim">응용 · ABI</text>
+          <rect x="604" y="78" width="100" height="40" rx="8" class="f-violet-soft"/><text x="654" y="103" text-anchor="middle" class="t">OS</text>
+          <rect x="716" y="78" width="100" height="40" rx="8" class="f-violet-soft"/><text x="766" y="103" text-anchor="middle" class="t">OS</text>
+          <rect x="604" y="126" width="100" height="26" rx="6" class="f-accent"/><text x="654" y="144" text-anchor="middle" class="t-on-accent">SBI</text>
+          <rect x="716" y="126" width="100" height="26" rx="6" class="f-accent"/><text x="766" y="144" text-anchor="middle" class="t-on-accent">SBI</text>
+          <rect x="604" y="160" width="212" height="44" rx="8" class="f-gold-soft"/><text x="710" y="187" text-anchor="middle" class="t">하이퍼바이저 (SEE 역할)</text>
+          <rect x="604" y="212" width="212" height="30" rx="6" class="f-accent"/><text x="710" y="232" text-anchor="middle" class="t-on-accent">HBI</text>
+          <rect x="604" y="250" width="212" height="44" rx="8" class="f-surface"/><text x="710" y="277" text-anchor="middle" class="t">HEE</text>
+        </g>
+        <text x="420" y="318" text-anchor="middle" class="t-faint">짙은 상자 = 추상 인터페이스(약속), 옅은 상자 = 그 약속을 구현하는 구체적인 소프트웨어 · 하드웨어</text>
+      </svg></div>
+      <figcaption><b>그림 17-2.</b> 규격 서론의 세 가지 소프트웨어 스택. 규격처럼 인터페이스는 짙은 상자로, 실제 구성 요소는 옅은 상자로 그렸다. 운영체제가 SBI에만 맞춰 작성되면 아래의 SEE가 간단한 부트로더든 하이퍼바이저가 만든 가상 머신이든 같은 바이너리가 그대로 돈다.</figcaption>
+    </figure>
+
+    <p>이 스택을 하트 하나의 시간 축으로 바꿔 보면 특권 아키텍처의 기본 규칙이 드러난다. <b>하트는 어느 순간에도 정확히 하나의 특권 모드에서 실행된다.</b> 그리고 모드는 다음 두 가지 방법으로만 바뀐다.</p>
+    <ol>
+      <li><b>트랩</b> — <code>ecall</code>, 예외, 인터럽트가 일어나면 하트는 처리기로 뛰면서 <b>같거나 더 높은</b> 특권 모드로 들어간다. 특권이 올라가는 트랩을 <span class="term">수직 트랩</span><span class="english">(vertical trap)</span>, 같은 수준에 머무는 트랩을 <span class="term">수평 트랩</span><span class="english">(horizontal trap)</span>이라 한다. 규격은 “트랩은 결코 더 특권 높은 모드에서 더 낮은 모드로 옮겨 가지 않는다”고 못 박는다.</li>
+      <li><b>xRET</b> — 처리기가 끝나면 <code>mret</code>이나 <code>sret</code>이 트랩 때 저장해 둔 이전 모드(mstatus.MPP·SPP)로 돌아간다. 특권을 낮추는 유일한 정규 경로다.</li>
+    </ol>
+    <p>트랩 때 무엇이 어떻게 저장되고 복원되는지는 <a href="trap.html">18장</a>에서 한 단계씩 따라간다. 여기서는 모드가 시간에 따라 오르내리는 모습만 눈에 익혀 두자.</p>
+
+    <div class="sim" id="mode-timeline-sim">
+      <div class="sim-head"><span class="sim-tag animation">ANIMATION</span><h3>하트 한 개의 특권 모드 타임라인</h3></div>
+      <div class="sim-view"><canvas id="mode-timeline-canvas" aria-label="시간에 따라 U, S, M 모드를 오가는 하트의 타임라인"></canvas></div>
+      <div class="step-description" id="mode-timeline-description">재생을 누르면 하트가 응용 프로그램(U)에서 출발한다.</div>
+      <div class="sim-controls">
+        <div class="control"><span>재생</span><div class="button-row"><button class="button primary" id="mode-timeline-play">일시 정지</button><button class="button" id="mode-timeline-restart">처음부터</button></div></div>
+        <label class="control"><span>속도 <output id="mode-timeline-speed-output"></output></span><input type="range" id="mode-timeline-speed" min="1" max="4" value="2"></label>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">현재 모드</span><span class="value" id="mode-timeline-mode">U</span></div>
+        <div class="stat"><span class="key">마지막 전환</span><span class="value" id="mode-timeline-event">—</span></div>
+      </div>
+      <div class="sim-note">Sstc 확장이 없는 전통적인 시스템에서 타이머 인터럽트가 어떻게 M 모드를 거쳐 S 모드로 전달되는지 보자. 금색 화살표(트랩)는 언제나 위로, 남색 화살표(xRET)는 언제나 아래로 간다.</div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="csr-address-space">
+    <h2>4096칸의 CSR 주소 공간</h2>
+    <p><span class="term">CSR</span><span class="english">(Control and Status Register)</span>은 정수 레지스터 x0–x31과 별개인 저장 공간이다. CSR 명령의 12비트 <code>csr</code> 필드(명령어 비트 31–20)로 번지를 고르므로 최대 4096개까지 둘 수 있다. 특권 아키텍처 전체가 이 공간 위에 지어진다. 트랩 처리기 주소(mtvec), 인터럽트 허용 비트(mie), 페이지 테이블 위치(satp)가 모두 CSR이다.</p>
+    <p>RISC-V가 영리한 점은 <b>주소 자체에 접근 규칙을 새겨 넣었다</b>는 것이다. 주소의 위쪽 2비트 <code>csr[11:10]</code>는 읽기·쓰기 가능(00, 01, 10)인지 읽기 전용(11)인지를, 그다음 2비트 <code>csr[9:8]</code>는 그 CSR에 접근할 수 있는 <b>가장 낮은 특권</b>을 나타낸다. 하드웨어는 표를 뒤질 필요 없이 비트 4개만 보고 1차 검사를 끝낼 수 있다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 840 345" role="img" aria-label="12비트 CSR 주소를 세 부분으로 나눈 그림과 네 가지 예">
+        <g transform="translate(60,20)">
+          <!-- 비트 칸 12개 -->
+          <g id="csr-bits-boxes">
+            <rect x="0" y="20" width="110" height="44" rx="6" class="f-gold-soft"/>
+            <rect x="120" y="20" width="110" height="44" rx="6" class="f-accent-soft"/>
+            <rect x="240" y="20" width="480" height="44" rx="6" class="f-surface"/>
+          </g>
+          <text x="27" y="14" text-anchor="middle" class="t-faint">11</text><text x="83" y="14" text-anchor="middle" class="t-faint">10</text>
+          <text x="147" y="14" text-anchor="middle" class="t-faint">9</text><text x="203" y="14" text-anchor="middle" class="t-faint">8</text>
+          <text x="260" y="14" text-anchor="middle" class="t-faint">7</text><text x="700" y="14" text-anchor="middle" class="t-faint">0</text>
+          <text x="55" y="47" text-anchor="middle" class="t t-bold">[11:10]</text>
+          <text x="175" y="47" text-anchor="middle" class="t t-bold">[9:8]</text>
+          <text x="480" y="47" text-anchor="middle" class="t t-bold">[7:0] 같은 구역 안의 번호</text>
+          <text x="55" y="90" text-anchor="middle" class="t-gold">읽기/쓰기</text>
+          <text x="55" y="108" text-anchor="middle" class="t-dim">00·01·10 = 읽기·쓰기</text>
+          <text x="55" y="125" text-anchor="middle" class="t-dim">11 = 읽기 전용</text>
+          <text x="175" y="90" text-anchor="middle" class="t-accent">최소 특권</text>
+          <text x="175" y="108" text-anchor="middle" class="t-dim">00 U · 01 S</text>
+          <text x="175" y="125" text-anchor="middle" class="t-dim">10 HS · 11 M</text>
+          <text x="480" y="90" text-anchor="middle" class="t-dim">[7:4]의 일부 패턴은 표준이 아닌 “사용자 정의(custom)”용</text>
+          <text x="480" y="108" text-anchor="middle" class="t-dim">예: 0x7C0–0x7FF, 0xBC0–0xBFF 는 M 수준 custom 읽기·쓰기</text>
+        </g>
+        <!-- 예 -->
+        <g transform="translate(60,176)" class="t-mono">
+          <text x="0" y="0" class="t-faint">예</text>
+          <g transform="translate(0,22)">
+            <text x="0" y="0" class="t-mono t-bold">0x300 mstatus</text>
+            <text x="190" y="0" class="t-mono"><tspan class="t-gold" style="font-size:13px">00</tspan> <tspan class="t-accent" style="font-size:13px">11</tspan> 0000 0000</text>
+            <text x="420" y="0" class="t-dim">읽기·쓰기, M 모드 이상</text>
+          </g>
+          <g transform="translate(0,52)">
+            <text x="0" y="0" class="t-mono t-bold">0x100 sstatus</text>
+            <text x="190" y="0" class="t-mono"><tspan class="t-gold" style="font-size:13px">00</tspan> <tspan class="t-accent" style="font-size:13px">01</tspan> 0000 0000</text>
+            <text x="420" y="0" class="t-dim">읽기·쓰기, S 모드 이상</text>
+          </g>
+          <g transform="translate(0,82)">
+            <text x="0" y="0" class="t-mono t-bold">0xC00 cycle</text>
+            <text x="190" y="0" class="t-mono"><tspan class="t-gold" style="font-size:13px">11</tspan> <tspan class="t-accent" style="font-size:13px">00</tspan> 0000 0000</text>
+            <text x="420" y="0" class="t-dim">읽기 전용, U부터 (카운터 문 필요)</text>
+          </g>
+          <g transform="translate(0,112)">
+            <text x="0" y="0" class="t-mono t-bold">0xF14 mhartid</text>
+            <text x="190" y="0" class="t-mono"><tspan class="t-gold" style="font-size:13px">11</tspan> <tspan class="t-accent" style="font-size:13px">11</tspan> 0001 0100</text>
+            <text x="420" y="0" class="t-dim">읽기 전용, M 모드 전용</text>
+          </g>
+        </g>
+      </svg></div>
+      <figcaption><b>그림 17-3.</b> CSR 주소 12비트의 구조. 위쪽 4비트만으로 “누가 읽을 수 있고 누가 쓸 수 있는가”가 결정된다. 덕분에 하드웨어의 권한 검사가 단순해지고, 대신 CSR을 주소 공간에 배치하는 방식에는 제약이 생긴다.</figcaption>
+    </figure>
+
+    <div class="callout spec"><strong>규격 원문에서</strong>
+      <blockquote>“The top two bits (csr[11:10]) indicate whether the register is read/write (00,01, or 10) or read-only (11). The next two bits (csr[9:8]) encode the lowest privilege level that can access the CSR, with the pattern 10 representing hypervisor CSRs.”</blockquote>
+      <p><a href="https://docs.riscv.org/reference/isa/v20260120/priv/priv-csrs.html" target="_blank" rel="noopener">Privileged Vol. II, §1.1.1 CSR Address Mapping Conventions</a> — 특권 인코딩에서는 예약된 10이 CSR 주소에서는 하이퍼바이저(HS) 수준을 뜻한다는 점에 주의하자.</p></div>
+
+    <p>규격은 이 규칙 위에 표준과 사용자 정의(custom) 영역을 나눠 둔 할당표를 정한다. custom 영역에 정의된 CSR은 앞으로 표준 확장이 다시 정의하지 않겠다고 약속되어 있어, 칩 회사가 자기만의 CSR을 안심하고 둘 수 있다.</p>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>최소 특권 [9:8]</th><th>표준 읽기·쓰기</th><th>custom 읽기·쓰기</th><th>표준 읽기 전용</th><th>custom 읽기 전용</th></tr></thead>
+      <tbody>
+        <tr><td><b>U</b> (00)</td><td><code>0x000–0x0FF</code> <code>0x400–0x4FF</code></td><td><code>0x800–0x8FF</code></td><td><code>0xC00–0xCBF</code></td><td><code>0xCC0–0xCFF</code></td></tr>
+        <tr><td><b>S</b> (01)</td><td><code>0x100–0x1FF</code> <code>0x500–0x5BF</code> <code>0x900–0x9BF</code></td><td><code>0x5C0–0x5FF</code> <code>0x9C0–0x9FF</code></td><td><code>0xD00–0xDBF</code></td><td><code>0xDC0–0xDFF</code></td></tr>
+        <tr><td><b>HS</b> (10)</td><td><code>0x200–0x2FF</code> <code>0x600–0x6BF</code> <code>0xA00–0xABF</code></td><td><code>0x6C0–0x6FF</code> <code>0xAC0–0xAFF</code></td><td><code>0xE00–0xEBF</code></td><td><code>0xEC0–0xEFF</code></td></tr>
+        <tr><td><b>M</b> (11)</td><td><code>0x300–0x3FF</code> <code>0x700–0x79F</code> <code>0xB00–0xBBF</code><br>디버그용 <code>0x7A0–0x7AF</code></td><td><code>0x7C0–0x7FF</code> <code>0xBC0–0xBFF</code></td><td><code>0xF00–0xFBF</code></td><td><code>0xFC0–0xFFF</code></td></tr>
+      </tbody>
+    </table></div>
+    <p><code>0x7B0–0x7BF</code>는 D 모드에서만 보이는 디버그 전용 CSR(dcsr, dpc 등)이며, 규격은 M 모드가 이곳에 접근하면 illegal-instruction 예외를 내야 한다고 권한다. 아래 그림은 4096칸 전체를 16칸씩 묶어 색으로 칠한 지도다. 칸을 누르면 아래 해독기로 그 번지가 넘어간다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg id="csr-map-svg" viewBox="0 0 840 500" role="img" aria-label="CSR 주소 공간 지도. 가로는 주소 비트 7-4, 세로는 비트 11-8."></svg></div>
+      <figcaption><b>그림 17-4.</b> CSR 주소 공간 지도. 한 칸이 CSR 16개다. 세로 줄은 위쪽 4비트(<code>csr[11:8]</code>), 가로 칸은 <code>csr[7:4]</code>다. 같은 줄 안에서는 권한이 같다는 점, 그리고 각 줄의 오른쪽 끝(<code>[7:6]=11</code>)이 대개 custom 영역이라는 점이 한눈에 보인다.</figcaption>
+    </figure>
+
+    <div class="callout deep"><strong>카운터만 가진 “그림자” CSR</strong><p>규격은 낮은 수준에서 읽기 전용인 CSR을 높은 수준에서 읽기·쓰기로 쓰고 싶을 때 <b>주소를 따로 둔다</b>. 예를 들어 <code>cycle</code>(0xC00, U 읽기 전용)은 <code>mcycle</code>(0xB00, M 읽기·쓰기)의 그림자다. 이렇게 하면 허락된 읽기는 트랩 없이 바로 실행되고, 금지된 쓰기만 걸러진다. 현재 이런 그림자 CSR을 가진 것은 카운터뿐이다.</p></div>
+
+    <div class="sim" id="csr-decoder-sim">
+      <div class="sim-head"><span class="sim-tag">SIMULATOR</span><h3>CSR 주소 해독기</h3></div>
+      <div class="sim-pad">
+        <div class="decoder-layout">
+          <div class="bit-groups" id="csr-decoder-bits" aria-label="CSR 주소 12비트. 눌러서 비트를 바꾼다."></div>
+          <div class="table-wrap" style="margin:0"><table class="access-matrix" id="csr-decoder-matrix" aria-live="polite"></table></div>
+          <div class="decoder-notes" id="csr-decoder-notes"></div>
+        </div>
+      </div>
+      <div class="sim-controls">
+        <label class="control"><span>주소 (16진수)</span><input type="text" id="csr-decoder-address" value="0x300" size="7" spellcheck="false" autocomplete="off"></label>
+        <label class="control"><span>이름으로 고르기</span><select id="csr-decoder-select"></select></label>
+        <div class="control"><span>XLEN</span><div class="segmented" id="csr-decoder-xlen"><button data-value="32">RV32</button><button data-value="64" class="on">RV64</button></div></div>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">이름</span><span class="value" id="csr-decoder-name">mstatus</span></div>
+        <div class="stat"><span class="key">[11:10] 접근</span><span class="value" id="csr-decoder-access">읽기·쓰기</span></div>
+        <div class="stat"><span class="key">[9:8] 최소 특권</span><span class="value" id="csr-decoder-privilege">M</span></div>
+        <div class="stat"><span class="key">할당 구역</span><span class="value" id="csr-decoder-category">표준</span></div>
+      </div>
+      <div class="sim-note">비트를 눌러 <code>0x300</code>(mstatus)을 <code>0xF14</code>(mhartid)로 바꿔 보자. 위쪽 두 비트가 11이 되는 순간 모든 “쓰기” 칸이 빨갛게 변한다. 또 <code>0xC80</code>(cycleh)을 고른 뒤 XLEN을 RV64로 바꾸면 어떻게 되는지 확인하자. 표의 “읽기”는 <code>csrr</code>(=<code>csrrs rd, csr, x0</code>), “쓰기”는 <code>csrw</code>처럼 실제로 CSR에 값을 쓰는 명령을 뜻한다.</div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="csr-access">
+    <h2>CSR 명령과 illegal-instruction 예외</h2>
+    <p>CSR은 Zicsr 확장의 여섯 명령으로만 읽고 쓴다(<a href="small-extensions.html">16장</a>). 여섯 명령은 모두 “읽고-고치고-쓰기”를 원자적으로 하지만, 피연산자에 따라 <b>읽기나 쓰기를 아예 하지 않을 수 있다</b>. 이 차이가 권한 검사에 그대로 영향을 준다. 읽기 전용 CSR을 읽기만 하는 명령은 괜찮지만, 같은 CSR에 쓰기를 “시도”하는 명령은 값이 0이어도 예외가 난다.</p>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>명령</th><th>조건</th><th>CSR 읽기</th><th>CSR 쓰기</th><th>흔한 의사 명령</th></tr></thead>
+      <tbody>
+        <tr><td rowspan="2"><code>csrrw</code></td><td>rd = x0</td><td>안 함</td><td>함</td><td><code>csrw csr, rs</code></td></tr>
+        <tr><td>rd ≠ x0</td><td>함</td><td>함</td><td><code>csrrw rd, csr, rs</code></td></tr>
+        <tr><td rowspan="2"><code>csrrs</code> · <code>csrrc</code></td><td>rs1 = x0</td><td>함</td><td><b>안 함</b></td><td><code>csrr rd, csr</code></td></tr>
+        <tr><td>rs1 ≠ x0</td><td>함</td><td>함 (레지스터 값이 0이어도)</td><td><code>csrs</code> · <code>csrc</code></td></tr>
+        <tr><td><code>csrrwi</code></td><td>rd = x0</td><td>안 함</td><td>함</td><td><code>csrwi</code></td></tr>
+        <tr><td><code>csrrsi</code> · <code>csrrci</code></td><td>uimm = 0</td><td>함</td><td><b>안 함</b></td><td>—</td></tr>
+      </tbody>
+    </table></div>
+    <p>규격이 정한 CSR 접근 실패의 경우는 다음과 같다.</p>
+    <ul>
+      <li><b>존재하지 않는 CSR</b>에 접근하는 명령은 예약된 명령이다. 실제 구현은 대개 illegal-instruction 예외를 낸다.</li>
+      <li><b>특권이 부족한 접근</b>은 illegal-instruction 예외를 일으킨다. (하이퍼바이저 확장이 있으면 일부 경우는 virtual-instruction 예외가 된다.)</li>
+      <li><b>읽기 전용 CSR에 쓰기</b>를 시도하면 illegal-instruction 예외다.</li>
+      <li>읽기·쓰기 CSR 안의 <b>일부 비트만 읽기 전용</b>이라면, 그 비트에 대한 쓰기는 예외 없이 <b>무시</b>된다.</li>
+    </ul>
+    <p>여기에 더해 주소 규칙만으로는 표현할 수 없는 “두 번째 문지기”가 있다. mstatus.TVM이 1이면 S 모드의 <code>satp</code> 접근이, mcounteren 비트가 0이면 S 모드의 카운터 읽기가, mstateen 비트가 0이면 새 확장의 상태 접근이 막힌다. RV64에서는 RV32 전용 상위 절반 CSR(<code>cycleh</code> 등)의 주소가 예약되어 있어 접근하면 보통 illegal-instruction 예외가 난다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 840 280" role="img" aria-label="CSR 접근 판정 흐름도">
+        <defs><marker id="access-flow-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--text-faint)"/></marker>
+          <marker id="access-flow-arrow-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--bad)"/></marker>
+          <marker id="access-flow-arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--ok)"/></marker></defs>
+        <rect x="10" y="40" width="110" height="64" rx="10" class="f-elev"/>
+        <text x="65" y="66" text-anchor="middle" class="t t-bold">CSR 명령</text>
+        <text x="65" y="86" text-anchor="middle" class="t-faint">csr = 12비트</text>
+        <path d="M122 72 H136" class="s-line" marker-end="url(#access-flow-arrow)"/>
+        <rect x="140" y="32" width="130" height="80" rx="10" class="f-surface"/>
+        <text x="205" y="58" text-anchor="middle" class="t t-bold">① 존재하나?</text>
+        <text x="205" y="78" text-anchor="middle" class="t-faint">구현된 CSR인가</text>
+        <text x="205" y="96" text-anchor="middle" class="t-faint">RV64의 …h는 예약</text>
+        <path d="M272 72 H286" class="s-line" marker-end="url(#access-flow-arrow)"/>
+        <rect x="290" y="32" width="140" height="80" rx="10" class="f-accent-soft"/>
+        <text x="360" y="58" text-anchor="middle" class="t t-bold">② 특권 충분?</text>
+        <text x="360" y="78" text-anchor="middle" class="t-dim">현재 모드 ≥ csr[9:8]</text>
+        <text x="360" y="96" text-anchor="middle" class="t-faint">0x7B0–0x7BF는 D 전용</text>
+        <path d="M432 72 H446" class="s-line" marker-end="url(#access-flow-arrow)"/>
+        <rect x="450" y="32" width="140" height="80" rx="10" class="f-gold-soft"/>
+        <text x="520" y="58" text-anchor="middle" class="t t-bold">③ 쓰기 허용?</text>
+        <text x="520" y="78" text-anchor="middle" class="t-dim">쓰기를 시도하는데</text>
+        <text x="520" y="96" text-anchor="middle" class="t-dim">csr[11:10]=11 이면 ✗</text>
+        <path d="M592 72 H606" class="s-line" marker-end="url(#access-flow-arrow)"/>
+        <rect x="610" y="32" width="120" height="80" rx="10" class="f-violet-soft"/>
+        <text x="670" y="58" text-anchor="middle" class="t t-bold">④ 추가 문</text>
+        <text x="670" y="78" text-anchor="middle" class="t-faint">TVM · counteren</text>
+        <text x="670" y="96" text-anchor="middle" class="t-faint">stateen · STCE</text>
+        <path d="M732 72 H746" class="s-ok flow-dash" marker-end="url(#access-flow-arrow-ok)"/>
+        <rect x="750" y="32" width="82" height="80" rx="10" class="f-ok-soft"/>
+        <text x="791" y="62" text-anchor="middle" class="t t-bold">통과</text>
+        <text x="791" y="82" text-anchor="middle" class="t-dim">읽기·쓰기</text>
+        <text x="791" y="99" text-anchor="middle" class="t-dim">수행</text>
+        <path d="M205 114 V176" class="s-bad s-dashed" marker-end="url(#access-flow-arrow-bad)"/>
+        <path d="M360 114 V176" class="s-bad s-dashed" marker-end="url(#access-flow-arrow-bad)"/>
+        <path d="M520 114 V176" class="s-bad s-dashed" marker-end="url(#access-flow-arrow-bad)"/>
+        <path d="M670 114 V176" class="s-bad s-dashed" marker-end="url(#access-flow-arrow-bad)"/>
+        <text x="213" y="150" class="t-faint">아니오</text><text x="368" y="150" class="t-faint">아니오</text><text x="528" y="150" class="t-faint">아니오</text><text x="678" y="150" class="t-faint">닫힘</text>
+        <rect x="140" y="180" width="590" height="50" rx="10" class="f-bad-soft"/>
+        <text x="435" y="203" text-anchor="middle" class="t t-bold">illegal-instruction 예외 (mcause = 2)</text>
+        <text x="435" y="221" text-anchor="middle" class="t-faint">mtval에 명령어 비트가 담길 수 있다 · 가상화 상황의 일부는 virtual-instruction 예외</text>
+        <text x="420" y="262" text-anchor="middle" class="t-faint">통과한 쓰기라도, 읽기·쓰기 CSR 안의 읽기 전용 비트에 대한 쓰기는 예외 없이 무시된다</text>
+      </svg></div>
+      <figcaption><b>그림 17-5.</b> CSR 접근이 성공하기까지의 관문. ①–③은 주소만 보고 판정할 수 있고, ④는 다른 CSR의 상태에 따라 달라진다. 어느 관문에서 막히든 결과는 같은 illegal-instruction 예외이며, 그 처리는 18장의 트랩 메커니즘이 맡는다.</figcaption>
+    </figure>
+
+    <div class="codebox" data-title="권한과 CSR — 각 줄을 U 모드에서 실행했다고 가정"><span class="keyword">csrr</span>  <span class="register">t0</span>, mhartid        <span class="comment"># 0xF14: 최소 특권 M → illegal-instruction</span>
+<span class="keyword">csrr</span>  <span class="register">t1</span>, cycle          <span class="comment"># 0xC00: U 읽기 가능. mcounteren.CY·scounteren.CY 가 열려 있어야 성공</span>
+<span class="keyword">csrw</span>  cycle, <span class="register">t1</span>          <span class="comment"># 0xC00 은 읽기 전용([11:10]=11) → 어느 모드에서든 illegal-instruction</span>
+<span class="keyword">csrrs</span> <span class="register">t2</span>, fflags, <span class="register">x0</span>     <span class="comment"># rs1=x0 이므로 쓰기 없음. 부동소수점 상태(mstatus.FS)가 Off 가 아니면 성공</span>
+<span class="keyword">csrs</span>  sstatus, <span class="register">t3</span>        <span class="comment"># 0x100: 최소 특권 S → illegal-instruction</span></div>
+    <div class="callout warn"><strong>“권한 위반”과 “특권 명령”을 구별하지 않는다</strong><p>규격은 특권 명령 예외를 illegal-instruction 예외와 따로 두지 않았다. 아키텍처가 단순해지고, 어떤 상위 특권 명령이 구현되어 있는지도 숨길 수 있기 때문이다. 둘을 구별해야 한다면 트랩을 받은 상위 모드의 소프트웨어가 정책을 정한다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="machine-information">
+    <h2>하트의 신분증: misa와 ID 레지스터</h2>
+    <p>부팅 직후의 펌웨어가 가장 먼저 알아야 할 것은 “나는 어떤 하트 위에서 돌고 있는가”다. 규격은 이를 위해 M 모드 CSR 몇 개를 반드시 읽을 수 있게 해 두었다. 그 중심에 있는 것이 <span class="term">misa</span><span class="english">(Machine ISA register, 0x301)</span>다. misa는 WARL 읽기·쓰기 레지스터로, 맨 위 두 비트에 기본 정수 폭을, 맨 아래 26비트에 알파벳 한 글자짜리 확장의 유무를 담는다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 840 250" role="img" aria-label="misa 레지스터의 필드 배치와 A부터 Z까지의 확장 비트">
+        <g transform="translate(20,18)">
+          <text x="0" y="10" class="t-faint">MXLEN-1</text>
+          <text x="118" y="10" class="t-faint" text-anchor="end">MXLEN-2</text>
+          <text x="140" y="10" class="t-faint">MXLEN-3</text>
+          <text x="520" y="10" class="t-faint" text-anchor="end">26</text>
+          <text x="540" y="10" class="t-faint">25</text>
+          <text x="800" y="10" class="t-faint" text-anchor="end">0</text>
+          <rect x="0" y="18" width="128" height="46" rx="6" class="f-gold-soft"/>
+          <text x="64" y="40" text-anchor="middle" class="t t-bold">MXL</text>
+          <text x="64" y="57" text-anchor="middle" class="t-faint">WARL · 읽기 전용</text>
+          <rect x="136" y="18" width="392" height="46" rx="6" class="f-surface"/>
+          <text x="332" y="40" text-anchor="middle" class="t">0</text>
+          <text x="332" y="57" text-anchor="middle" class="t-faint">MXLEN-28 비트, 0으로 읽힘</text>
+          <rect x="536" y="18" width="264" height="46" rx="6" class="f-accent-soft"/>
+          <text x="668" y="40" text-anchor="middle" class="t t-bold">Extensions[25:0]</text>
+          <text x="668" y="57" text-anchor="middle" class="t-faint">WARL · 글자마다 1비트</text>
+          <path d="M536 66 L 0 112" class="s-line s-dashed"/>
+          <path d="M800 66 L 800 112" class="s-line s-dashed"/>
+        </g>
+        <g id="misa-figure-letters" transform="translate(20,132)"></g>
+        <g transform="translate(20,232)">
+          <rect x="0" y="-11" width="14" height="14" rx="3" class="f-accent-soft"/><text x="20" y="1" class="t-faint">정의된 확장</text>
+          <rect x="120" y="-11" width="14" height="14" rx="3" class="f-surface"/><text x="140" y="1" class="t-faint">예약</text>
+          <rect x="200" y="-11" width="14" height="14" rx="3" class="f-warn-soft"/><text x="220" y="1" class="t-faint">잠정 예약(N, P)</text>
+          <rect x="350" y="-11" width="14" height="14" rx="3" class="f-violet-soft"/><text x="370" y="1" class="t-faint">X = 비표준 확장 있음</text>
+        </g>
+      </svg></div>
+      <figcaption><b>그림 17-6.</b> misa의 배치. 비트 0이 A, 비트 25가 Z다. I·E는 베이스 ISA를, S·U는 해당 모드의 존재를 나타낸다. Zba·Zicsr처럼 여러 글자로 된 확장은 misa에 비트가 없다. 그런 확장은 장치 트리 같은 별도 수단으로 알린다.</figcaption>
+    </figure>
+
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>MXL</th><th>XLEN</th><th>비고</th></tr></thead>
+      <tbody>
+        <tr><td><code>1</code></td><td>32</td><td rowspan="3">MXLEN = 2<sup>MXL+4</sup>. misa가 0이 아니면 MXL은 M 모드의 실효 XLEN(MXLEN)이다. 덜 특권적인 모드의 XLEN은 MXLEN보다 작을 수는 있어도 클 수는 없다.</td></tr>
+        <tr><td><code>2</code></td><td>64</td></tr>
+        <tr><td><code>3</code></td><td>예약</td></tr>
+      </tbody>
+    </table></div>
+    <p>MXL이 맨 위에 있는 데에는 이유가 있다. misa를 읽은 값의 부호(최상위 비트)로 한 번 분기하고, 왼쪽으로 한 칸 민 뒤 다시 부호로 분기하면 레지스터 폭을 모르는 코드로도 RV32인지 RV64인지 알아낼 수 있다. 규칙 몇 가지를 더 정리하면 다음과 같다.</p>
+    <ul>
+      <li>misa는 모든 구현에서 읽을 수 있어야 하지만, <b>0을 돌려주어</b> “misa를 구현하지 않았다”고 알릴 수 있다. 이때는 비표준 수단으로 기능을 알아내야 한다.</li>
+      <li>Extensions 필드의 비트가 쓰기 가능하면 소프트웨어가 확장을 끌 수 있다. 끈 확장의 명령과 CSR은 <b>구현되지 않은 것처럼</b> 동작한다. 리셋 때에는 지원하는 최대 집합이 켜지고, I와 E가 모두 가능하면 I가 선택된다.</li>
+      <li>E 비트는 읽기 전용이며 (misa 전체가 0이 아니라면) 항상 I 비트의 반대 값으로 읽힌다.</li>
+      <li>기능 x가 기능 y에 의존할 때 x만 켜고 y를 끄려 하면 <b>둘 다 꺼진다</b>. 규격의 예: F=0, D=1을 쓰면 F와 D가 모두 0, U=0, S=1을 쓰면 U와 S가 모두 0이 된다.</li>
+      <li>C를 끄면 IALIGN이 32로 커진다. 그 쓰기 바로 다음 명령의 주소가 4바이트 정렬이 아니라면 misa 쓰기 자체가 취소된다.</li>
+      <li>비트가 1이면 그 기능이 있다는 뜻이지만, 비트가 0이라고 반드시 없는 것은 아니다. 없는 기능의 명령은 “예약”이 될 뿐 반드시 불법은 아니기 때문이다.</li>
+    </ul>
+
+    <div class="sim" id="misa-builder-sim">
+      <div class="sim-head"><span class="sim-tag">SIMULATOR</span><h3>misa 만들기</h3></div>
+      <div class="sim-pad">
+        <div class="letter-grid" id="misa-letter-grid" aria-label="확장 글자. 눌러서 켜고 끈다."></div>
+        <div class="step-description" id="misa-explanation" style="border-top:0;padding:12px 0 0;min-height:48px"></div>
+        <div class="misa-binary" id="misa-binary"></div>
+      </div>
+      <div class="sim-controls">
+        <div class="control"><span>MXL</span><div class="segmented" id="misa-mxl"><button data-value="1">1 (RV32)</button><button data-value="2" class="on">2 (RV64)</button></div></div>
+        <div class="control"><span>미리 정한 구성</span><div class="button-row">
+          <button class="button" data-preset="microcontroller" id="misa-preset-microcontroller">MCU: IMAC + U</button>
+          <button class="button" data-preset="linux" id="misa-preset-linux">리눅스: IMAFDC + SU</button>
+          <button class="button" data-preset="server" id="misa-preset-server">RVA23급: +B V H</button>
+        </div></div>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">misa (16진수)</span><span class="value" id="misa-hex">—</span></div>
+        <div class="stat"><span class="key">ISA 문자열 (한 글자 확장만)</span><span class="value" id="misa-string">—</span></div>
+        <div class="stat"><span class="key">켜진 글자 수</span><span class="value" id="misa-count">—</span></div>
+      </div>
+      <div class="sim-note">“리눅스” 구성을 고른 뒤 F를 꺼 보자. 규격의 의존 규칙에 따라 D가 함께 꺼진다(빨간 점선 테두리). Q나 V가 켜져 있었다면 그것들도 D에 의존하므로 같이 꺼진다. U를 끄면 S와 H도 꺼진다. MXL을 1로 바꾸면 16진수 값이 32비트로 줄고 맨 앞 두 비트만 <code>01</code>로 바뀐다는 점도 확인하자. I를 끄면 읽기 전용인 E가 저절로 켜진다.</div>
+    </div>
+
+    <h3>누가 만든 어떤 하트인가: 네 개의 ID 레지스터</h3>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>CSR</th><th>주소</th><th>내용</th></tr></thead>
+      <tbody>
+        <tr><td><code>mvendorid</code></td><td><code>0xF11</code></td><td>32비트. JEDEC 제조사 ID를 Bank(연속 코드 0x7f의 개수, 비트 31:7)와 Offset(마지막 바이트에서 패리티를 뺀 7비트, 비트 6:0)으로 담는다. 0x7f를 열두 번 이어 쓴 뒤 0x8a로 끝나는 ID는 <code>0x60a</code>가 된다. 0이면 미구현 또는 비상업 구현.</td></tr>
+        <tr><td><code>marchid</code></td><td><code>0xF12</code></td><td>MXLEN 비트. 마이크로아키텍처의 ID. 오픈 소스 프로젝트는 RISC-V International이 최상위 비트 0인 번호를 배정하고, 상업 ID는 최상위 비트가 1이다. mvendorid와 함께 하트의 종류를 유일하게 식별해야 한다.</td></tr>
+        <tr><td><code>mimpid</code></td><td><code>0xF13</code></td><td>구현(설계 버전)의 번호. 형식은 제공자가 정한다.</td></tr>
+        <tr><td><code>mhartid</code></td><td><code>0xF14</code></td><td>지금 코드를 실행하는 하트의 번호. 실행 환경 안에서 유일해야 하고, 연속일 필요는 없지만 <b>하트 하나는 반드시 0번</b>이어야 한다. 리셋 직후 “딱 한 하트만” 초기화를 하게 만들 때 쓴다.</td></tr>
+        <tr><td><code>mconfigptr</code></td><td><code>0xF15</code></td><td>하트와 플랫폼을 설명하는 설정 자료 구조가 있는 곳의 주소.</td></tr>
+      </tbody>
+    </table></div>
+    <div class="callout tip"><strong>낮은 모드는 misa를 읽지 않는다</strong><p>misa는 M 모드 전용이다. 규격은 낮은 특권 수준이 CPU 레지스터를 직접 읽는 대신 <b>환경 호출(ecall)로 실행 환경에 물어보라</b>고 요구한다. 그래야 가상화 계층이 각 수준이 보는 ISA를 자유롭게 바꿀 수 있고, 하드웨어에 부담을 주지 않으면서 훨씬 풍부한 정보를 줄 수 있다. 리눅스는 부팅 때 펌웨어가 넘겨준 장치 트리의 <code>riscv,isa</code> 문자열을 읽는다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="mstatus">
+    <h2>mstatus: 하트의 조종판</h2>
+    <p><span class="term">mstatus</span><span class="english">(Machine Status, 0x300)</span>는 하트의 현재 동작 상태를 기록하고 조절하는 MXLEN 비트 읽기·쓰기 레지스터다. 인터럽트를 켜고 끄는 스위치, 트랩 직전의 모드를 기억하는 칸, 부동소수점·벡터 상태가 더러워졌는지 알려 주는 표시등, 메모리 접근 권한을 비트는 레버가 한 레지스터에 모여 있다. RV32에서는 64비트 분량이 다 들어가지 않으므로, RV64 mstatus의 비트 62:36에 해당하는 필드를 <code>mstatush</code>(0x310)의 비트 30:4에 둔다. 단 SD, SXL, UXL은 mstatush에 없다.</p>
+
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>무리</th><th>필드 (RV64 비트)</th><th>역할</th></tr></thead>
+      <tbody>
+        <tr><td><span class="pill gold">트랩 스택</span></td><td>SIE(1) MIE(3) SPIE(5) MPIE(7) SPP(8) MPP(12:11)</td><td>모드별 전역 인터럽트 허용, 트랩 직전의 허용 값과 모드를 한 단계 저장</td></tr>
+        <tr><td><span class="pill">확장 상태</span></td><td>VS(10:9) FS(14:13) XS(16:15) SD(63)</td><td>벡터·부동소수점·기타 확장 상태가 Off/Initial/Clean/Dirty 중 무엇인지</td></tr>
+        <tr><td><span class="pill accent">메모리 권한</span></td><td>MPRV(17) SUM(18) MXR(19)</td><td>M 모드가 MPP의 권한으로 메모리를 읽게 하거나, 페이지 권한 해석을 바꿈</td></tr>
+        <tr><td><span class="pill">가상화 지원</span></td><td>TVM(20) TW(21) TSR(22)</td><td>S 모드의 satp·SFENCE.VMA, WFI, SRET을 M 모드로 가로챔</td></tr>
+        <tr><td><span class="pill ok">XLEN · 엔디언</span></td><td>UXL(33:32) SXL(35:34) UBE(6) SBE(36) MBE(37)</td><td>U·S 모드의 XLEN과, 모드별 데이터 접근 바이트 순서</td></tr>
+        <tr><td><span class="pill warn">H · CFI · 이중 트랩</span></td><td>GVA(38) MPV(39) SPELP(23) MPELP(41) SDT(24) MDT(42)</td><td>하이퍼바이저 확장, 랜딩 패드(Zicfilp), 이중 트랩(Ssdbltrp·Smdbltrp) 지원</td></tr>
+      </tbody>
+    </table></div>
+
+    <div class="sim" id="mstatus-explorer-sim">
+      <div class="sim-head"><span class="sim-tag">EXPLORER</span><h3>mstatus 필드 탐색기 (RV64)</h3></div>
+      <div class="mstatus-layout">
+        <div class="sim-pad" style="padding:12px 12px 6px">
+          <div class="scroll-x" style="overflow-x:auto"><svg id="mstatus-explorer-svg" viewBox="0 0 840 250" style="min-width:640px;width:100%;display:block" role="img" aria-label="64비트 mstatus 필드 배치. 필드를 누르면 설명이 나타난다."></svg></div>
+        </div>
+        <div class="field-detail" id="mstatus-field-detail" aria-live="polite"></div>
+      </div>
+      <div class="sim-controls">
+        <div class="control"><span>보기</span><div class="segmented" id="mstatus-view"><button data-value="mstatus" class="on">mstatus 전체</button><button data-value="sstatus">sstatus로 보기</button></div></div>
+        <div class="control"><span>무리 강조</span><div class="segmented" id="mstatus-group"><button data-value="all" class="on">전부</button><button data-value="trap">트랩 스택</button><button data-value="context">확장 상태</button><button data-value="memory">메모리 권한</button><button data-value="virtualization">가상화</button></div></div>
+      </div>
+      <div class="sim-note">“sstatus로 보기”를 누르면 S 모드가 볼 수 있는 필드만 남는다. MIE, MPIE, MPP, MPRV, TVM, TW, TSR처럼 M 모드의 비밀은 모두 사라지고, SIE·SPIE·SPP·SUM·MXR과 FS·VS·XS·SD는 그대로 남는다. 회색 칸(WPRI)도 하나 눌러 보자.</div>
+    </div>
+
+    <h3>sstatus는 mstatus를 들여다보는 창이다</h3>
+    <p>S 모드 소프트웨어는 <code>sstatus</code>(0x100)를 읽고 쓴다. sstatus는 별도의 레지스터가 아니라 <b>mstatus의 제한된 보기</b>다. 규격의 표현대로 단순한 구현에서는 sstatus의 어떤 필드를 읽거나 쓰는 것이 mstatus의 같은 이름 필드를 읽거나 쓰는 것과 같다. 같은 관계가 <code>sie</code>·<code>sip</code>와 <code>mie</code>·<code>mip</code> 사이에도 있다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg id="sstatus-window-svg" viewBox="0 0 840 300" role="img" aria-label="mstatus 아래쪽 25비트와 sstatus의 같은 비트를 나란히 놓은 그림. 공유되는 필드는 점선으로 이어져 있다."></svg></div>
+      <figcaption><b>그림 17-7.</b> mstatus의 비트 24–0과 sstatus의 같은 위치. 점선으로 이어진 필드는 같은 저장소를 두 이름으로 보는 것이고, sstatus 쪽의 빈 회색 칸은 S 모드에게 WPRI(0으로 보임)다. 그림 아래에 정리한 것처럼 위쪽 비트 중에서는 UXL과 SD만 sstatus에 보인다.</figcaption>
+    </figure>
+
+    <h3>트랩 스택: MIE · MPIE · MPP</h3>
+    <p>MIE와 SIE는 각 모드의 <b>전역 인터럽트 허용</b> 비트다. 하트가 모드 x에서 실행 중일 때 xIE=1이면 그 모드의 인터럽트가 전역으로 허용된다. 낮은 모드의 인터럽트는 그 모드의 wIE와 상관없이 항상 막혀 있고, <b>높은 모드의 인터럽트는 yIE와 상관없이 항상 허용</b>된다. 그래서 U 모드에서 돌던 하트는 MIE가 0이어도 M 모드 타이머 인터럽트를 받는다.</p>
+    <p>트랩이 중첩될 수 있도록 각 모드는 두 칸짜리 스택을 가진다. 모드 y에서 모드 x로 트랩이 들어가면 <b>xPIE ← xIE, xIE ← 0, xPP ← y</b>가 된다. xRET은 반대로 <b>xIE ← xPIE, 모드 ← xPP, xPIE ← 1, xPP ← 지원하는 가장 낮은 모드</b>를 수행하고, 새 모드가 M이 아니면 MPRV도 0으로 만든다. MPP는 U·S·M을 모두 담아야 하므로 2비트, SPP는 U·S만 담으면 되므로 1비트다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 840 260" role="img" aria-label="U 모드에서 M 모드로 트랩이 들어갔다가 mret으로 돌아올 때 MIE, MPIE, MPP가 바뀌는 모습">
+        <defs><marker id="stack-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent-2)"/></marker>
+          <marker id="stack-arrow-return" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker></defs>
+        <text x="24" y="79" class="t-mono t-bold">모드</text>
+        <text x="24" y="119" class="t-mono t-bold">MIE</text>
+        <text x="24" y="159" class="t-mono t-bold">MPIE</text>
+        <text x="24" y="199" class="t-mono t-bold">MPP</text>
+        <text x="180" y="26" text-anchor="middle" class="t t-bold">① U 모드 실행 중</text>
+        <rect x="100" y="40" width="160" height="174" rx="12" class="f-teal-soft"/>
+        <rect x="130" y="60" width="100" height="28" rx="6" class="f-elev"/><text x="180" y="79" text-anchor="middle" class="t-mono t-bold">U</text>
+        <rect x="130" y="100" width="100" height="28" rx="6" class="f-elev"/><text x="180" y="119" text-anchor="middle" class="t-mono t-bold">1</text>
+        <rect x="130" y="140" width="100" height="28" rx="6" class="f-elev"/><text x="180" y="159" text-anchor="middle" class="t-mono">?</text>
+        <rect x="130" y="180" width="100" height="28" rx="6" class="f-elev"/><text x="180" y="199" text-anchor="middle" class="t-mono">?</text>
+        <text x="440" y="26" text-anchor="middle" class="t t-bold">② M 모드로 트랩</text>
+        <rect x="360" y="40" width="160" height="174" rx="12" class="f-gold-soft"/>
+        <rect x="390" y="60" width="100" height="28" rx="6" class="f-elev"/><text x="440" y="79" text-anchor="middle" class="t-mono t-bold">M</text>
+        <rect x="390" y="100" width="100" height="28" rx="6" class="f-elev"/><text x="440" y="119" text-anchor="middle" class="t-mono t-bold">0</text>
+        <rect x="390" y="140" width="100" height="28" rx="6" class="f-gold-soft"/><text x="440" y="159" text-anchor="middle" class="t-mono t-bold">1</text>
+        <rect x="390" y="180" width="100" height="28" rx="6" class="f-gold-soft"/><text x="440" y="199" text-anchor="middle" class="t-mono t-bold">00 (U)</text>
+        <text x="700" y="26" text-anchor="middle" class="t t-bold">③ mret 이후</text>
+        <rect x="620" y="40" width="160" height="174" rx="12" class="f-teal-soft"/>
+        <rect x="650" y="60" width="100" height="28" rx="6" class="f-elev"/><text x="700" y="79" text-anchor="middle" class="t-mono t-bold">U</text>
+        <rect x="650" y="100" width="100" height="28" rx="6" class="f-accent-soft"/><text x="700" y="119" text-anchor="middle" class="t-mono t-bold">1</text>
+        <rect x="650" y="140" width="100" height="28" rx="6" class="f-elev"/><text x="700" y="159" text-anchor="middle" class="t-mono t-bold">1</text>
+        <rect x="650" y="180" width="100" height="28" rx="6" class="f-elev"/><text x="700" y="199" text-anchor="middle" class="t-mono t-bold">00 (U)</text>
+        <path d="M232 114 C 300 114, 310 154, 386 154" class="s-gold flow-dash" marker-end="url(#stack-arrow)"/>
+        <path d="M232 74 C 310 74, 300 194, 386 194" class="s-gold flow-dash" marker-end="url(#stack-arrow)"/>
+        <path d="M492 154 C 560 154, 570 114, 646 114" class="s-accent flow-dash" marker-end="url(#stack-arrow-return)"/>
+        <path d="M492 194 C 570 194, 560 74, 646 74" class="s-accent flow-dash" marker-end="url(#stack-arrow-return)"/>
+        <text x="250" y="246" text-anchor="middle" class="t-gold" style="font-size:13px">트랩: MPIE←MIE, MIE←0, MPP←U</text>
+        <text x="600" y="246" text-anchor="middle" class="t-accent" style="font-size:13px">mret: MIE←MPIE, 모드←MPP, MPIE←1, MPP←U</text>
+      </svg></div>
+      <figcaption><b>그림 17-8.</b> 두 칸짜리 트랩 스택. 트랩이 들어오면 “지금” 값이 “직전(P)” 칸으로 밀려 내려가고 인터럽트가 꺼진다. mret은 직전 칸을 다시 끌어올린다. mret 뒤의 MPP가 U인 것은 규격이 xRET 때 xPP를 지원하는 가장 낮은 모드로 바꾸게 했기 때문이다. 스택 관리 버그를 찾기 쉽게 하려는 장치다.</figcaption>
+    </figure>
+
+    <h3>확장 상태: FS · VS · XS와 SD</h3>
+    <p>부동소수점 레지스터 32개와 벡터 레지스터 32개를 문맥 전환 때마다 모두 저장하면 비싸다. 그래서 mstatus는 각 확장 상태가 <b>Off(0), Initial(1), Clean(2), Dirty(3)</b> 중 무엇인지 기록한다. 운영체제는 Dirty인 상태만 메모리에 저장하고 Clean으로 바꿔 두면 된다. SD는 FS·VS·XS 중 하나라도 Dirty이면 1이 되는 읽기 전용 요약 비트로, 최상위 비트에 있어서 부호 검사 한 번으로 “저장할 것이 있는가”를 판정할 수 있다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 840 230" role="img" aria-label="FS와 VS 필드의 네 가지 상태와 전이">
+        <defs><marker id="context-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--text-faint)"/></marker>
+          <marker id="context-arrow-gold" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent-2)"/></marker></defs>
+        <rect x="20" y="70" width="160" height="70" rx="12" class="f-bad-soft"/><text x="100" y="98" text-anchor="middle" class="t t-bold">0 · Off</text><text x="100" y="120" text-anchor="middle" class="t-faint">접근하면 illegal</text>
+        <rect x="230" y="70" width="160" height="70" rx="12" class="f-surface"/><text x="310" y="98" text-anchor="middle" class="t t-bold">1 · Initial</text><text x="310" y="120" text-anchor="middle" class="t-faint">초기 상수 값</text>
+        <rect x="440" y="70" width="160" height="70" rx="12" class="f-teal-soft"/><text x="520" y="98" text-anchor="middle" class="t t-bold">2 · Clean</text><text x="520" y="120" text-anchor="middle" class="t-faint">마지막 저장본과 같음</text>
+        <rect x="650" y="70" width="170" height="70" rx="12" class="f-gold-soft"/><text x="735" y="98" text-anchor="middle" class="t t-bold">3 · Dirty</text><text x="735" y="120" text-anchor="middle" class="t-faint">저장 후 바뀌었을 수 있음</text>
+        <path d="M182 105 H226" class="s-line" marker-end="url(#context-arrow)"/>
+        <text x="205" y="44" text-anchor="middle" class="t-faint">OS가 켬 (새 프로세스는</text>
+        <text x="205" y="60" text-anchor="middle" class="t-faint">0으로 채운 Initial)</text>
+        <path d="M310 142 C 310 196, 735 196, 735 146" class="s-gold flow-dash" marker-end="url(#context-arrow-gold)"/>
+        <path d="M520 142 C 520 176, 700 176, 715 146" class="s-gold flow-dash" marker-end="url(#context-arrow-gold)"/>
+        <text x="560" y="214" text-anchor="middle" class="t-gold" style="font-size:13px">상태를 바꾸는 명령 실행 → Dirty</text>
+        <path d="M735 68 C 735 26, 520 26, 520 64" class="s-accent s-dashed" marker-end="url(#context-arrow)"/>
+        <text x="628" y="22" text-anchor="middle" class="t-accent" style="font-size:13px">문맥 저장 후 OS가 Clean으로</text>
+      </svg></div>
+      <figcaption><b>그림 17-9.</b> FS·VS 필드의 네 상태. 실제 하드웨어가 하는 일은 “상태를 바꾸는 명령이 실행되면 Dirty로 표시”뿐이고, 나머지 전이는 운영체제가 mstatus·sstatus에 직접 써서 만든다. Off 상태는 확장을 아예 잠가 두는 용도로도 쓰인다. 리눅스는 프로세스가 처음 벡터 명령을 쓸 때 일어나는 illegal-instruction 트랩을 보고 그제야 VS를 켠다.</figcaption>
+    </figure>
+
+    <h3>나머지 필드들</h3>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>필드</th><th>뜻</th></tr></thead>
+      <tbody>
+        <tr><td><code>MPRV</code></td><td>1이면 M 모드의 load·store가 <b>MPP 모드인 것처럼</b> 주소 변환·보호를 받는다. 명령어 인출은 영향받지 않는다. 오정렬 접근을 흉내 내는 M 모드 루틴이 소프트웨어 주소 변환 없이 사용자 메모리를 읽을 수 있게 한다. U 모드가 없으면 읽기 전용 0.</td></tr>
+        <tr><td><code>SUM</code></td><td>0이면 S 모드가 U 페이지(PTE의 U=1)에 접근할 때 폴트가 난다. 커널이 실수로 사용자 포인터를 따라가는 일을 막는다(<a href="virtual-memory.html">19장</a>).</td></tr>
+        <tr><td><code>MXR</code></td><td>1이면 실행 전용(X=1) 페이지도 load로 읽을 수 있다. 명령어를 읽어 흉내 내야 하는 처리기용이다.</td></tr>
+        <tr><td><code>TVM</code></td><td>1이면 S 모드의 <code>satp</code> 접근과 <code>SFENCE.VMA</code>·<code>SINVAL.VMA</code>가 illegal-instruction이 된다. 섀도 페이지 테이블로 게스트를 돌릴 때 쓴다.</td></tr>
+        <tr><td><code>TW</code></td><td>1이면 M보다 낮은 모드의 <code>WFI</code>가 구현이 정한 제한 시간 안에 끝나지 않을 때 illegal-instruction이 된다. 놀고 있는 게스트 대신 다른 게스트로 전환하는 데 쓴다.</td></tr>
+        <tr><td><code>TSR</code></td><td>1이면 S 모드의 <code>SRET</code>이 illegal-instruction이 된다. H 확장이 없는 하드웨어에서 하이퍼바이저를 흉내 낼 때 필요하다.</td></tr>
+        <tr><td><code>UXL</code> · <code>SXL</code></td><td>RV64에서 U·S 모드의 XLEN을 고르는 WARL 필드. 인코딩은 misa.MXL과 같다. 읽기 전용으로 만들어 항상 64로 둘 수도 있다.</td></tr>
+        <tr><td><code>UBE</code> · <code>SBE</code> · <code>MBE</code></td><td>명령어 인출을 뺀 메모리 접근의 바이트 순서. 0이 리틀 엔디언, 1이 빅 엔디언이다. 명령어 인출은 언제나 리틀 엔디언이다.</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="field-rules">
+    <h2>WPRI · WLRL · WARL: 필드에 쓰는 약속</h2>
+    <p>CSR의 모든 비트가 모든 값을 받아 주지는 않는다. 어떤 필드는 미래를 위해 비워 두었고, 어떤 필드는 일부 값만 뜻이 있다. 규격은 이런 필드를 세 가지 이름으로 분류하고, 소프트웨어와 하드웨어가 각각 무엇을 지켜야 하는지 정했다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 840 290" role="img" aria-label="WPRI, WLRL, WARL 필드에 값을 쓰고 읽을 때의 동작 비교">
+        <defs><marker id="rules-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--text-faint)"/></marker></defs>
+        <g transform="translate(14,10)">
+          <rect x="0" y="0" width="260" height="270" rx="12" class="f-surface"/>
+          <text x="130" y="28" text-anchor="middle" class="t t-bold">WPRI</text>
+          <text x="130" y="48" text-anchor="middle" class="t-faint">Reserved Writes Preserve, Reads Ignore</text>
+          <rect x="20" y="66" width="220" height="40" rx="8" class="f-elev"/>
+          <text x="130" y="91" text-anchor="middle" class="t-dim">미래를 위한 예약 필드</text>
+          <path d="M130 108 V128" class="s-line" marker-end="url(#rules-arrow)"/>
+          <text x="130" y="148" text-anchor="middle" class="t">SW: 읽은 값은 무시하고,</text>
+          <text x="130" y="168" text-anchor="middle" class="t">다른 필드를 쓸 때 원래 값 보존</text>
+          <path d="M130 180 V200" class="s-line" marker-end="url(#rules-arrow)"/>
+          <text x="130" y="222" text-anchor="middle" class="t">HW: 구현하지 않았으면</text>
+          <text x="130" y="242" text-anchor="middle" class="t-accent">읽기 전용 0</text>
+        </g>
+        <g transform="translate(290,10)">
+          <rect x="0" y="0" width="260" height="270" rx="12" class="f-warn-soft"/>
+          <text x="130" y="28" text-anchor="middle" class="t t-bold">WLRL</text>
+          <text x="130" y="48" text-anchor="middle" class="t-faint">Write/Read Only Legal Values</text>
+          <rect x="20" y="66" width="220" height="40" rx="8" class="f-elev"/>
+          <text x="130" y="91" text-anchor="middle" class="t-dim">예: mcause의 Exception Code</text>
+          <path d="M130 108 V128" class="s-line" marker-end="url(#rules-arrow)"/>
+          <text x="130" y="148" text-anchor="middle" class="t">SW: 합법 값만 써야 한다</text>
+          <text x="130" y="168" text-anchor="middle" class="t-dim">불법 값을 쓰면…</text>
+          <path d="M130 180 V200" class="s-line" marker-end="url(#rules-arrow)"/>
+          <text x="130" y="222" text-anchor="middle" class="t">HW: 예외를 내도 되고,</text>
+          <text x="130" y="242" text-anchor="middle" class="t-warn">아무 비트 패턴을 돌려줘도 됨</text>
+        </g>
+        <g transform="translate(566,10)">
+          <rect x="0" y="0" width="260" height="270" rx="12" class="f-ok-soft"/>
+          <text x="130" y="28" text-anchor="middle" class="t t-bold">WARL</text>
+          <text x="130" y="48" text-anchor="middle" class="t-faint">Write Any Values, Reads Legal Values</text>
+          <rect x="20" y="66" width="220" height="40" rx="8" class="f-elev"/>
+          <text x="130" y="91" text-anchor="middle" class="t-dim">예: misa, mtvec, MPP, pmpaddr</text>
+          <path d="M130 108 V128" class="s-line" marker-end="url(#rules-arrow)"/>
+          <text x="130" y="148" text-anchor="middle" class="t">SW: 아무 값이나 써도 된다</text>
+          <text x="130" y="168" text-anchor="middle" class="t-dim">예외는 절대 나지 않는다</text>
+          <path d="M130 180 V200" class="s-line" marker-end="url(#rules-arrow)"/>
+          <text x="130" y="222" text-anchor="middle" class="t">HW: 읽으면 언제나</text>
+          <text x="130" y="242" text-anchor="middle" class="t-ok">합법 값 → 써 보고 읽어서 탐지</text>
+        </g>
+      </svg></div>
+      <figcaption><b>그림 17-10.</b> 세 가지 필드 규칙. WARL은 “써 보고 다시 읽기”로 하드웨어가 무엇을 지원하는지 알아낼 수 있다는 점이 핵심이다. WLRL에 불법 값을 쓴 뒤 읽은 값은 임의일 수 있지만, 규격은 그 값이 쓴 값과 이전 값에 따라 결정적으로 정해져야 한다고 권한다.</figcaption>
+    </figure>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>규칙</th><th>소프트웨어가 지킬 것</th><th>하드웨어가 지킬 것</th><th>대표 예</th></tr></thead>
+      <tbody>
+        <tr><td><b>WPRI</b></td><td>읽은 값을 무시하고, 다른 필드를 고칠 때 이 필드의 값을 그대로 다시 쓴다</td><td>필드를 갖추지 않았다면 읽기 전용 0</td><td>mstatus 비트 0·2·4·31:25</td></tr>
+        <tr><td><b>WLRL</b></td><td>합법 값만 쓴다. 불법 값을 쓴 뒤 읽은 값을 믿지 않는다</td><td>지원 값만 구별할 만큼의 비트를 두되, 읽으면 전체 인코딩을 돌려준다. 불법 값 쓰기에 예외를 내도 된다(필수 아님)</td><td>mcause·scause의 Exception Code</td></tr>
+        <tr><td><b>WARL</b></td><td>아무 값이나 쓸 수 있다</td><td>예외 없이 받아들이고, 읽으면 항상 합법 값. 불법 값을 쓴 뒤에는 쓴 값과 하트 상태에 따라 결정적으로 정해지는 합법 값</td><td>misa, mtvec, MPP, SXL·UXL, pmpaddr, medeleg</td></tr>
+      </tbody>
+    </table></div>
+    <p>WARL 덕분에 펌웨어는 별도의 기능 목록 없이도 하드웨어를 탐지할 수 있다. 규격 비고에 나오는 예가 MPP다. MPP는 구현된 모드만 담을 수 있는 WARL 필드이므로, S(01)를 써 보고 다시 읽어서 01이 남아 있으면 S 모드가 있는 것이다. U와 M만 있는 하트라면 MPP를 담는 데 하드웨어 저장 비트가 하나면 충분하다(00 또는 11).</p>
+    <div class="codebox" data-title="WARL 탐지 — S 모드가 구현되어 있는가? (M 모드에서 실행)"><span class="keyword">li</span>    <span class="register">t0</span>, <span class="number">0x1800</span>          <span class="comment"># MPP 필드 마스크 (mstatus 비트 12:11)</span>
+<span class="keyword">csrc</span>  mstatus, <span class="register">t0</span>         <span class="comment"># MPP = 00</span>
+<span class="keyword">li</span>    <span class="register">t1</span>, <span class="number">0x0800</span>          <span class="comment"># MPP = 01 (S) 을 써 본다</span>
+<span class="keyword">csrs</span>  mstatus, <span class="register">t1</span>
+<span class="keyword">csrr</span>  <span class="register">t2</span>, mstatus
+<span class="keyword">and</span>   <span class="register">t2</span>, <span class="register">t2</span>, <span class="register">t0</span>
+<span class="keyword">bne</span>   <span class="register">t2</span>, <span class="register">t1</span>, <span class="label">no_s_mode</span>   <span class="comment"># 01 이 남아 있지 않으면 S 모드가 없다</span></div>
+    <div class="callout deep"><strong>다른 CSR이 합법 값을 바꿀 때</strong><p>한 CSR에 쓴 값이 다른 CSR 필드의 합법 값 집합을 바꾸는 경우가 있다. 규격은 따로 정하지 않은 한, 두 번째 필드가 <b>새 합법 값 중 UNSPECIFIED한 값</b>을 즉시 갖는다고 정한다. 이전 값이 여전히 합법이어도 바뀔 수 있다. 이런 변화는 그 CSR에 대한 “쓰기”가 아니므로 쓰기에 딸린 부수 효과도 일으키지 않는다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="counters">
+    <h2>카운터와 접근 문: mcounteren · scounteren · mcountinhibit</h2>
+    <p>성능 측정과 시간 측정을 위해 M 모드에는 64비트 카운터가 있다. <code>mcycle</code>(0xB00)은 하트가 돌고 있는 코어의 클럭 사이클을, <code>minstret</code>(0xB02)은 완료(retire)한 명령 수를 센다. 여기에 이벤트를 고를 수 있는 <code>mhpmcounter3</code>–<code>mhpmcounter31</code>(0xB03–0xB1F)과 그 이벤트 선택기 <code>mhpmevent3</code>–<code>mhpmevent31</code>(0x323–0x33F)이 있다. RV32에서는 위쪽 32비트를 <code>…h</code> CSR로 따로 읽는다.</p>
+    <p>낮은 모드는 같은 값을 읽기 전용 그림자로 본다. <code>cycle</code>(0xC00), <code>instret</code>(0xC02), <code>hpmcounter3–31</code>(0xC03–0xC1F)이 그것이고, <code>time</code>(0xC01)은 메모리 사상 레지스터 <code>mtime</code>의 그림자다. 그런데 카운터는 부채널 공격의 재료가 될 수도 있고, 가상화 환경에서는 값을 가공해 보여 줘야 할 수도 있다. 그래서 규격은 카운터마다 <b>문</b>을 달았다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 56 840 204" role="img" aria-label="카운터 접근 문. M에서 S로 가는 문은 mcounteren, S에서 U로 가는 문은 scounteren이 연다. mcountinhibit는 카운터 자체를 멈춘다.">
+        <defs><marker id="gate-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker>
+          <path id="gate-path-flow" d="M190 130 H 640"/></defs>
+        <rect x="20" y="70" width="170" height="120" rx="12" class="f-gold-soft"/>
+        <text x="105" y="100" text-anchor="middle" class="t t-bold">카운터 본체</text>
+        <text x="105" y="124" text-anchor="middle" class="t-mono">mcycle · minstret</text>
+        <text x="105" y="144" text-anchor="middle" class="t-mono">mhpmcounter3–31</text>
+        <text x="105" y="166" text-anchor="middle" class="t-faint">(+ 메모리의 mtime)</text>
+        <rect x="40" y="206" width="130" height="34" rx="8" class="f-bad-soft"/>
+        <text x="105" y="228" text-anchor="middle" class="t-mono" style="font-size:12px">mcountinhibit</text>
+        <text x="178" y="228" class="t-faint">← 브레이크: 증가 멈춤</text>
+        <use href="#gate-path-flow" class="s-accent flow-dash"/>
+        <circle r="6" fill="var(--accent-2)"><animateMotion dur="3s" begin="-0.5s" repeatCount="indefinite"><mpath href="#gate-path-flow"/></animateMotion></circle>
+        <circle r="6" fill="var(--accent-2)"><animateMotion dur="3s" begin="-2s" repeatCount="indefinite"><mpath href="#gate-path-flow"/></animateMotion></circle>
+        <!-- 문 1 -->
+        <rect x="280" y="96" width="26" height="68" rx="4" class="f-accent"/>
+        <text x="293" y="84" text-anchor="middle" class="t-accent" style="font-size:13px">mcounteren</text>
+        <text x="293" y="196" text-anchor="middle" class="t-faint">M이 연다</text>
+        <rect x="370" y="88" width="120" height="94" rx="12" class="f-violet-soft"/>
+        <text x="430" y="114" text-anchor="middle" class="t t-bold">S 모드</text>
+        <text x="430" y="152" text-anchor="middle" class="t-faint">cycle · time ·</text>
+        <text x="430" y="166" text-anchor="middle" class="t-faint">instret 읽기</text>
+        <!-- 문 2 -->
+        <rect x="550" y="96" width="26" height="68" rx="4" class="f-accent"/>
+        <text x="563" y="84" text-anchor="middle" class="t-accent" style="font-size:13px">scounteren</text>
+        <text x="563" y="196" text-anchor="middle" class="t-faint">S가 연다</text>
+        <rect x="640" y="88" width="180" height="94" rx="12" class="f-teal-soft"/>
+        <text x="730" y="114" text-anchor="middle" class="t t-bold">U 모드</text>
+        <text x="730" y="152" text-anchor="middle" class="t-faint">두 문이 모두</text>
+        <text x="730" y="166" text-anchor="middle" class="t-faint">열려 있어야 읽기 가능</text>
+        <text x="530" y="232" text-anchor="middle" class="t-dim">비트 배치(두 문 공통): CY = 0 · TM = 1 · IR = 2 · HPM3–31 = 3–31</text>
+      </svg></div>
+      <figcaption><b>그림 17-11.</b> 카운터 접근 문. mcounteren은 “다음으로 구현된 낮은 모드”(S가 있으면 S, 없으면 U)의 읽기를, scounteren은 U 모드의 읽기를 허락한다. 문이 닫혀 있으면 읽기가 illegal-instruction 예외가 되고, M 모드는 그 트랩을 받아 값을 흉내 내 줄 수 있다. mcountinhibit는 문이 아니라 카운터 자체의 브레이크다.</figcaption>
+    </figure>
+    <ul>
+      <li><b>mcounteren</b>(0x306, 32비트): CY·TM·IR·HPMn 비트가 0이면 S·U 모드에서 해당 카운터를 읽을 때 illegal-instruction 예외가 난다. TM 비트는 S 모드의 <code>stimecmp</code> 접근(Sstc)도 함께 관리한다. U 모드가 있는 하트에는 반드시 있지만 모든 비트가 읽기 전용 0이어도 된다.</li>
+      <li><b>scounteren</b>(0x106, 32비트): 같은 배치로 U 모드의 읽기를 관리한다. U 모드는 <b>scounteren과 mcounteren의 같은 비트가 모두 1</b>일 때만 카운터를 읽을 수 있다.</li>
+      <li><b>mcountinhibit</b>(0x320, 32비트 WARL): CY·IR·HPMn 비트가 1이면 해당 카운터가 증가를 멈춘다. 접근 가능 여부에는 영향이 없다. <b>비트 1(TM)은 없다.</b> mtime은 여러 코어가 함께 쓰는 실시간 시계라서 한 하트가 멈출 수 없기 때문이다. 쓰지 않는 카운터를 멈춰 전력을 아끼고, 모든 카운터를 한꺼번에 멈춰 원자적으로 읽는 데 쓴다.</li>
+    </ul>
+
+    <div class="sim" id="counter-gate-sim">
+      <div class="sim-head"><span class="sim-tag">SIMULATOR</span><h3>카운터 문 열고 닫기</h3></div>
+      <div class="sim-pad">
+        <div class="gate-grid">
+          <div class="gate-box"><h4>mcounteren (M이 설정)</h4><label class="checkbox"><input type="checkbox" id="gate-m-cy" checked> CY</label><label class="checkbox"><input type="checkbox" id="gate-m-tm" checked> TM</label><label class="checkbox"><input type="checkbox" id="gate-m-ir"> IR</label></div>
+          <div class="gate-box"><h4>scounteren (S가 설정)</h4><label class="checkbox"><input type="checkbox" id="gate-s-cy"> CY</label><label class="checkbox"><input type="checkbox" id="gate-s-tm" checked> TM</label><label class="checkbox"><input type="checkbox" id="gate-s-ir" checked> IR</label></div>
+          <div class="gate-box"><h4>mcountinhibit (M이 설정)</h4><label class="checkbox"><input type="checkbox" id="gate-inhibit-cy"> CY</label><label class="checkbox"><input type="checkbox" id="gate-inhibit-ir"> IR</label><div class="decoder-notes" style="font-size:12.5px;margin-top:4px">TM 비트는 없다 (항상 0)</div></div>
+        </div>
+        <div class="table-wrap" style="margin:16px 0 0"><table class="gate-result" id="gate-result-table"></table></div>
+      </div>
+      <div class="sim-note">처음 설정에서 U 모드의 <code>rdtime</code>은 성공하지만 <code>rdcycle</code>은 실패한다. mcounteren.CY는 열려 있어도 scounteren.CY가 닫혀 있기 때문이다. 반대로 IR은 S가 열어 주었는데도 M이 막고 있어 U도 S도 읽지 못한다. 리눅스는 보안 때문에 사용자 공간의 <code>cycle</code> 직접 읽기를 막아 두는 경우가 있다.</div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="stateen-indirect">
+    <h2>새 상태 지키기와 간접 접근: Smstateen · Smcsrind</h2>
+    <h3>Smstateen: 운영체제가 모르는 상태를 막는 문</h3>
+    <p>새 확장이 하트에 레지스터를 추가했는데, 오래된 운영체제나 하이퍼바이저는 그 존재를 모른다고 하자. 문맥 전환 때 그 레지스터를 저장·복원하지 않으므로, 한 사용자 스레드나 게스트 OS가 써 둔 값을 다른 스레드나 게스트가 읽을 수 있다. 이것이 <span class="term">은닉 채널</span><span class="english">(covert channel)</span>이다. 부동소수점과 벡터는 mstatus의 FS·VS 필드로 막을 수 있지만, 확장마다 sstatus에 필드를 하나씩 줄 수는 없다. 그래서 <span class="term">Smstateen/Ssstateen</span> 확장은 “상태 허용” 비트를 모아 둘 전용 CSR을 만들었다.</p>
+    <ul>
+      <li><code>mstateen0–3</code>(0x30C–0x30F, RV32 상위 절반 0x31C–0x31F), <code>sstateen0–3</code>(0x10C–0x10F), H 확장이 있으면 <code>hstateen0–3</code>(0x60C–0x60F, 상위 절반 0x61C–0x61F).</li>
+      <li>각 수준의 stateen은 <b>자기보다 낮은 모든 수준</b>의 접근을 관리한다. counteren과 같은 방식이다. 막힌 상태에 접근하면 illegal-instruction(가상화 상황에서는 virtual-instruction) 예외다.</li>
+      <li>mstateen의 어떤 비트가 0이면 hstateen과 sstateen의 같은 비트는 읽기 전용 0으로 보인다. 위에서 닫으면 아래에서 열 수 없다.</li>
+      <li>sstateen의 비트는 아래(비트 0)부터, mstateen에만 있는 비트(U 수준에서는 원래 보이지 않는 상태)는 위(비트 63)부터 배정한다.</li>
+    </ul>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 840 290" role="img" aria-label="mstateen0 비트 배치와 M, H, S 수준으로 이어지는 허용 관계">
+        <g transform="translate(20,20)">
+          <text x="0" y="12" class="t t-bold">mstateen0</text>
+          <text x="120" y="12" class="t-faint">비트 63 …… 48 (M 이하 수준용 상태)</text>
+          <text x="800" y="12" text-anchor="end" class="t-faint">2 1 0 (U 수준까지 보이는 상태)</text>
+        </g>
+        <g id="stateen-figure-bits" transform="translate(20,44)"></g>
+        <g transform="translate(20,170)">
+          <rect x="0" y="0" width="230" height="56" rx="10" class="f-gold-soft"/>
+          <text x="115" y="24" text-anchor="middle" class="t t-bold">mstateen0 (M)</text>
+          <text x="115" y="44" text-anchor="middle" class="t-faint">비트 = 0 → 아래 전부 막힘</text>
+          <rect x="290" y="0" width="230" height="56" rx="10" class="f-violet-soft"/>
+          <text x="405" y="24" text-anchor="middle" class="t t-bold">hstateen0 (HS)</text>
+          <text x="405" y="44" text-anchor="middle" class="t-faint">VS·VU 모드 접근 관리</text>
+          <rect x="580" y="0" width="220" height="56" rx="10" class="f-teal-soft"/>
+          <text x="690" y="24" text-anchor="middle" class="t t-bold">sstateen0 (S)</text>
+          <text x="690" y="44" text-anchor="middle" class="t-faint">U·VU 모드 접근 관리</text>
+          <path d="M232 28 H286" class="s-accent flow-dash"/>
+          <path d="M522 28 H576" class="s-accent flow-dash"/>
+          <text x="400" y="92" text-anchor="middle" class="t-dim">SE0(비트 63)는 아래 수준의 stateen CSR 자체에 대한 접근을 연다</text>
+        </g>
+      </svg></div>
+      <figcaption><b>그림 17-12.</b> mstateen0의 정의된 비트. C(비트 0)는 모든 custom 상태, FCSR(1)은 Zfinx 계열에서의 fcsr, JVT(2)는 Zcmt의 jvt, 위쪽의 CTR·SRMCFG·P1P13·CONTEXT·IMSIC·AIA·CSRIND·ENVCFG·SE0는 각각 Smctr, Ssqosid의 srmcfg, hedelegh, Sdtrig의 context, AIA, Smcsrind, envcfg CSR, 그리고 하위 stateen 자체에 대한 접근을 관리한다. 위 수준에서 0인 비트는 아래 수준에서 읽기 전용 0이다.</figcaption>
+    </figure>
+
+    <h3>Smcsrind: 창 하나로 레지스터 배열 읽기</h3>
+    <p>인터럽트 우선순위 표나 성능 카운터 설정처럼 비슷한 레지스터가 수십 개씩 늘어선 상태를 모두 CSR 주소에 하나씩 배정하면 4096칸이 금방 바닥난다. 게다가 번호로 순회하려면 CSR 번호가 명령어에 박혀 있으므로 <code>switch</code> 문이 필요하다. <span class="term">Smcsrind/Sscsrind</span>는 AIA 확장에서 시작된 <b>간접 접근</b> 방식을 일반화했다. 선택 레지스터에 번호를 쓰고, 별칭 레지스터를 읽고 쓰면 그 번호의 레지스터에 접근한다.</p>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>수준</th><th>선택 CSR</th><th>별칭 CSR</th></tr></thead>
+      <tbody>
+        <tr><td>M</td><td><code>miselect</code> 0x350</td><td><code>mireg</code> 0x351, <code>mireg2</code> 0x352, <code>mireg3</code> 0x353, <code>mireg4–6</code> 0x355–0x357</td></tr>
+        <tr><td>S</td><td><code>siselect</code> 0x150</td><td><code>sireg</code> 0x151, <code>sireg2</code> 0x152, <code>sireg3</code> 0x153, <code>sireg4–6</code> 0x155–0x157</td></tr>
+        <tr><td>VS</td><td><code>vsiselect</code> 0x250</td><td><code>vsireg</code> 0x251 … <code>vsireg6</code> 0x257 (0x254 제외)</td></tr>
+      </tbody>
+    </table></div>
+    <p>별칭 번호가 0x354를 건너뛰는 것은 그 자리가 AIA의 <code>miph</code>에 이미 배정되어 있기 때문이다. 선택 값의 최상위 비트(XLEN-1)가 1이면 custom 용도이고, 0이면 표준 확장에 배정된다. 지금 배정된 값으로는 AIA의 <code>iprio0–15</code>(0x30–0x3F), <code>eidelivery</code>(0x70), <code>eithreshold</code>(0x72), <code>eip0–63</code>(0x80–0xBF), <code>eie0–63</code>(0xC0–0xFF)가 있고, S 수준에서는 카운터 위임용 0x40–0x5F와 제어 전송 기록(Smctr)용 0x200–0x2FF가 더 있다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 840 270" role="img" aria-label="miselect에 번호를 쓰면 mireg가 그 번호의 레지스터를 가리키는 간접 접근 그림">
+        <defs><path id="indirect-path-select" d="M250 70 C 330 70, 360 152, 470 152"/>
+          <path id="indirect-path-data" d="M470 168 C 360 168, 330 210, 250 210"/>
+          <marker id="indirect-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker></defs>
+        <rect x="30" y="40" width="220" height="60" rx="10" class="f-accent-soft"/>
+        <text x="140" y="64" text-anchor="middle" class="t-mono t-bold">miselect = 0x72</text>
+        <text x="140" y="86" text-anchor="middle" class="t-faint">“몇 번 레지스터를 볼까”</text>
+        <rect x="30" y="180" width="220" height="60" rx="10" class="f-gold-soft"/>
+        <text x="140" y="204" text-anchor="middle" class="t-mono t-bold">mireg</text>
+        <text x="140" y="226" text-anchor="middle" class="t-faint">읽기·쓰기가 선택된 곳으로</text>
+        <use href="#indirect-path-select" class="s-accent flow-dash" marker-end="url(#indirect-arrow)"/>
+        <use href="#indirect-path-data" class="s-gold flow-dash"/>
+        <circle r="6" fill="var(--accent)"><animateMotion dur="2.6s" begin="-0.3s" repeatCount="indefinite"><mpath href="#indirect-path-select"/></animateMotion></circle>
+        <circle r="6" fill="var(--accent-2)"><animateMotion dur="2.6s" begin="-1.6s" repeatCount="indefinite"><mpath href="#indirect-path-data"/></animateMotion></circle>
+        <g transform="translate(476,20)">
+          <rect x="0" y="0" width="330" height="236" rx="12" class="f-surface"/>
+          <text x="165" y="22" text-anchor="middle" class="t-dim">선택 값이 가리키는 레지스터 (AIA IMSIC)</text>
+          <rect x="16" y="36" width="298" height="26" rx="6" class="f-elev"/><text x="28" y="54" class="t-mono" style="font-size:12px">0x30–0x3F</text><text x="140" y="54" class="t-dim">iprio0 – iprio15</text>
+          <rect x="16" y="68" width="298" height="26" rx="6" class="f-elev"/><text x="28" y="86" class="t-mono" style="font-size:12px">0x70</text><text x="140" y="86" class="t-dim">eidelivery</text>
+          <rect x="16" y="100" width="298" height="26" rx="6" class="f-elev"/><text x="28" y="118" class="t-mono" style="font-size:12px">0x71</text><text x="140" y="118" class="t-faint">0 (예약)</text>
+          <rect x="16" y="132" width="298" height="30" rx="6" class="f-gold-soft blink-highlight"/><text x="28" y="152" class="t-mono t-bold" style="font-size:12px">0x72</text><text x="140" y="152" class="t t-bold">eithreshold</text>
+          <rect x="16" y="168" width="298" height="26" rx="6" class="f-elev"/><text x="28" y="186" class="t-mono" style="font-size:12px">0x80–0xBF</text><text x="140" y="186" class="t-dim">eip0 – eip63</text>
+          <rect x="16" y="200" width="298" height="26" rx="6" class="f-elev"/><text x="28" y="218" class="t-mono" style="font-size:12px">0xC0–0xFF</text><text x="140" y="218" class="t-dim">eie0 – eie63</text>
+        </g>
+      </svg></div>
+      <figcaption><b>그림 17-13.</b> 간접 CSR 접근. <code>csrw miselect, 0x72</code> 다음 <code>csrr t0, mireg</code>를 실행하면 CSR 주소를 하나도 더 쓰지 않고 IMSIC의 <code>eithreshold</code>를 읽는다. 지원하지 않는 선택 값으로 mireg에 접근했을 때의 동작은 UNSPECIFIED이며, 구현은 보통 illegal-instruction 예외를 낼 것으로 기대된다.</figcaption>
+    </figure>
+    <div class="codebox" data-title="간접 접근으로 우선순위 레지스터 16개를 순회하기 (M 모드)"><span class="keyword">li</span>    <span class="register">t0</span>, <span class="number">0x30</span>            <span class="comment"># iprio0 의 선택 값</span>
+<span class="keyword">li</span>    <span class="register">t1</span>, <span class="number">0x40</span>            <span class="comment"># iprio15 다음 값</span>
+<span class="label">loop:</span>
+<span class="keyword">csrw</span>  miselect, <span class="register">t0</span>        <span class="comment"># 번호만 바꾸면 되므로 switch 문이 필요 없다</span>
+<span class="keyword">csrw</span>  mireg, <span class="register">zero</span>         <span class="comment"># 선택된 iprio 레지스터를 0 으로</span>
+<span class="keyword">addi</span>  <span class="register">t0</span>, <span class="register">t0</span>, <span class="number">1</span>
+<span class="keyword">bne</span>   <span class="register">t0</span>, <span class="register">t1</span>, <span class="label">loop</span></div>
+    <div class="callout tip"><strong>이 장에서 다루지 않은 CSR</strong><p>트랩 처리 CSR(mtvec, mepc, mcause, mtval, mip, mie, medeleg, mideleg)은 <a href="trap.html">18장</a>, satp와 Sv39는 <a href="virtual-memory.html">19장</a>, pmpcfg·pmpaddr·mseccfg는 <a href="memory-protection.html">20장</a>, hstatus·hgatp 같은 하이퍼바이저 CSR은 <a href="hypervisor.html">21장</a>에서 다룬다.</p></div>
+  </section>
+
+  <section class="keypoints" id="summary">
+    <h2>핵심 정리</h2>
+    <ol>
+      <li>RISC-V의 특권 수준은 U(00), S(01), M(11) 셋이며 10은 예약이다. <b>M 모드만 필수</b>이고, 구현은 M / M·U / M·S·U 중 하나를 고른다.</li>
+      <li>하트는 언제나 한 모드에서만 실행되며, 모드는 <b>트랩(같거나 더 높은 모드로)</b>과 <b>xRET(저장해 둔 모드로)</b>으로만 바뀐다.</li>
+      <li>CSR 주소 12비트 중 <code>[11:10]=11</code>이면 읽기 전용, <code>[9:8]</code>은 접근 가능한 최소 특권(00 U, 01 S, 10 HS, 11 M)이다. 특권 부족이나 읽기 전용 CSR 쓰기는 illegal-instruction 예외다.</li>
+      <li><code>csrr</code>(=<code>csrrs rd, csr, x0</code>)은 쓰기를 하지 않으므로 읽기 전용 CSR에도 안전하지만, <code>csrw</code>는 값과 상관없이 쓰기를 시도한다.</li>
+      <li><b>misa</b>는 MXL(XLEN)과 A–Z 확장 비트를 담는 WARL 레지스터다. 의존 관계를 어기는 쓰기는 관련 기능을 모두 끈다.</li>
+      <li><b>mstatus</b>는 인터럽트 허용·트랩 스택(MIE·MPIE·MPP), 확장 상태(FS·VS·XS·SD), 메모리 권한(MPRV·SUM·MXR), 가상화 가로채기(TVM·TW·TSR)를 모은 조종판이며, <b>sstatus</b>는 그 제한된 보기다.</li>
+      <li>WPRI는 보존·무시, WLRL은 합법 값만 쓰기, WARL은 무엇이든 쓰고 합법 값만 읽기다. WARL은 “써 보고 읽기”로 하드웨어 기능을 탐지하게 해 준다.</li>
+      <li>카운터 읽기는 mcounteren(→S)과 scounteren(→U)이 문을 열어야 가능하고, mcountinhibit은 증가만 멈춘다. Smstateen은 새 확장 상태를 막는 문, Smcsrind는 선택·별칭 CSR로 레지스터 배열에 접근하는 창이다.</li>
+    </ol>
+  </section>
+
+  <section id="quiz">
+    <h2>확인 퀴즈</h2>
+    <div class="quiz">
+      <div class="quiz-question"><p>모든 RISC-V 하드웨어 구현이 반드시 갖춰야 하는 특권 모드는?</p><div class="options">
+        <button class="option">U 모드</button>
+        <button class="option">S 모드</button>
+        <button class="option" data-correct>M 모드</button>
+        <button class="option">U와 M 모드 둘 다</button>
+      </div><div class="quiz-explanation">M 모드는 기계 전체에 제한 없이 접근할 수 있는 유일한 모드라서 모든 구현에 필수다. 가장 단순한 구현은 M 모드만 가질 수 있다.</div></div>
+      <div class="quiz-question"><p>CSR 주소 <code>0xC01</code>(time)에 대해 주소만 보고 말할 수 있는 것은?</p><div class="options">
+        <button class="option">M 모드에서만 읽을 수 있는 읽기·쓰기 CSR이다</button>
+        <button class="option" data-correct>읽기 전용이고, U 모드부터 접근할 수 있는 수준이다</button>
+        <button class="option">S 모드 이상에서 쓸 수 있는 CSR이다</button>
+        <button class="option">custom 영역이라 구현마다 뜻이 다르다</button>
+      </div><div class="quiz-explanation">0xC01 = 11 00 0000 0001. [11:10]=11이라 읽기 전용, [9:8]=00이라 U 수준이다. 단, 실제로 U에서 읽으려면 mcounteren.TM과 scounteren.TM이 열려 있어야 한다.</div></div>
+      <div class="quiz-question"><p>M 모드에서 <code>csrw mhartid, t0</code>를 실행하면?</p><div class="options">
+        <button class="option">mhartid가 t0 값으로 바뀐다</button>
+        <button class="option">쓰기가 조용히 무시된다</button>
+        <button class="option" data-correct>illegal-instruction 예외가 발생한다</button>
+        <button class="option">t0가 0일 때만 성공한다</button>
+      </div><div class="quiz-explanation">0xF14는 [11:10]=11인 읽기 전용 CSR이다. 읽기 전용 레지스터에 쓰기를 시도하면 특권과 상관없이 illegal-instruction 예외가 난다. (읽기·쓰기 CSR 안의 읽기 전용 <i>비트</i>라면 무시된다.)</div></div>
+      <div class="quiz-question"><p>M·S·U가 있는 하트에서 mcounteren.CY=1, scounteren.CY=0일 때 <code>rdcycle</code>의 결과는?</p><div class="options">
+        <button class="option">S와 U 모두 성공</button>
+        <button class="option" data-correct>S는 성공, U는 illegal-instruction 예외</button>
+        <button class="option">S는 예외, U는 성공</button>
+        <button class="option">둘 다 예외</button>
+      </div><div class="quiz-explanation">mcounteren은 S의 접근을, scounteren은 U의 접근을 연다. U는 두 레지스터의 같은 비트가 모두 1이어야 한다.</div></div>
+      <div class="quiz-question"><p>misa의 MXL 필드가 2라면?</p><div class="options">
+        <button class="option">XLEN = 32</button>
+        <button class="option" data-correct>XLEN = 64</button>
+        <button class="option">XLEN = 128</button>
+        <button class="option">misa가 구현되지 않았다</button>
+      </div><div class="quiz-explanation">MXLEN = 2<sup>MXL+4</sup>이므로 MXL=1은 32, MXL=2는 64다. MXL=3은 예약이다. misa 전체가 0이면 misa를 구현하지 않았다는 뜻이다.</div></div>
+      <div class="quiz-question"><p>WARL 필드에 대한 설명으로 옳은 것은?</p><div class="options">
+        <button class="option">합법 값만 써야 하며, 불법 값을 쓰면 반드시 예외가 난다</button>
+        <button class="option">읽은 값은 무시하고 쓸 때 원래 값을 보존해야 한다</button>
+        <button class="option" data-correct>어떤 값을 써도 예외가 없고, 읽으면 항상 합법 값이 나온다</button>
+        <button class="option">한 번 쓰면 리셋까지 바뀌지 않는다</button>
+      </div><div class="quiz-explanation">첫째는 WLRL(예외는 선택 사항), 둘째는 WPRI에 대한 설명이다. WARL은 “써 보고 다시 읽기”로 지원 값을 알아낼 수 있다.</div></div>
+      <div class="quiz-question"><p>S 모드 소프트웨어가 sstatus를 읽었을 때 볼 수 <b>없는</b> 필드는?</p><div class="options">
+        <button class="option">SPP</button>
+        <button class="option">FS</button>
+        <button class="option" data-correct>MPP</button>
+        <button class="option">SUM</button>
+      </div><div class="quiz-explanation">sstatus는 mstatus의 제한된 보기다. MIE·MPIE·MPP·MPRV·TVM·TW·TSR 같은 M 모드 필드는 sstatus에서 보이지 않는다.</div></div>
+      <div class="quiz-question"><p>Smstateen 확장이 해결하려는 문제는?</p><div class="options">
+        <button class="option">CSR 주소 공간이 부족한 문제</button>
+        <button class="option" data-correct>운영체제·하이퍼바이저가 모르는 확장 상태가 문맥 사이의 은닉 채널이 되는 문제</button>
+        <button class="option">카운터가 너무 빨리 넘치는 문제</button>
+        <button class="option">인터럽트 우선순위를 바꿀 수 없는 문제</button>
+      </div><div class="quiz-explanation">새 확장의 상태를 낮은 수준이 쓰지 못하게 막아 두면, 그 상태를 저장·복원하지 않는 오래된 소프트웨어 아래에서도 정보가 새지 않는다. CSR 주소 절약은 Smcsrind의 목표다.</div></div>
+    </div>
+  </section>
+
+  <section id="references">
+    <h2>더 읽을거리</h2>
+    <ul class="references">
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/priv/priv-intro.html" target="_blank" rel="noopener">The RISC-V Instruction Set Manual, Volume II: Privileged Architecture — Introduction</a> (v20260120): 특권 수준, 소프트웨어 스택 용어</li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/priv/priv-csrs.html" target="_blank" rel="noopener">Chapter 1. Control and Status Registers (CSRs)</a>: 주소 규칙, 할당표, WPRI·WLRL·WARL</li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/priv/machine.html" target="_blank" rel="noopener">Chapter 2. Machine-Level ISA, Version 1.13</a>: misa, ID 레지스터, mstatus, 카운터</li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/priv/supervisor.html" target="_blank" rel="noopener">Chapter 11. Supervisor-Level ISA, Version 1.13</a>: sstatus, scounteren</li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/priv/smstateen.html" target="_blank" rel="noopener">Chapter 3. "Smstateen/Ssstateen" Extensions, Version 1.0</a></li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/priv/indirect-csr.html" target="_blank" rel="noopener">Chapter 4. "Smcsrind/Sscsrind" Indirect CSR Access, Version 1.0</a></li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/zicsr.html" target="_blank" rel="noopener">Volume I — "Zicsr" Extension for Control and Status Register Instructions</a></li>
+      <li><a href="https://docs.riscv.org/reference/aia/v1.0/index.html" target="_blank" rel="noopener">RISC-V Advanced Interrupt Architecture (AIA) v1.0</a>: miselect로 접근하는 IMSIC 레지스터</li>
+    </ul>
+  </section>
+</main>
+
+<script>
+/* ---------------------------------------------------------------------------
+   공용 자료: 이 장의 여러 그림·시뮬레이터가 함께 쓰는 SVG 도우미.
+   전역을 더럽히지 않도록 window.PrivilegeChapter 한 곳에만 둔다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
+
+  /** 속성 객체를 받아 SVG 요소를 만든다. textContent 는 따로 넘긴다. */
+  function createSvgElement(tagName, attributes, textContent) {
+    const element = document.createElementNS(SVG_NAMESPACE, tagName);
+    Object.entries(attributes || {}).forEach(([name, value]) => element.setAttribute(name, value));
+    if (textContent !== undefined) element.textContent = textContent;
+    return element;
+  }
+
+  window.PrivilegeChapter = { createSvgElement };
+})();
+
+/* ---------------------------------------------------------------------------
+   하트 한 개의 특권 모드 타임라인 (캔버스 애니메이션)
+   Sstc 가 없는 시스템에서 시스템 호출과 타이머 인터럽트가 지나가는 길을 보여 준다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const MODE_LEVELS = { U: 0, S: 1, M: 3 };
+  const LANE_ORDER = ["M", "S", "U"];
+  // 시간 단위는 임의의 “칸”이다. 실제 시간 비율이 아니라 흐름을 보기 좋게 잡았다.
+  const SEGMENTS = [
+    { start: 0, end: 3, mode: "U", text: "U 모드에서 응용 프로그램이 실행된다." },
+    { start: 3, end: 5, mode: "S", text: "medeleg[8]=1 이므로 U 모드의 ecall 이 곧바로 S 모드 처리기로 간다. scause = 8 (Environment call from U-mode)." },
+    { start: 5, end: 8, mode: "U", text: "커널이 sret 으로 응용 프로그램에 돌아왔다. SPP=0 이었으므로 U 모드가 된다." },
+    { start: 8, end: 9.2, mode: "M", text: "mtime ≥ mtimecmp → M 타이머 인터럽트(코드 7). mideleg[7]은 위임할 수 없으므로 M 모드 펌웨어가 받는다. 펌웨어는 mip.STIP 를 세워 S 모드에 넘긴다." },
+    { start: 9.2, end: 9.4, mode: "U", text: "mret 으로 원래의 U 모드로 돌아가자마자, 위임된 S 타이머 인터럽트(STI)가 대기 중이므로…" },
+    { start: 9.4, end: 10.4, mode: "S", text: "…S 모드 처리기로 트랩된다. U 모드에서는 sstatus.SIE 와 상관없이 S 인터럽트가 허용되기 때문이다. scause = 인터럽트 5." },
+    { start: 10.4, end: 11.2, mode: "M", text: "커널이 다음 타이머를 맞추려고 SBI set_timer 를 ecall 로 부른다. S 모드의 ecall 은 위임되지 않아 M 모드로 간다. mcause = 9." },
+    { start: 11.2, end: 12.2, mode: "S", text: "펌웨어가 mtimecmp 를 새로 쓰고 STIP 를 지운 뒤 mret 으로 S 모드에 돌아왔다." },
+    { start: 12.2, end: 15, mode: "U", text: "커널이 sret 으로 응용 프로그램을 다시 실행한다. 이제 한 바퀴를 돌았다." },
+  ];
+  const TRANSITION_LABELS = ["", "ecall", "sret", "MTI", "mret", "STI", "ecall", "mret", "sret"];
+  const TOTAL_TIME = SEGMENTS[SEGMENTS.length - 1].end;
+  const PAUSE_AT_END_SECONDS = 1.6;
+  const TIME_UNITS_PER_SPEED_STEP = 0.5;
+  const LEFT_MARGIN = 46;
+  const RIGHT_MARGIN = 16;
+  const NARROW_WIDTH = 480;
+
+  const canvas = document.getElementById("mode-timeline-canvas");
+  const description = document.getElementById("mode-timeline-description");
+  const modeReadout = document.getElementById("mode-timeline-mode");
+  const eventReadout = document.getElementById("mode-timeline-event");
+  const playButton = document.getElementById("mode-timeline-play");
+  let currentTime = 0;
+  let pauseRemaining = 0;
+  let timeUnitsPerSecond = 1;
+  let lastSegmentIndex = -1;
+
+  function segmentIndexAt(time) {
+    const index = SEGMENTS.findIndex((segment) => time >= segment.start && time < segment.end);
+    if (index === -1) return SEGMENTS.length - 1;
+    return index;
+  }
+
+  function draw(context, width, height, colors) {
+    const isNarrow = width < NARROW_WIDTH;
+    const plotWidth = width - LEFT_MARGIN - RIGHT_MARGIN;
+    const laneTop = 26;
+    const laneGap = (height - laneTop - 34) / (LANE_ORDER.length - 1);
+    const laneY = (mode) => laneTop + LANE_ORDER.indexOf(mode) * laneGap;
+    const timeX = (time) => LEFT_MARGIN + (time / TOTAL_TIME) * plotWidth;
+    const laneColors = { M: colors.gold, S: colors.violet, U: colors.teal };
+
+    // 레인 배경과 이름
+    LANE_ORDER.forEach((mode) => {
+      const y = laneY(mode);
+      context.strokeStyle = colors.grid;
+      context.lineWidth = 1;
+      context.setLineDash([4, 5]);
+      context.beginPath();
+      context.moveTo(LEFT_MARGIN, y);
+      context.lineTo(width - RIGHT_MARGIN, y);
+      context.stroke();
+      context.setLineDash([]);
+      book.drawText(context, mode, 14, y, { size: 16, bold: true, color: laneColors[mode] });
+      if (!isNarrow) book.drawText(context, mode === "M" ? "펌웨어" : mode === "S" ? "커널" : "응용", 30, y + 16, { size: 10, color: colors.faint, align: "center" });
+    });
+
+    // 전체 경로(흐리게)와 지나온 경로(진하게)를 차례로 그린다
+    [false, true].forEach((isProgressPass) => {
+      SEGMENTS.forEach((segment, index) => {
+        if (isProgressPass && segment.start > currentTime) return;
+        const segmentEnd = isProgressPass ? Math.min(segment.end, currentTime) : segment.end;
+        const y = laneY(segment.mode);
+        context.strokeStyle = isProgressPass ? laneColors[segment.mode] : colors.border;
+        context.lineWidth = isProgressPass ? 4 : 2;
+        context.beginPath();
+        context.moveTo(timeX(segment.start), y);
+        context.lineTo(timeX(segmentEnd), y);
+        context.stroke();
+        // 다음 구간으로 넘어가는 세로 화살표: 위로 가면 트랩(금색), 아래로 가면 xRET(남색)
+        const nextSegment = SEGMENTS[index + 1];
+        if (!nextSegment) return;
+        if (isProgressPass && nextSegment.start > currentTime) return;
+        const isTrap = MODE_LEVELS[nextSegment.mode] > MODE_LEVELS[segment.mode];
+        const arrowColor = isProgressPass ? (isTrap ? colors.gold : colors.accent) : colors.border;
+        book.drawArrow(context, timeX(segment.end), y, timeX(segment.end), laneY(nextSegment.mode), { color: arrowColor, width: isProgressPass ? 2.4 : 1.4, headSize: 8 });
+        if (isProgressPass && !isNarrow) {
+          const labelY = (y + laneY(nextSegment.mode)) / 2;
+          book.drawText(context, TRANSITION_LABELS[index + 1], timeX(segment.end) + 5, labelY, { size: 11, color: arrowColor, bold: true, mono: true });
+        }
+      });
+    });
+
+    // 재생 위치
+    const playheadX = timeX(Math.min(currentTime, TOTAL_TIME));
+    context.strokeStyle = colors.dim;
+    context.lineWidth = 1;
+    context.beginPath();
+    context.moveTo(playheadX, laneTop - 14);
+    context.lineTo(playheadX, height - 22);
+    context.stroke();
+    const currentSegment = SEGMENTS[segmentIndexAt(currentTime)];
+    context.fillStyle = laneColors[currentSegment.mode];
+    context.beginPath();
+    context.arc(playheadX, laneY(currentSegment.mode), 7, 0, Math.PI * 2);
+    context.fill();
+    book.drawText(context, "시간 →", width - RIGHT_MARGIN, height - 10, { size: 11, color: colors.faint, align: "right" });
+  }
+
+  const view = book.createCanvas(canvas, draw, { aspectRatio: 0.36, minimumHeight: 210, maximumHeight: 300 });
+
+  function updateReadouts() {
+    const index = segmentIndexAt(currentTime);
+    const segment = SEGMENTS[index];
+    if (index === lastSegmentIndex) return;
+    lastSegmentIndex = index;
+    modeReadout.textContent = segment.mode;
+    eventReadout.textContent = index === 0 ? "—" : TRANSITION_LABELS[index];
+    description.textContent = segment.text;
+  }
+
+  const loop = book.animationLoop(canvas, (deltaSeconds) => {
+    if (pauseRemaining > 0) {
+      pauseRemaining -= deltaSeconds;
+      if (pauseRemaining <= 0) { currentTime = 0; lastSegmentIndex = -1; }
+    } else {
+      currentTime += deltaSeconds * timeUnitsPerSecond;
+      if (currentTime >= TOTAL_TIME) { currentTime = TOTAL_TIME - 0.001; pauseRemaining = PAUSE_AT_END_SECONDS; }
+    }
+    updateReadouts();
+    view.redraw();
+  });
+
+  function syncPlayButton() { playButton.textContent = loop.isRunning() ? "일시 정지" : "재생"; }
+  playButton.addEventListener("click", () => {
+    if (loop.isRunning()) loop.stop();
+    else loop.start();
+    syncPlayButton();
+  });
+  document.getElementById("mode-timeline-restart").addEventListener("click", () => {
+    currentTime = 0;
+    pauseRemaining = 0;
+    lastSegmentIndex = -1;
+    updateReadouts();
+    view.redraw();
+  });
+  book.range("mode-timeline-speed", (value) => { timeUnitsPerSecond = value * TIME_UNITS_PER_SPEED_STEP; }, (value) => "×" + value);
+  syncPlayButton();
+  updateReadouts();
+})();
+
+/* ---------------------------------------------------------------------------
+   CSR 주소 해독기와 CSR 주소 공간 지도(그림 17-4)
+   규격 Table 1 (할당 구역)과 Table 2–5 (현재 할당된 CSR)를 그대로 옮겼다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const createSvgElement = window.PrivilegeChapter.createSvgElement;
+  const ADDRESS_BIT_COUNT = 12;
+  const MAXIMUM_ADDRESS = 0xfff;
+  const READ_ONLY_PATTERN = 3;
+  const HYPERVISOR_PRIVILEGE_BITS = 2;
+  const MACHINE_LEVEL = 3;
+  const DEBUG_ONLY_START = 0x7b0;
+  const DEBUG_ONLY_END = 0x7bf;
+  const PRIVILEGE_NAMES = ["U", "S", "HS", "M"];
+
+  // 규격 Table 1: 각 구역의 용도. 16의 배수 경계라 지도 한 칸이 한 구역 안에 들어간다.
+  const ALLOCATION_RANGES = [
+    [0x000, 0x0ff, "standard"], [0x400, 0x4ff, "standard"], [0x800, 0x8ff, "custom"], [0xc00, 0xc7f, "standard"], [0xc80, 0xcbf, "standard"], [0xcc0, 0xcff, "custom"],
+    [0x100, 0x1ff, "standard"], [0x500, 0x57f, "standard"], [0x580, 0x5bf, "standard"], [0x5c0, 0x5ff, "custom"], [0x900, 0x97f, "standard"], [0x980, 0x9bf, "standard"], [0x9c0, 0x9ff, "custom"], [0xd00, 0xd7f, "standard"], [0xd80, 0xdbf, "standard"], [0xdc0, 0xdff, "custom"],
+    [0x200, 0x2ff, "standard"], [0x600, 0x67f, "standard"], [0x680, 0x6bf, "standard"], [0x6c0, 0x6ff, "custom"], [0xa00, 0xa7f, "standard"], [0xa80, 0xabf, "standard"], [0xac0, 0xaff, "custom"], [0xe00, 0xe7f, "standard"], [0xe80, 0xebf, "standard"], [0xec0, 0xeff, "custom"],
+    [0x300, 0x3ff, "standard"], [0x700, 0x77f, "standard"], [0x780, 0x79f, "standard"], [0x7a0, 0x7af, "debug"], [0x7b0, 0x7bf, "debug-only"], [0x7c0, 0x7ff, "custom"], [0xb00, 0xb7f, "standard"], [0xb80, 0xbbf, "standard"], [0xbc0, 0xbff, "custom"], [0xf00, 0xf7f, "standard"], [0xf80, 0xfbf, "standard"], [0xfc0, 0xfff, "custom"],
+  ];
+
+  // 추가 관문(그림 17-5의 ④). 주소만으로는 알 수 없는 조건을 사람이 읽을 문장으로 둔다.
+  const GATES = {
+    counter: "S·U 모드의 읽기는 mcounteren(→S)과 scounteren(→U)의 해당 비트가 1이어야 한다. 닫혀 있으면 illegal-instruction.",
+    floatingPoint: "mstatus.FS 가 Off(0)이면 어느 모드에서든 illegal-instruction.",
+    vector: "mstatus.VS 가 Off(0)이면 어느 모드에서든 illegal-instruction.",
+    addressTranslation: "mstatus.TVM=1 이면 S 모드의 satp 접근이 illegal-instruction.",
+    supervisorTimer: "Sstc: menvcfg.STCE=1 이고 mcounteren.TM=1 이어야 S 모드에서 접근할 수 있다.",
+    seed: "Zkr: U·S 접근은 mseccfg.USEED·SSEED 가 연다. 쓰기 없이 읽기만 하는 접근(csrr)은 모든 모드에서 illegal-instruction 이며 csrrw 처럼 읽고 쓰는 접근만 허용된다.",
+    stateEnable: "Smstateen: mstateen0 의 해당 비트(SE0·ENVCFG·CSRIND·CONTEXT·SRMCFG·JVT·CTR 등)가 0 이면 M 미만 모드의 접근이 막힌다.",
+    hypervisor: "하이퍼바이저 수준(10) CSR. H 확장이 있을 때 HS 모드(=S 모드)와 M 모드에서 접근한다. H 확장이 없으면 존재하지 않는 CSR이다.",
+    virtualSupervisor: "VS CSR. HS 모드에서 직접 접근한다. 가상화 모드(V=1)에서 S CSR에 접근하면 하드웨어가 이 VS CSR로 바꿔 준다.",
+    debugShared: "디버그·트레이스 트리거 CSR. M 모드와 디버그 모드가 함께 쓴다.",
+    debugOnly: "디버그 모드 전용. 규격은 M 모드 접근에도 illegal-instruction 을 내도록 권한다.",
+  };
+
+  const csrList = [];
+  function addCsr(address, name, description, options) {
+    csrList.push(Object.assign({ address, name, description, isRv32Only: false, gate: null }, options || {}));
+  }
+  function addSeries(firstAddress, firstNumber, lastNumber, prefix, suffix, description, options) {
+    for (let number = firstNumber; number <= lastNumber; number += 1) addCsr(firstAddress + (number - firstNumber), prefix + number + suffix, description, options);
+  }
+
+  // ---- 비특권 (Table 2)
+  addCsr(0x001, "fflags", "부동소수점 누적 예외 플래그", { gate: "floatingPoint" });
+  addCsr(0x002, "frm", "부동소수점 동적 반올림 모드", { gate: "floatingPoint" });
+  addCsr(0x003, "fcsr", "부동소수점 제어·상태 (frm + fflags)", { gate: "floatingPoint" });
+  addCsr(0x008, "vstart", "벡터 시작 위치", { gate: "vector" });
+  addCsr(0x009, "vxsat", "고정소수점 포화 플래그", { gate: "vector" });
+  addCsr(0x00a, "vxrm", "고정소수점 반올림 모드", { gate: "vector" });
+  addCsr(0x00f, "vcsr", "벡터 제어·상태", { gate: "vector" });
+  addCsr(0x011, "ssp", "섀도 스택 포인터 (Zicfiss)");
+  addCsr(0x015, "seed", "암호용 난수 씨앗 (Zkr)", { gate: "seed" });
+  addCsr(0x017, "jvt", "표 점프 기준 주소 (Zcmt)", { gate: "stateEnable" });
+  addCsr(0xc00, "cycle", "RDCYCLE 용 사이클 카운터 (mcycle 의 그림자)", { gate: "counter" });
+  addCsr(0xc01, "time", "RDTIME 용 타이머 (mtime 의 그림자)", { gate: "counter" });
+  addCsr(0xc02, "instret", "RDINSTRET 용 완료 명령 카운터 (minstret 의 그림자)", { gate: "counter" });
+  addSeries(0xc03, 3, 31, "hpmcounter", "", "성능 감시 카운터", { gate: "counter" });
+  addCsr(0xc20, "vl", "벡터 길이", { gate: "vector" });
+  addCsr(0xc21, "vtype", "벡터 자료형", { gate: "vector" });
+  addCsr(0xc22, "vlenb", "벡터 레지스터 길이(바이트)", { gate: "vector" });
+  addCsr(0xc80, "cycleh", "cycle 의 위쪽 32비트 (RV32 전용)", { gate: "counter", isRv32Only: true });
+  addCsr(0xc81, "timeh", "time 의 위쪽 32비트 (RV32 전용)", { gate: "counter", isRv32Only: true });
+  addCsr(0xc82, "instreth", "instret 의 위쪽 32비트 (RV32 전용)", { gate: "counter", isRv32Only: true });
+  addSeries(0xc83, 3, 31, "hpmcounter", "h", "성능 감시 카운터의 위쪽 32비트 (RV32 전용)", { gate: "counter", isRv32Only: true });
+  // ---- 감독자 (Table 3)
+  addCsr(0x100, "sstatus", "감독자 상태 (mstatus 의 제한된 보기)");
+  addCsr(0x104, "sie", "감독자 인터럽트 허용 (mie 의 보기)");
+  addCsr(0x105, "stvec", "감독자 트랩 처리기 기준 주소");
+  addCsr(0x106, "scounteren", "U 모드 카운터 접근 문");
+  addCsr(0x10a, "senvcfg", "감독자 환경 설정", { gate: "stateEnable" });
+  addSeries(0x10c, 0, 3, "sstateen", "", "감독자 상태 허용 레지스터", { gate: "stateEnable" });
+  addCsr(0x120, "scountinhibit", "감독자 카운터 정지");
+  addCsr(0x140, "sscratch", "감독자 임시 저장");
+  addCsr(0x141, "sepc", "감독자 예외 프로그램 카운터");
+  addCsr(0x142, "scause", "감독자 트랩 원인");
+  addCsr(0x143, "stval", "감독자 트랩 값");
+  addCsr(0x144, "sip", "감독자 인터럽트 대기 (mip 의 보기)");
+  addCsr(0x14d, "stimecmp", "감독자 타이머 비교값 (Sstc)", { gate: "supervisorTimer" });
+  addCsr(0x14e, "sctrctl", "제어 전송 기록 제어 (Smctr)", { gate: "stateEnable" });
+  addCsr(0x14f, "sctrstatus", "제어 전송 기록 상태 (Smctr)", { gate: "stateEnable" });
+  addCsr(0x150, "siselect", "감독자 간접 레지스터 선택 (Sscsrind)", { gate: "stateEnable" });
+  addCsr(0x151, "sireg", "감독자 간접 레지스터 별칭", { gate: "stateEnable" });
+  addCsr(0x152, "sireg2", "감독자 간접 레지스터 별칭 2", { gate: "stateEnable" });
+  addCsr(0x153, "sireg3", "감독자 간접 레지스터 별칭 3", { gate: "stateEnable" });
+  addCsr(0x155, "sireg4", "감독자 간접 레지스터 별칭 4", { gate: "stateEnable" });
+  addCsr(0x156, "sireg5", "감독자 간접 레지스터 별칭 5", { gate: "stateEnable" });
+  addCsr(0x157, "sireg6", "감독자 간접 레지스터 별칭 6", { gate: "stateEnable" });
+  addCsr(0x15d, "stimecmph", "stimecmp 의 위쪽 32비트 (RV32 전용)", { gate: "supervisorTimer", isRv32Only: true });
+  addCsr(0x15f, "sctrdepth", "제어 전송 기록 깊이 (Smctr)", { gate: "stateEnable" });
+  addCsr(0x180, "satp", "감독자 주소 변환·보호 (19장)", { gate: "addressTranslation" });
+  addCsr(0x181, "srmcfg", "자원 관리 설정 (Ssqosid)", { gate: "stateEnable" });
+  addCsr(0x5a8, "scontext", "감독자 문맥 (디버그·트레이스)", { gate: "stateEnable" });
+  addCsr(0xda0, "scountovf", "감독자 카운터 넘침 (Sscofpmf)");
+  // ---- 하이퍼바이저와 VS (Table 4)
+  addCsr(0x600, "hstatus", "하이퍼바이저 상태", { gate: "hypervisor" });
+  addCsr(0x602, "hedeleg", "하이퍼바이저 예외 위임", { gate: "hypervisor" });
+  addCsr(0x603, "hideleg", "하이퍼바이저 인터럽트 위임", { gate: "hypervisor" });
+  addCsr(0x604, "hie", "하이퍼바이저 인터럽트 허용", { gate: "hypervisor" });
+  addCsr(0x605, "htimedelta", "VS·VU 모드 타이머 차이값", { gate: "hypervisor" });
+  addCsr(0x606, "hcounteren", "하이퍼바이저 카운터 접근 문", { gate: "hypervisor" });
+  addCsr(0x607, "hgeie", "게스트 외부 인터럽트 허용", { gate: "hypervisor" });
+  addCsr(0x60a, "henvcfg", "하이퍼바이저 환경 설정", { gate: "hypervisor" });
+  addSeries(0x60c, 0, 3, "hstateen", "", "하이퍼바이저 상태 허용", { gate: "hypervisor" });
+  addCsr(0x612, "hedelegh", "hedeleg 의 위쪽 32비트 (RV32 전용)", { gate: "hypervisor", isRv32Only: true });
+  addCsr(0x615, "htimedeltah", "htimedelta 의 위쪽 32비트 (RV32 전용)", { gate: "hypervisor", isRv32Only: true });
+  addCsr(0x61a, "henvcfgh", "henvcfg 의 위쪽 32비트 (RV32 전용)", { gate: "hypervisor", isRv32Only: true });
+  addSeries(0x61c, 0, 3, "hstateen", "h", "hstateen 의 위쪽 32비트 (RV32 전용)", { gate: "hypervisor", isRv32Only: true });
+  addCsr(0x643, "htval", "하이퍼바이저 트랩 값", { gate: "hypervisor" });
+  addCsr(0x644, "hip", "하이퍼바이저 인터럽트 대기", { gate: "hypervisor" });
+  addCsr(0x645, "hvip", "하이퍼바이저 가상 인터럽트 대기", { gate: "hypervisor" });
+  addCsr(0x64a, "htinst", "하이퍼바이저 트랩 명령(변환됨)", { gate: "hypervisor" });
+  addCsr(0x680, "hgatp", "게스트 주소 변환·보호 (21장)", { gate: "hypervisor" });
+  addCsr(0x6a8, "hcontext", "하이퍼바이저 문맥 (디버그·트레이스)", { gate: "hypervisor" });
+  addCsr(0xe12, "hgeip", "게스트 외부 인터럽트 대기", { gate: "hypervisor" });
+  addCsr(0x200, "vsstatus", "가상 감독자 상태", { gate: "virtualSupervisor" });
+  addCsr(0x204, "vsie", "가상 감독자 인터럽트 허용", { gate: "virtualSupervisor" });
+  addCsr(0x205, "vstvec", "가상 감독자 트랩 처리기 주소", { gate: "virtualSupervisor" });
+  addCsr(0x240, "vsscratch", "가상 감독자 임시 저장", { gate: "virtualSupervisor" });
+  addCsr(0x241, "vsepc", "가상 감독자 예외 PC", { gate: "virtualSupervisor" });
+  addCsr(0x242, "vscause", "가상 감독자 트랩 원인", { gate: "virtualSupervisor" });
+  addCsr(0x243, "vstval", "가상 감독자 트랩 값", { gate: "virtualSupervisor" });
+  addCsr(0x244, "vsip", "가상 감독자 인터럽트 대기", { gate: "virtualSupervisor" });
+  addCsr(0x24d, "vstimecmp", "가상 감독자 타이머 비교값", { gate: "virtualSupervisor" });
+  addCsr(0x24e, "vsctrctl", "가상 감독자 제어 전송 기록 제어", { gate: "virtualSupervisor" });
+  addCsr(0x250, "vsiselect", "가상 감독자 간접 레지스터 선택", { gate: "virtualSupervisor" });
+  addCsr(0x251, "vsireg", "가상 감독자 간접 레지스터 별칭", { gate: "virtualSupervisor" });
+  addCsr(0x252, "vsireg2", "가상 감독자 간접 레지스터 별칭 2", { gate: "virtualSupervisor" });
+  addCsr(0x253, "vsireg3", "가상 감독자 간접 레지스터 별칭 3", { gate: "virtualSupervisor" });
+  addCsr(0x255, "vsireg4", "가상 감독자 간접 레지스터 별칭 4", { gate: "virtualSupervisor" });
+  addCsr(0x256, "vsireg5", "가상 감독자 간접 레지스터 별칭 5", { gate: "virtualSupervisor" });
+  addCsr(0x257, "vsireg6", "가상 감독자 간접 레지스터 별칭 6", { gate: "virtualSupervisor" });
+  addCsr(0x25d, "vstimecmph", "vstimecmp 의 위쪽 32비트 (RV32 전용)", { gate: "virtualSupervisor", isRv32Only: true });
+  addCsr(0x280, "vsatp", "가상 감독자 주소 변환·보호", { gate: "virtualSupervisor" });
+  // ---- 기계 (Table 5)
+  addCsr(0xf11, "mvendorid", "제조사 ID (JEDEC)");
+  addCsr(0xf12, "marchid", "마이크로아키텍처 ID");
+  addCsr(0xf13, "mimpid", "구현 ID");
+  addCsr(0xf14, "mhartid", "하트 ID");
+  addCsr(0xf15, "mconfigptr", "설정 자료 구조 포인터");
+  addCsr(0x300, "mstatus", "기계 상태 — 하트의 조종판");
+  addCsr(0x301, "misa", "ISA 와 확장");
+  addCsr(0x302, "medeleg", "기계 예외 위임 (18장)");
+  addCsr(0x303, "mideleg", "기계 인터럽트 위임 (18장)");
+  addCsr(0x304, "mie", "기계 인터럽트 허용");
+  addCsr(0x305, "mtvec", "기계 트랩 처리기 기준 주소");
+  addCsr(0x306, "mcounteren", "S(또는 U) 모드 카운터 접근 문");
+  addCsr(0x30a, "menvcfg", "기계 환경 설정");
+  addSeries(0x30c, 0, 3, "mstateen", "", "기계 상태 허용 (Smstateen)");
+  addCsr(0x310, "mstatush", "mstatus 의 추가 필드 (RV32 전용)", { isRv32Only: true });
+  addCsr(0x312, "medelegh", "medeleg 의 위쪽 32비트 (RV32 전용)", { isRv32Only: true });
+  addCsr(0x31a, "menvcfgh", "menvcfg 의 위쪽 32비트 (RV32 전용)", { isRv32Only: true });
+  addSeries(0x31c, 0, 3, "mstateen", "h", "mstateen 의 위쪽 32비트 (RV32 전용)", { isRv32Only: true });
+  addCsr(0x320, "mcountinhibit", "카운터 증가 정지");
+  addCsr(0x321, "mcyclecfg", "mcycle 설정 (Smcntrpmf)");
+  addCsr(0x322, "minstretcfg", "minstret 설정 (Smcntrpmf)");
+  addSeries(0x323, 3, 31, "mhpmevent", "", "성능 감시 이벤트 선택기");
+  addCsr(0x340, "mscratch", "기계 임시 저장");
+  addCsr(0x341, "mepc", "기계 예외 프로그램 카운터");
+  addCsr(0x342, "mcause", "기계 트랩 원인");
+  addCsr(0x343, "mtval", "기계 트랩 값");
+  addCsr(0x344, "mip", "기계 인터럽트 대기");
+  addCsr(0x34a, "mtinst", "기계 트랩 명령(변환됨)");
+  addCsr(0x34b, "mtval2", "기계 두 번째 트랩 값");
+  addCsr(0x34e, "mctrctl", "기계 제어 전송 기록 제어 (Smctr)");
+  addCsr(0x350, "miselect", "기계 간접 레지스터 선택 (Smcsrind)");
+  addCsr(0x351, "mireg", "기계 간접 레지스터 별칭");
+  addCsr(0x352, "mireg2", "기계 간접 레지스터 별칭 2");
+  addCsr(0x353, "mireg3", "기계 간접 레지스터 별칭 3");
+  addCsr(0x354, "miph", "AIA 의 기계 인터럽트 대기 위쪽 절반 (RV32 전용)", { isRv32Only: true });
+  addCsr(0x355, "mireg4", "기계 간접 레지스터 별칭 4");
+  addCsr(0x356, "mireg5", "기계 간접 레지스터 별칭 5");
+  addCsr(0x357, "mireg6", "기계 간접 레지스터 별칭 6");
+  for (let number = 0; number <= 15; number += 1) {
+    // RV64 에서는 홀수 번호 pmpcfg 가 불법이다 (짝수 번호에 8개씩 담는다)
+    addCsr(0x3a0 + number, "pmpcfg" + number, "물리 메모리 보호 설정 (20장)", { isRv32Only: number % 2 === 1 });
+  }
+  addSeries(0x3b0, 0, 63, "pmpaddr", "", "물리 메모리 보호 주소 (20장)");
+  addCsr(0x721, "mcyclecfgh", "mcyclecfg 의 위쪽 32비트 (RV32 전용)", { isRv32Only: true });
+  addCsr(0x722, "minstretcfgh", "minstretcfg 의 위쪽 32비트 (RV32 전용)", { isRv32Only: true });
+  addSeries(0x723, 3, 31, "mhpmevent", "h", "mhpmevent 의 위쪽 32비트 (RV32 전용)", { isRv32Only: true });
+  addCsr(0x740, "mnscratch", "재개 가능 NMI 임시 저장 (Smrnmi)");
+  addCsr(0x741, "mnepc", "재개 가능 NMI 프로그램 카운터");
+  addCsr(0x742, "mncause", "재개 가능 NMI 원인");
+  addCsr(0x744, "mnstatus", "재개 가능 NMI 상태");
+  addCsr(0x747, "mseccfg", "기계 보안 설정 (Smepmp 등, 20장)");
+  addCsr(0x757, "mseccfgh", "mseccfg 의 위쪽 32비트 (RV32 전용)", { isRv32Only: true });
+  addCsr(0x7a0, "tselect", "디버그·트레이스 트리거 선택", { gate: "debugShared" });
+  addCsr(0x7a1, "tdata1", "트리거 데이터 1", { gate: "debugShared" });
+  addCsr(0x7a2, "tdata2", "트리거 데이터 2", { gate: "debugShared" });
+  addCsr(0x7a3, "tdata3", "트리거 데이터 3", { gate: "debugShared" });
+  addCsr(0x7a8, "mcontext", "기계 문맥", { gate: "debugShared" });
+  addCsr(0x7b0, "dcsr", "디버그 제어·상태", { gate: "debugOnly" });
+  addCsr(0x7b1, "dpc", "디버그 프로그램 카운터", { gate: "debugOnly" });
+  addCsr(0x7b2, "dscratch0", "디버그 임시 저장 0", { gate: "debugOnly" });
+  addCsr(0x7b3, "dscratch1", "디버그 임시 저장 1", { gate: "debugOnly" });
+  addCsr(0xb00, "mcycle", "기계 사이클 카운터");
+  addCsr(0xb02, "minstret", "기계 완료 명령 카운터");
+  addSeries(0xb03, 3, 31, "mhpmcounter", "", "기계 성능 감시 카운터");
+  addCsr(0xb80, "mcycleh", "mcycle 의 위쪽 32비트 (RV32 전용)", { isRv32Only: true });
+  addCsr(0xb82, "minstreth", "minstret 의 위쪽 32비트 (RV32 전용)", { isRv32Only: true });
+  addSeries(0xb83, 3, 31, "mhpmcounter", "h", "mhpmcounter 의 위쪽 32비트 (RV32 전용)", { isRv32Only: true });
+
+  const csrByAddress = new Map(csrList.map((entry) => [entry.address, entry]));
+
+  /** 규격 Table 1 에서 이 주소가 속한 구역을 찾는다. */
+  function allocationOf(address) {
+    const range = ALLOCATION_RANGES.find(([first, last]) => address >= first && address <= last);
+    return { first: range[0], last: range[1], kind: range[2] };
+  }
+
+  /**
+   * 한 모드·한 종류(읽기/쓰기)의 접근 결과를 판정한다.
+   * 반환: { status: "allowed" | "denied" | "conditional", reason }
+   */
+  function evaluateAccess(address, modeLevel, isWrite, xlen) {
+    const entry = csrByAddress.get(address);
+    const privilegeBits = (address >> 8) & 3;
+    const isReadOnly = ((address >> 10) & 3) === READ_ONLY_PATTERN;
+    const allocation = allocationOf(address);
+    if (address >= DEBUG_ONLY_START && address <= DEBUG_ONLY_END) return { status: "denied", reason: "디버그 모드 전용 구역 (0x7B0–0x7BF)" };
+    if (entry && entry.isRv32Only && xlen === 64) return { status: "denied", reason: "RV64 에서는 이 상위 절반 주소가 예약되어 있다" };
+    if (privilegeBits === HYPERVISOR_PRIVILEGE_BITS) {
+      if (modeLevel === 0) return { status: "denied", reason: "특권 부족: 하이퍼바이저 수준 CSR" };
+      if (modeLevel === 1) return { status: "conditional", reason: "H 확장이 있을 때만 HS 모드로 접근 가능" };
+    } else if (modeLevel < privilegeBits) {
+      return { status: "denied", reason: "특권 부족: 최소 " + PRIVILEGE_NAMES[privilegeBits] + " 모드가 필요" };
+    }
+    if (isWrite && isReadOnly) return { status: "denied", reason: "읽기 전용 CSR 에 쓰기 시도" };
+    if (!entry) {
+      if (allocation.kind === "custom") return { status: "conditional", reason: "custom 구역: 구현이 이 번호에 CSR 을 두었을 때만" };
+      return { status: "denied", reason: "아직 할당되지 않은 표준 주소: 접근은 예약된 동작(대개 illegal)" };
+    }
+    if (entry.gate === "seed") return { status: "conditional", reason: "seed 는 읽고 쓰기를 함께 하는 접근만 허용" };
+    const isGateForAllModes = entry.gate === "floatingPoint" || entry.gate === "vector";
+    if (entry.gate && (isGateForAllModes || modeLevel < MACHINE_LEVEL) && entry.gate !== "debugShared") {
+      return { status: "conditional", reason: "추가 관문이 열려 있어야" };
+    }
+    return { status: "allowed", reason: "" };
+  }
+
+  // ---- 화면 요소
+  const bitsContainer = document.getElementById("csr-decoder-bits");
+  const addressInput = document.getElementById("csr-decoder-address");
+  const nameSelect = document.getElementById("csr-decoder-select");
+  const matrix = document.getElementById("csr-decoder-matrix");
+  const notes = document.getElementById("csr-decoder-notes");
+  let currentAddress = 0x300;
+  let xlen = 64;
+
+  const BIT_GROUPS = [
+    { className: "access", caption: "[11:10] 접근", bits: [11, 10] },
+    { className: "privilege", caption: "[9:8] 특권", bits: [9, 8] },
+    { className: "index", caption: "[7:0] 번호", bits: [7, 6, 5, 4, 3, 2, 1, 0] },
+  ];
+  const bitElements = new Map();
+  BIT_GROUPS.forEach((group) => {
+    const groupElement = document.createElement("div");
+    groupElement.className = "bit-group " + group.className;
+    const numberRow = document.createElement("div");
+    numberRow.className = "bit-number";
+    const bitRow = document.createElement("div");
+    bitRow.className = "bit-row";
+    group.bits.forEach((bitIndex) => {
+      const numberLabel = document.createElement("span");
+      numberLabel.textContent = bitIndex;
+      numberRow.appendChild(numberLabel);
+      const bitElement = document.createElement("span");
+      bitElement.className = "bit";
+      bitElement.setAttribute("role", "button");
+      bitElement.setAttribute("tabindex", "0");
+      bitElement.setAttribute("aria-label", "비트 " + bitIndex);
+      const toggle = () => setAddress(currentAddress ^ (1 << bitIndex));
+      bitElement.addEventListener("click", toggle);
+      bitElement.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); toggle(); } });
+      bitElements.set(bitIndex, bitElement);
+      bitRow.appendChild(bitElement);
+    });
+    const caption = document.createElement("span");
+    caption.className = "bit-caption";
+    caption.textContent = group.caption;
+    groupElement.append(numberRow, bitRow, caption);
+    bitsContainer.appendChild(groupElement);
+  });
+
+  // 이름 목록: 연속 번호 묶음(hpmcounter3…31 등)까지 모두 넣으면 너무 길어 대표만 고른다.
+  const SELECT_SKIP_PATTERN = /^(hpmcounter([4-9]|[12]\d|30)h?|mhpmcounter([4-9]|[12]\d|30)h?|mhpmevent([4-9]|[12]\d|30)h?|pmpaddr([1-9]|[1-5]\d|6[0-2])|pmpcfg([1-9]|1[0-4]))$/;
+  const blankOption = document.createElement("option");
+  blankOption.value = "";
+  blankOption.textContent = "— 이름 없음 —";
+  nameSelect.appendChild(blankOption);
+  [...csrList].sort((first, second) => first.address - second.address).forEach((entry) => {
+    if (SELECT_SKIP_PATTERN.test(entry.name)) return;
+    const option = document.createElement("option");
+    option.value = String(entry.address);
+    option.textContent = book.toHex(entry.address, ADDRESS_BIT_COUNT) + " " + entry.name;
+    nameSelect.appendChild(option);
+  });
+
+  function accessLabel(address) {
+    return ((address >> 10) & 3) === READ_ONLY_PATTERN ? "읽기 전용 (11)" : "읽기·쓰기 (" + book.toBinary((address >> 10) & 3, 2) + ")";
+  }
+  function categoryLabel(allocation, isReadOnly) {
+    const rangeText = book.toHex(allocation.first, ADDRESS_BIT_COUNT) + "–" + book.toHex(allocation.last, ADDRESS_BIT_COUNT);
+    const kindNames = { standard: "표준", custom: "custom", debug: "디버그(M 접근)", "debug-only": "디버그 모드 전용" };
+    const accessText = isReadOnly ? " 읽기 전용" : " 읽기·쓰기";
+    const isDebug = allocation.kind === "debug" || allocation.kind === "debug-only";
+    return kindNames[allocation.kind] + (isDebug ? "" : accessText) + " · " + rangeText;
+  }
+
+  function render() {
+    const entry = csrByAddress.get(currentAddress);
+    const allocation = allocationOf(currentAddress);
+    const isReadOnly = ((currentAddress >> 10) & 3) === READ_ONLY_PATTERN;
+    bitElements.forEach((element, bitIndex) => {
+      const isOn = ((currentAddress >> bitIndex) & 1) === 1;
+      element.classList.toggle("on", isOn);
+      element.textContent = isOn ? "1" : "0";
+    });
+    if (document.activeElement !== addressInput) addressInput.value = book.toHex(currentAddress, ADDRESS_BIT_COUNT);
+    nameSelect.value = entry && [...nameSelect.options].some((option) => option.value === String(currentAddress)) ? String(currentAddress) : "";
+    document.getElementById("csr-decoder-name").textContent = entry ? entry.name : "(할당 없음)";
+    document.getElementById("csr-decoder-access").textContent = accessLabel(currentAddress);
+    document.getElementById("csr-decoder-privilege").textContent = PRIVILEGE_NAMES[(currentAddress >> 8) & 3] + " (" + book.toBinary((currentAddress >> 8) & 3, 2) + ")";
+    document.getElementById("csr-decoder-category").textContent = categoryLabel(allocation, isReadOnly);
+
+    // 3 × 2 판정표
+    const MODES = [{ name: "U 모드", level: 0 }, { name: "S 모드", level: 1 }, { name: "M 모드", level: 3 }];
+    const STATUS_TEXT = { allowed: "✓ 허용", denied: "✗ 예외", conditional: "△ 조건부" };
+    const reasons = new Set();
+    let tableHtml = "<thead><tr><th>실행 모드</th><th>읽기 (csrr)</th><th>쓰기 (csrw)</th></tr></thead><tbody>";
+    MODES.forEach((mode) => {
+      tableHtml += "<tr><th>" + mode.name + "</th>";
+      [false, true].forEach((isWrite) => {
+        const result = evaluateAccess(currentAddress, mode.level, isWrite, xlen);
+        if (result.reason) reasons.add(result.reason);
+        tableHtml += '<td class="' + result.status + '" title="' + result.reason + '">' + STATUS_TEXT[result.status] + "</td>";
+      });
+      tableHtml += "</tr>";
+    });
+    matrix.innerHTML = tableHtml + "</tbody>";
+
+    let notesHtml = "<b>" + (entry ? entry.name : "할당되지 않은 주소") + "</b>" + (entry ? " — " + entry.description : "") + "<br>";
+    if (reasons.size) notesHtml += "판정 이유: " + [...reasons].join(" · ") + "<br>";
+    if (entry && entry.gate) notesHtml += "추가 관문: " + GATES[entry.gate];
+    notes.innerHTML = notesHtml;
+  }
+
+  function setAddress(address) {
+    currentAddress = book.clamp(address & MAXIMUM_ADDRESS, 0, MAXIMUM_ADDRESS);
+    render();
+  }
+
+  addressInput.addEventListener("input", () => {
+    const text = addressInput.value.trim().toLowerCase().replace(/^0x/, "");
+    if (!/^[0-9a-f]{1,3}$/.test(text)) return;
+    setAddress(parseInt(text, 16));
+  });
+  addressInput.addEventListener("blur", render);
+  nameSelect.addEventListener("change", () => { if (nameSelect.value !== "") setAddress(Number(nameSelect.value)); });
+  book.segmented("csr-decoder-xlen", (value) => { xlen = Number(value); render(); });
+
+  // ---- 그림 17-4: CSR 주소 공간 지도
+  const mapSvg = document.getElementById("csr-map-svg");
+  const CELL_WIDTH = 44;
+  const CELL_HEIGHT = 25;
+  const MAP_LEFT = 118;
+  const MAP_TOP = 40;
+  const BLOCK_SIZE = 16;
+  const KIND_CLASSES = { standard: "f-accent-soft", custom: "f-gold-soft", debug: "f-violet-soft", "debug-only": "f-bad-soft" };
+  for (let column = 0; column < 16; column += 1) {
+    mapSvg.appendChild(createSvgElement("text", { x: MAP_LEFT + column * CELL_WIDTH + CELL_WIDTH / 2, y: MAP_TOP - 10, "text-anchor": "middle", class: "t-faint" }, column.toString(16).toUpperCase()));
+  }
+  mapSvg.appendChild(createSvgElement("text", { x: MAP_LEFT - 8, y: MAP_TOP - 10, "text-anchor": "end", class: "t-faint" }, "[7:4] →"));
+  for (let row = 0; row < 16; row += 1) {
+    const rowY = MAP_TOP + row * CELL_HEIGHT;
+    const privilegeName = PRIVILEGE_NAMES[row & 3];
+    const isReadOnlyRow = (row >> 2) === READ_ONLY_PATTERN;
+    mapSvg.appendChild(createSvgElement("text", { x: 8, y: rowY + 17, class: "t-mono", style: "font-size:12px" }, "0x" + row.toString(16).toUpperCase() + "··"));
+    mapSvg.appendChild(createSvgElement("text", { x: 58, y: rowY + 17, class: isReadOnlyRow ? "t-teal" : "t-dim", style: "font-size:12px" }, privilegeName + (isReadOnlyRow ? " 읽기" : " 읽·쓰")));
+    for (let column = 0; column < 16; column += 1) {
+      const blockStart = (row << 8) | (column << 4);
+      const allocation = allocationOf(blockStart);
+      const isStandardReadOnly = allocation.kind === "standard" && isReadOnlyRow;
+      const cellClass = isStandardReadOnly ? "f-teal-soft" : KIND_CLASSES[allocation.kind];
+      const namesInBlock = csrList.filter((entry) => entry.address >= blockStart && entry.address < blockStart + BLOCK_SIZE).map((entry) => entry.name);
+      const cell = createSvgElement("rect", { x: MAP_LEFT + column * CELL_WIDTH + 1, y: rowY + 1, width: CELL_WIDTH - 2, height: CELL_HEIGHT - 2, rx: 3, class: cellClass + " csr-map-cell", tabindex: "0", role: "button" });
+      const tooltip = book.toHex(blockStart, ADDRESS_BIT_COUNT) + "–" + book.toHex(blockStart + BLOCK_SIZE - 1, ADDRESS_BIT_COUNT) + (namesInBlock.length ? " · " + namesInBlock.slice(0, 6).join(", ") + (namesInBlock.length > 6 ? " …" : "") : "");
+      cell.appendChild(createSvgElement("title", {}, tooltip));
+      const selectBlock = () => {
+        const firstAllocated = csrList.filter((entry) => entry.address >= blockStart && entry.address < blockStart + BLOCK_SIZE).sort((first, second) => first.address - second.address)[0];
+        setAddress(firstAllocated ? firstAllocated.address : blockStart);
+        document.getElementById("csr-decoder-sim").scrollIntoView({ behavior: "smooth", block: "start" });
+      };
+      cell.addEventListener("click", selectBlock);
+      cell.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); selectBlock(); } });
+      mapSvg.appendChild(cell);
+      if (namesInBlock.length) {
+        // 할당된 CSR 이 있는 칸에는 점을 찍어 “실제로 쓰이는 곳”을 보여 준다
+        mapSvg.appendChild(createSvgElement("circle", { cx: MAP_LEFT + column * CELL_WIDTH + CELL_WIDTH / 2, cy: rowY + CELL_HEIGHT / 2, r: Math.min(7, 2.5 + namesInBlock.length / 2), fill: "var(--text-dim)", "pointer-events": "none" }));
+      }
+    }
+  }
+  const LEGEND = [["f-accent-soft", "표준 읽기·쓰기"], ["f-teal-soft", "표준 읽기 전용"], ["f-gold-soft", "custom"], ["f-violet-soft", "디버그(M)"], ["f-bad-soft", "디버그 모드 전용"]];
+  LEGEND.forEach(([className, label], index) => {
+    const legendX = 20 + index * 150;
+    mapSvg.appendChild(createSvgElement("rect", { x: legendX, y: 458, width: 16, height: 16, rx: 3, class: className }));
+    mapSvg.appendChild(createSvgElement("text", { x: legendX + 22, y: 471, class: "t-dim" }, label));
+  });
+  mapSvg.appendChild(createSvgElement("circle", { cx: 28, cy: 490, r: 4, fill: "var(--text-dim)" }));
+  mapSvg.appendChild(createSvgElement("text", { x: 42, y: 494, class: "t-faint" }, "점 = 현재 할당된 CSR이 있는 칸 (클 수록 많음). 칸에 마우스를 올리면 이름이 보인다."));
+
+  setAddress(currentAddress);
+})();
+
+/* ---------------------------------------------------------------------------
+   misa: 그림 17-6 의 글자 칸과 misa 만들기 시뮬레이터
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const createSvgElement = window.PrivilegeChapter.createSvgElement;
+  const LETTER_COUNT = 26;
+  const ASCII_UPPERCASE_A = 65;
+  // 규격 Table 2 (Encoding of Extensions field in misa)
+  const LETTER_INFO = {
+    A: ["defined", "원자적 명령"], B: ["defined", "B 확장 (Zba·Zbb·Zbs)"], C: ["defined", "압축 명령"], D: ["defined", "배정밀도 부동소수점"],
+    E: ["defined", "RV32E/RV64E 베이스"], F: ["defined", "단정밀도 부동소수점"], G: ["reserved", "예약"], H: ["defined", "하이퍼바이저"],
+    I: ["defined", "RV32I/RV64I 베이스"], J: ["reserved", "예약"], K: ["reserved", "예약"], L: ["reserved", "예약"], M: ["defined", "곱셈·나눗셈"],
+    N: ["tentative", "사용자 수준 인터럽트용 잠정 예약"], O: ["reserved", "예약"], P: ["tentative", "Packed-SIMD 용 잠정 예약"], Q: ["defined", "4배 정밀도 부동소수점"],
+    R: ["reserved", "예약"], S: ["defined", "S 모드 구현"], T: ["reserved", "예약"], U: ["defined", "U 모드 구현"], V: ["defined", "벡터"],
+    W: ["reserved", "예약"], X: ["nonstandard", "비표준 확장 있음"], Y: ["reserved", "예약"], Z: ["reserved", "예약"],
+  };
+  // x 가 y 에 의존: x 만 켜고 y 를 끄면 둘 다 꺼진다 (규격 misa 절). 순서대로 연쇄 적용한다.
+  const DEPENDENCIES = [["D", "F"], ["Q", "D"], ["V", "D"], ["S", "U"], ["H", "S"]];
+  // ISA 문자열의 표준 순서 (Volume I, Subset Naming Convention)
+  const CANONICAL_ORDER = ["M", "A", "F", "D", "Q", "C", "B", "V", "H"];
+  const PRESETS = {
+    microcontroller: { mxl: 1, letters: ["I", "M", "A", "C", "U"] },
+    linux: { mxl: 2, letters: ["I", "M", "A", "F", "D", "C", "S", "U"] },
+    server: { mxl: 2, letters: ["I", "M", "A", "F", "D", "C", "B", "V", "H", "S", "U"] },
+  };
+  const letters = Array.from({ length: LETTER_COUNT }, (unused, index) => String.fromCharCode(ASCII_UPPERCASE_A + index));
+
+  // ---- 그림 17-6 의 글자 줄 (비트 25 = Z 가 왼쪽, 비트 0 = A 가 오른쪽)
+  const figureGroup = document.getElementById("misa-figure-letters");
+  const FIGURE_CELL_WIDTH = 800 / LETTER_COUNT;
+  const FIGURE_CLASSES = { defined: "f-accent-soft", reserved: "f-surface", tentative: "f-warn-soft", nonstandard: "f-violet-soft" };
+  letters.forEach((letter, bitIndex) => {
+    const cellX = (LETTER_COUNT - 1 - bitIndex) * FIGURE_CELL_WIDTH;
+    const status = LETTER_INFO[letter][0];
+    figureGroup.appendChild(createSvgElement("rect", { x: cellX + 1, y: 0, width: FIGURE_CELL_WIDTH - 2, height: 50, rx: 4, class: FIGURE_CLASSES[status] }));
+    figureGroup.appendChild(createSvgElement("text", { x: cellX + FIGURE_CELL_WIDTH / 2, y: 22, "text-anchor": "middle", class: status === "reserved" ? "t-faint" : "t t-bold" }, letter));
+    figureGroup.appendChild(createSvgElement("text", { x: cellX + FIGURE_CELL_WIDTH / 2, y: 41, "text-anchor": "middle", class: "t-faint", style: "font-size:10px" }, bitIndex));
+  });
+
+  // ---- 시뮬레이터
+  const grid = document.getElementById("misa-letter-grid");
+  const explanation = document.getElementById("misa-explanation");
+  const binaryView = document.getElementById("misa-binary");
+  const requested = new Set(PRESETS.linux.letters);
+  let mxl = 2;
+  const buttons = new Map();
+
+  letters.forEach((letter) => {
+    const status = LETTER_INFO[letter][0];
+    const button = document.createElement("button");
+    button.className = "letter-button";
+    button.type = "button";
+    button.title = letter + " — " + LETTER_INFO[letter][1];
+    button.innerHTML = letter + "<small>" + (letter.charCodeAt(0) - ASCII_UPPERCASE_A) + "</small>";
+    const isSelectable = (status === "defined" || status === "nonstandard") && letter !== "E";
+    button.disabled = !isSelectable;
+    if (letter === "E") button.title = "E — 읽기 전용: 항상 I 의 반대 값";
+    button.addEventListener("click", () => {
+      if (requested.has(letter)) requested.delete(letter);
+      else requested.add(letter);
+      render(letter);
+    });
+    buttons.set(letter, button);
+    grid.appendChild(button);
+  });
+
+  /** 요청된 글자 집합을 규격 규칙에 맞는 합법 값으로 바꾼다. 꺼진 이유도 함께 돌려준다. */
+  function legalize(requestedLetters) {
+    const enabled = new Set(requestedLetters);
+    const forcedOff = [];
+    DEPENDENCIES.forEach(([dependent, requirement]) => {
+      if (enabled.has(dependent) && !enabled.has(requirement)) {
+        enabled.delete(dependent);
+        forcedOff.push(dependent + " (← " + requirement + " 필요)");
+      }
+    });
+    // E 는 읽기 전용이며 I 의 반대 값으로 읽힌다
+    enabled.delete("E");
+    if (!enabled.has("I")) enabled.add("E");
+    return { enabled, forcedOff };
+  }
+
+  function render(changedLetter) {
+    const { enabled, forcedOff } = legalize(requested);
+    const xlen = mxl === 1 ? 32 : 64;
+    let extensions = 0n;
+    letters.forEach((letter, bitIndex) => { if (enabled.has(letter)) extensions |= 1n << BigInt(bitIndex); });
+    const value = (BigInt(mxl) << BigInt(xlen - 2)) | extensions;
+    buttons.forEach((button, letter) => {
+      button.classList.toggle("on", enabled.has(letter));
+      button.classList.toggle("is-forced", requested.has(letter) && !enabled.has(letter));
+    });
+    document.getElementById("misa-hex").textContent = book.toHex(value, xlen);
+    const base = enabled.has("I") ? "I" : "E";
+    const orderedLetters = CANONICAL_ORDER.filter((letter) => enabled.has(letter)).join("");
+    document.getElementById("misa-string").textContent = "RV" + xlen + base + orderedLetters + (enabled.has("X") ? " + X…" : "");
+    document.getElementById("misa-count").textContent = String(enabled.size);
+
+    // 2진수 보기: MXL 두 비트와 1인 비트를 강조한다
+    const binaryText = book.toBinary(value, xlen);
+    let binaryHtml = "";
+    for (let position = 0; position < xlen; position += 1) {
+      const character = binaryText[position];
+      const bitIndex = xlen - 1 - position;
+      let className = "";
+      if (bitIndex >= xlen - 2) className = "mxl";
+      else if (character === "1") className = "one";
+      binaryHtml += className ? '<span class="' + className + '">' + character + "</span>" : character;
+      if (bitIndex % 8 === 0 && bitIndex !== 0) binaryHtml += " ";
+    }
+    binaryView.innerHTML = binaryHtml;
+
+    let message = "";
+    if (changedLetter) message = "<b>" + changedLetter + "</b> — " + LETTER_INFO[changedLetter][1] + ". ";
+    if (forcedOff.length) message += '<span class="warning-line">의존 규칙으로 함께 꺼짐: ' + forcedOff.join(", ") + "</span> ";
+    if (!enabled.has("I")) message += "I 를 끄면 읽기 전용 E 비트가 1로 읽힌다 (RV" + xlen + "E). ";
+    if (!message) message = "글자를 눌러 확장을 켜고 끈다. 회색 글자는 규격이 예약해 둔 비트다.";
+    explanation.innerHTML = message;
+  }
+
+  book.segmented("misa-mxl", (value) => { mxl = Number(value); render(); });
+  Object.entries(PRESETS).forEach(([key, preset]) => {
+    document.getElementById("misa-preset-" + key).addEventListener("click", () => {
+      requested.clear();
+      preset.letters.forEach((letter) => requested.add(letter));
+      document.querySelector('#misa-mxl button[data-value="' + preset.mxl + '"]').click();
+    });
+  });
+  render();
+})();
+
+/* ---------------------------------------------------------------------------
+   mstatus 필드 탐색기와 그림 17-7 (mstatus ↔ sstatus 창)
+   비트 위치는 규격 Figure 7 (RV64 mstatus)과 Supervisor 장 Figure 2 (sstatus) 기준.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const createSvgElement = window.PrivilegeChapter.createSvgElement;
+  const GROUP_CLASSES = { trap: "f-gold-soft", context: "f-teal-soft", memory: "f-accent-soft", virtualization: "f-violet-soft", width: "f-ok-soft", other: "f-warn-soft", reserved: "f-surface" };
+  const GROUP_NAMES = { trap: "트랩 스택", context: "확장 상태", memory: "메모리 권한", virtualization: "가상화 지원", width: "XLEN · 엔디언", other: "H · CFI · 이중 트랩", reserved: "예약 (WPRI)" };
+  const WPRI_TEXT = "예약 필드. 소프트웨어는 읽은 값을 무시하고, 다른 필드를 고칠 때 원래 값을 보존해 다시 써야 한다. 구현하지 않았다면 읽기 전용 0이다.";
+  // [이름, 상위 비트, 하위 비트, 무리, sstatus 에 보이는가, 설명]
+  const FIELDS = [
+    ["WPRI", 0, 0, "reserved", false, WPRI_TEXT],
+    ["SIE", 1, 1, "trap", true, "S 모드 전역 인터럽트 허용. S 모드에서 실행 중일 때만 쓰인다. U 모드에서는 이 비트와 상관없이 S 수준 인터럽트가 허용되고, M 모드에서는 S 수준 인터럽트가 항상 막힌다. S 모드가 없으면 읽기 전용 0."],
+    ["WPRI", 2, 2, "reserved", false, WPRI_TEXT],
+    ["MIE", 3, 3, "trap", false, "M 모드 전역 인터럽트 허용. M 모드에서 실행 중일 때 0이면 M 수준 인터럽트가 막힌다. M보다 낮은 모드에서는 이 비트와 상관없이 M 수준 인터럽트가 허용된다. 리셋 때 0."],
+    ["WPRI", 4, 4, "reserved", false, WPRI_TEXT],
+    ["SPIE", 5, 5, "trap", true, "S 모드로 트랩이 들어오기 직전의 SIE 값. 트랩 때 SPIE←SIE, SIE←0. SRET 때 SIE←SPIE, SPIE←1."],
+    ["UBE", 6, 6, "width", true, "U 모드의 명시적 load·store 바이트 순서. 0 = 리틀 엔디언, 1 = 빅 엔디언. WARL. U 모드가 없으면 읽기 전용 0. 명령어 인출은 언제나 리틀 엔디언이다."],
+    ["MPIE", 7, 7, "trap", false, "M 모드로 트랩이 들어오기 직전의 MIE 값. 트랩 때 MPIE←MIE, MIE←0. MRET 때 MIE←MPIE, MPIE←1."],
+    ["SPP", 8, 8, "trap", true, "S 모드로 트랩이 들어오기 직전의 모드. U 모드에서 왔으면 0, 아니면 1. SRET 은 이 모드로 돌아가고 SPP 를 0(U)으로 바꾼다. 1비트인 것은 S 로 들어오는 트랩의 출처가 U 나 S 뿐이기 때문이다."],
+    ["VS", 10, 9, "context", true, "벡터 확장 상태 (0 Off · 1 Initial · 2 Clean · 3 Dirty). WARL. Off 이면 벡터 명령과 벡터 CSR 접근이 illegal-instruction 이다. v 레지스터가 있으면 읽기 전용 0일 수 없다."],
+    ["MPP", 12, 11, "trap", false, "M 모드로 트랩이 들어오기 직전의 모드 (00 U · 01 S · 11 M). 구현된 모드만 담는 WARL 필드. MRET 은 이 모드로 돌아가고 MPP 를 지원하는 가장 낮은 모드로 바꾼다. MPRV=1 일 때는 load·store 의 실효 모드가 된다."],
+    ["FS", 14, 13, "context", true, "부동소수점 상태 (f0–f31, fcsr). 인코딩은 VS 와 같다. WARL. F 확장이 있으면 읽기 전용 0일 수 없다."],
+    ["XS", 16, 15, "context", true, "그 밖의 사용자 확장 상태들의 요약 (0 모두 Off · 1 일부 켜짐, Dirty·Clean 없음 · 2 일부 Clean, Dirty 없음 · 3 일부 Dirty). 읽기 전용."],
+    ["MPRV", 17, 17, "memory", false, "Modify PRiVilege. 1이면 load·store 를 현재 모드가 MPP 인 것처럼 주소 변환·보호·엔디언 적용한다. 명령어 인출은 영향받지 않는다. M 보다 낮은 모드로 가는 MRET·SRET 이 0으로 지운다. U 모드가 없으면 읽기 전용 0. 리셋 때 0."],
+    ["SUM", 18, 18, "memory", true, "permit Supervisor User Memory access. 0이면 S 모드가 U=1 페이지에 접근할 때 폴트. MPRV=1 이고 MPP=S 일 때도 적용된다. 페이지 기반 가상 메모리가 꺼져 있으면 효과 없음."],
+    ["MXR", 19, 19, "memory", true, "Make eXecutable Readable. 1이면 R=1 또는 X=1 인 페이지에서 load 가 성공한다. 실행 전용 페이지의 명령어를 읽어 흉내 내는 처리기용. 가상 메모리가 꺼져 있으면 효과 없음."],
+    ["TVM", 20, 20, "virtualization", false, "Trap Virtual Memory. 1이면 S 모드의 satp 읽기·쓰기와 SFENCE.VMA·SINVAL.VMA 가 illegal-instruction. 게스트 OS 를 S 모드에서 돌리며 섀도 페이지 테이블을 관리할 때 쓴다. WARL."],
+    ["TW", 21, 21, "virtualization", false, "Timeout Wait. 1이면 M 보다 낮은 모드의 WFI 가 구현이 정한 제한 시간 안에 끝나지 않을 때 illegal-instruction. 놀고 있는 게스트 대신 다른 게스트로 전환할 기회를 준다. WARL."],
+    ["TSR", 22, 22, "virtualization", false, "Trap SRET. 1이면 S 모드의 SRET 이 illegal-instruction. H 확장이 없는 하드웨어에서 하이퍼바이저 확장을 흉내 낼 때 필요하다. WARL."],
+    ["SPELP", 23, 23, "other", true, "Zicfilp: S 모드로 트랩 직전의 랜딩 패드 기대 상태 (0 NO_LP_EXPECTED · 1 LP_EXPECTED)."],
+    ["SDT", 24, 24, "other", true, "Ssdbltrp: S-mode-disable-trap. S 로 트랩할 때 1이 되고, 이미 1인 상태에서 또 S 로 트랩하면 이중 트랩 예외(코드 16)가 M 모드로 전달된다. SRET 이 0으로 지운다. 1을 쓰면 SIE 가 0이 된다."],
+    ["WPRI", 31, 25, "reserved", false, WPRI_TEXT],
+    ["UXL", 33, 32, "width", true, "U 모드의 XLEN (1 = 32, 2 = 64). misa.MXL 과 같은 인코딩의 WARL 필드. S 모드가 있으면 UXLEN 이 SXLEN 보다 커지는 값은 고를 수 없다."],
+    ["SXL", 35, 34, "width", false, "S 모드의 XLEN. WARL. 항상 SXLEN = MXLEN 이 되도록 읽기 전용으로 만들 수도 있다."],
+    ["SBE", 36, 36, "width", false, "S 모드의 명시적 load·store 바이트 순서. 페이지 테이블 같은 감독자 메모리 관리 자료 구조를 읽는 암묵적 접근의 바이트 순서도 SBE 가 정한다."],
+    ["MBE", 37, 37, "width", false, "M 모드(MPRV=0)의 명령어 인출 외 메모리 접근 바이트 순서. 리틀 엔디언을 지원하면 리셋 때 0."],
+    ["GVA", 38, 38, "other", false, "H 확장: M 모드로 트랩할 때 mtval 에 게스트 가상 주소가 기록되었는지 표시 (21장)."],
+    ["MPV", 39, 39, "other", false, "H 확장: M 모드로 트랩 직전의 가상화 모드(V). MRET 이 돌아갈 때 함께 복원한다 (21장)."],
+    ["WPRI", 40, 40, "reserved", false, WPRI_TEXT],
+    ["MPELP", 41, 41, "other", false, "Zicfilp: M 모드로 트랩 직전의 랜딩 패드 기대 상태."],
+    ["MDT", 42, 42, "other", false, "Smdbltrp: M-mode-disable-trap. 리셋 때 1. M 으로 트랩할 때 0이면 1로 바뀌고, 이미 1이면 ‘예기치 않은 트랩’이 되어 RNMI 처리기로 가거나 하트가 critical-error 상태가 된다. MDT 에 1을 쓰면 MIE 가 0이 된다."],
+    ["WPRI", 62, 43, "reserved", false, WPRI_TEXT],
+    ["SD", 63, 63, "context", true, "State Dirty 요약. FS·VS·XS 중 하나라도 Dirty(3)이면 1인 읽기 전용 비트. 최상위 비트라서 부호 검사 한 번으로 ‘문맥 저장이 필요한가’를 판단할 수 있다."],
+  ].map(([name, high, low, group, isSupervisorVisible, description]) => ({ name, high, low, group, isSupervisorVisible, description }));
+
+  /** 한 필드를 SVG 에 그린다. 1비트 필드는 세로 글자, 넓은 필드는 가로 글자. */
+  function drawField(parent, field, cellX, cellY, cellWidth, cellHeight, shouldShowName) {
+    const group = createSvgElement("g", { class: "mstatus-field", tabindex: "0", role: "button", "data-name": field.name + field.high });
+    group.appendChild(createSvgElement("rect", { x: cellX + 1, y: cellY, width: cellWidth - 2, height: cellHeight, rx: 4, class: GROUP_CLASSES[field.group] }));
+    if (shouldShowName) {
+      const centerX = cellX + cellWidth / 2;
+      const centerY = cellY + cellHeight / 2;
+      const isVertical = cellWidth < 40;
+      const attributes = isVertical
+        ? { transform: "translate(" + centerX + "," + centerY + ") rotate(-90)", "text-anchor": "middle", "dominant-baseline": "central", class: field.group === "reserved" ? "t-faint" : "t-mono t-bold", style: "font-size:11px" }
+        : { x: centerX, y: centerY, "text-anchor": "middle", "dominant-baseline": "central", class: field.group === "reserved" ? "t-faint" : "t-mono t-bold", style: "font-size:12px" };
+      group.appendChild(createSvgElement("text", attributes, field.name));
+    }
+    parent.appendChild(group);
+    return group;
+  }
+
+  // ---- 탐색기 (RV64, 위 줄 63–32 · 아래 줄 31–0)
+  const explorerSvg = document.getElementById("mstatus-explorer-svg");
+  const detail = document.getElementById("mstatus-field-detail");
+  const BITS_PER_ROW = 32;
+  const EXPLORER_CELL_WIDTH = 25;
+  const EXPLORER_LEFT = 20;
+  const ROW_TOPS = [36, 154];
+  const ROW_HEIGHT = 62;
+  let view = "mstatus";
+  let highlightedGroup = "all";
+  let selectedField = FIELDS.find((field) => field.name === "MPP");
+  const fieldElements = [];
+
+  ROW_TOPS.forEach((rowTop, rowIndex) => {
+    const rowHighBit = rowIndex === 0 ? 63 : 31;
+    explorerSvg.appendChild(createSvgElement("text", { x: EXPLORER_LEFT, y: rowTop - 22, class: "t-dim" }, rowIndex === 0 ? "비트 63–32" : "비트 31–0"));
+    FIELDS.filter((field) => field.high <= rowHighBit && field.low >= rowHighBit - (BITS_PER_ROW - 1)).forEach((field) => {
+      const cellX = EXPLORER_LEFT + (rowHighBit - field.high) * EXPLORER_CELL_WIDTH;
+      const cellWidth = (field.high - field.low + 1) * EXPLORER_CELL_WIDTH;
+      const element = drawField(explorerSvg, field, cellX, rowTop, cellWidth, ROW_HEIGHT, true);
+      fieldElements.push({ field, element });
+      const select = () => { selectedField = field; render(); };
+      element.addEventListener("click", select);
+      element.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); select(); } });
+      // 필드 경계의 비트 번호만 적어 글자가 겹치지 않게 한다
+      explorerSvg.appendChild(createSvgElement("text", { x: cellX + EXPLORER_CELL_WIDTH / 2, y: rowTop - 5, "text-anchor": "middle", class: "t-faint", style: "font-size:9.5px" }, field.high));
+      if (field.low !== field.high) explorerSvg.appendChild(createSvgElement("text", { x: cellX + cellWidth - EXPLORER_CELL_WIDTH / 2, y: rowTop - 5, "text-anchor": "middle", class: "t-faint", style: "font-size:9.5px" }, field.low));
+    });
+  });
+  // 범례
+  const LEGEND_COLUMNS = 4;
+  const LEGEND_COLUMN_WIDTH = 200;
+  const LEGEND_ROW_HEIGHT = 20;
+  Object.entries(GROUP_NAMES).forEach(([groupKey, label], index) => {
+    const legendX = EXPLORER_LEFT + (index % LEGEND_COLUMNS) * LEGEND_COLUMN_WIDTH;
+    const legendY = 226 + Math.floor(index / LEGEND_COLUMNS) * LEGEND_ROW_HEIGHT;
+    explorerSvg.appendChild(createSvgElement("rect", { x: legendX, y: legendY, width: 13, height: 13, rx: 3, class: GROUP_CLASSES[groupKey] }));
+    explorerSvg.appendChild(createSvgElement("text", { x: legendX + 19, y: legendY + 11, class: "t-faint" }, label));
+  });
+  explorerSvg.setAttribute("viewBox", "0 0 840 266");
+
+  function render() {
+    fieldElements.forEach(({ field, element }) => {
+      const isHiddenBySupervisorView = view === "sstatus" && !field.isSupervisorVisible;
+      const isOutsideGroup = highlightedGroup !== "all" && field.group !== highlightedGroup;
+      element.classList.toggle("is-dimmed", isHiddenBySupervisorView || isOutsideGroup);
+      element.classList.toggle("selected", field === selectedField);
+    });
+    const bitsText = field => (field.high === field.low ? "비트 " + field.high : "비트 " + field.high + ":" + field.low);
+    const visibilityPill = selectedField.isSupervisorVisible ? '<span class="pill ok">sstatus 에서 보임</span>' : '<span class="pill">M 모드 전용</span>';
+    detail.innerHTML = "<h4>" + selectedField.name + '</h4><div class="field-bits">' + bitsText(selectedField) + " · " + GROUP_NAMES[selectedField.group] + "</div><p>" + selectedField.description + "</p>" + visibilityPill;
+  }
+  book.segmented("mstatus-view", (value) => { view = value; render(); });
+  book.segmented("mstatus-group", (value) => { highlightedGroup = value; render(); });
+
+  // ---- 그림 17-7: mstatus 비트 24–0 과 sstatus 의 같은 비트
+  const windowSvg = document.getElementById("sstatus-window-svg");
+  const WINDOW_HIGH_BIT = 24;
+  const WINDOW_CELL_WIDTH = 31;
+  const WINDOW_LEFT = 38;
+  const MACHINE_ROW_TOP = 50;
+  const SUPERVISOR_ROW_TOP = 176;
+  const WINDOW_ROW_HEIGHT = 58;
+  // 행 이름은 세로로 왼쪽 여백에 둔다. 가로로 쓰면 두 행을 잇는 점선과 겹치기 때문이다.
+  windowSvg.appendChild(createSvgElement("text", { x: WINDOW_LEFT, y: 22, class: "t-dim" }, "위: mstatus (M 모드가 보는 것) · 아래: sstatus (S 모드가 보는 것)"));
+  [[MACHINE_ROW_TOP, "mstatus"], [SUPERVISOR_ROW_TOP, "sstatus"]].forEach(([rowTop, label]) => {
+    windowSvg.appendChild(createSvgElement("text", { transform: "translate(20," + (rowTop + WINDOW_ROW_HEIGHT / 2) + ") rotate(-90)", "text-anchor": "middle", "dominant-baseline": "central", class: "t-mono t-bold", style: "font-size:12px" }, label));
+  });
+  FIELDS.filter((field) => field.high <= WINDOW_HIGH_BIT).forEach((field) => {
+    const cellX = WINDOW_LEFT + (WINDOW_HIGH_BIT - field.high) * WINDOW_CELL_WIDTH;
+    const cellWidth = (field.high - field.low + 1) * WINDOW_CELL_WIDTH;
+    drawField(windowSvg, field, cellX, MACHINE_ROW_TOP, cellWidth, WINDOW_ROW_HEIGHT, true);
+    windowSvg.appendChild(createSvgElement("text", { x: cellX + WINDOW_CELL_WIDTH / 2, y: MACHINE_ROW_TOP - 6, "text-anchor": "middle", class: "t-faint", style: "font-size:10px" }, field.high));
+    if (field.isSupervisorVisible) {
+      drawField(windowSvg, field, cellX, SUPERVISOR_ROW_TOP, cellWidth, WINDOW_ROW_HEIGHT, true);
+      const lineX = cellX + cellWidth / 2;
+      windowSvg.appendChild(createSvgElement("path", { d: "M" + lineX + " " + (MACHINE_ROW_TOP + WINDOW_ROW_HEIGHT + 2) + " V" + (SUPERVISOR_ROW_TOP - 2), class: "s-accent flow-dash" }));
+    } else {
+      windowSvg.appendChild(createSvgElement("rect", { x: cellX + 1, y: SUPERVISOR_ROW_TOP, width: cellWidth - 2, height: WINDOW_ROW_HEIGHT, rx: 4, class: "f-surface-2", opacity: "0.7" }));
+    }
+  });
+  windowSvg.appendChild(createSvgElement("text", { x: WINDOW_LEFT, y: 262, class: "t-dim" }, "위쪽 비트 중 sstatus 에 보이는 것: UXL(33:32), SD(63)"));
+  windowSvg.appendChild(createSvgElement("text", { x: WINDOW_LEFT, y: 284, class: "t-dim" }, "M 전용으로 남는 것: SXL · SBE · MBE · GVA · MPV · MPELP · MDT"));
+  // 그림 안의 필드는 장식용이므로 키보드 초점에서 뺀다
+  windowSvg.querySelectorAll(".mstatus-field").forEach((element) => { element.removeAttribute("tabindex"); element.removeAttribute("role"); element.style.cursor = "default"; });
+
+  render();
+})();
+
+/* ---------------------------------------------------------------------------
+   카운터 문 시뮬레이터: mcounteren · scounteren · mcountinhibit
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const COUNTERS = [
+    { name: "cycle", instruction: "rdcycle", bitName: "cy", canInhibit: true },
+    { name: "time", instruction: "rdtime", bitName: "tm", canInhibit: false },
+    { name: "instret", instruction: "rdinstret", bitName: "ir", canInhibit: true },
+  ];
+  const table = document.getElementById("gate-result-table");
+  const isChecked = (id) => document.getElementById(id).checked;
+
+  function render() {
+    let html = "<thead><tr><th>CSR</th><th>S 모드 읽기</th><th>U 모드 읽기</th><th>카운터 증가</th></tr></thead><tbody>";
+    COUNTERS.forEach((counter) => {
+      const isMachineGateOpen = isChecked("gate-m-" + counter.bitName);
+      const isSupervisorGateOpen = isChecked("gate-s-" + counter.bitName);
+      // U 모드는 두 문이 모두 열려야 한다. S 모드는 M 의 문만 본다.
+      const canSupervisorRead = isMachineGateOpen;
+      const canUserRead = isMachineGateOpen && isSupervisorGateOpen;
+      let incrementText = "증가";
+      let incrementClass = "";
+      if (!counter.canInhibit) incrementText = "항상 증가 (mtime)";
+      else if (isChecked("gate-inhibit-" + counter.bitName)) { incrementText = "멈춤"; incrementClass = "stopped"; }
+      html += "<tr><th><code>" + counter.name + "</code></th>" +
+        '<td class="' + (canSupervisorRead ? "allowed" : "denied") + '">' + (canSupervisorRead ? "✓ 성공" : "✗ illegal") + "</td>" +
+        '<td class="' + (canUserRead ? "allowed" : "denied") + '">' + (canUserRead ? "✓ 성공" : "✗ illegal") + "</td>" +
+        '<td class="' + incrementClass + '">' + incrementText + "</td></tr>";
+    });
+    table.innerHTML = html + "</tbody>";
+  }
+  ["gate-m-cy", "gate-m-tm", "gate-m-ir", "gate-s-cy", "gate-s-tm", "gate-s-ir", "gate-inhibit-cy", "gate-inhibit-ir"].forEach((id) => document.getElementById(id).addEventListener("change", render));
+  render();
+})();
+
+/* ---------------------------------------------------------------------------
+   그림 17-12: mstateen0 비트 배치 (규격 Smstateen 장 Figure 1)
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const createSvgElement = window.PrivilegeChapter.createSvgElement;
+  const group = document.getElementById("stateen-figure-bits");
+  const HIGH_CELL_WIDTH = 30;
+  const CELL_HEIGHT = 92;
+  const CELL_TOP = 14;
+  // 비트 63 부터 48 까지 (6비트 WPRI 53:48 포함)
+  const HIGH_FIELDS = [[63, "SE0"], [62, "ENVCFG"], [61, "WPRI"], [60, "CSRIND"], [59, "AIA"], [58, "IMSIC"], [57, "CONTEXT"], [56, "P1P13"], [55, "SRMCFG"], [54, "CTR"]];
+  HIGH_FIELDS.forEach(([bitIndex, name], position) => {
+    const cellX = position * HIGH_CELL_WIDTH;
+    const isReserved = name === "WPRI";
+    group.appendChild(createSvgElement("rect", { x: cellX + 1, y: CELL_TOP, width: HIGH_CELL_WIDTH - 2, height: CELL_HEIGHT, rx: 4, class: isReserved ? "f-surface" : "f-gold-soft" }));
+    group.appendChild(createSvgElement("text", { x: cellX + HIGH_CELL_WIDTH / 2, y: 8, "text-anchor": "middle", class: "t-faint", style: "font-size:10px" }, bitIndex));
+    group.appendChild(createSvgElement("text", { transform: "translate(" + (cellX + HIGH_CELL_WIDTH / 2) + "," + (CELL_TOP + CELL_HEIGHT / 2) + ") rotate(-90)", "text-anchor": "middle", "dominant-baseline": "central", class: isReserved ? "t-faint" : "t-mono t-bold", style: "font-size:11px" }, name));
+  });
+  const reservedHighX = HIGH_FIELDS.length * HIGH_CELL_WIDTH;
+  group.appendChild(createSvgElement("rect", { x: reservedHighX + 1, y: CELL_TOP, width: 6 * HIGH_CELL_WIDTH - 2, height: CELL_HEIGHT, rx: 4, class: "f-surface" }));
+  group.appendChild(createSvgElement("text", { x: reservedHighX + 3 * HIGH_CELL_WIDTH, y: CELL_TOP + CELL_HEIGHT / 2 + 4, "text-anchor": "middle", class: "t-faint" }, "WPRI"));
+  group.appendChild(createSvgElement("text", { x: reservedHighX + 15, y: 8, "text-anchor": "middle", class: "t-faint", style: "font-size:10px" }, "53"));
+  group.appendChild(createSvgElement("text", { x: reservedHighX + 6 * HIGH_CELL_WIDTH - 15, y: 8, "text-anchor": "middle", class: "t-faint", style: "font-size:10px" }, "48"));
+  // 가운데 생략 부분 (47–3: 모두 WPRI)
+  const middleX = 16 * HIGH_CELL_WIDTH + 8;
+  group.appendChild(createSvgElement("rect", { x: middleX, y: CELL_TOP, width: 92, height: CELL_HEIGHT, rx: 4, class: "f-surface" }));
+  group.appendChild(createSvgElement("text", { x: middleX + 46, y: CELL_TOP + CELL_HEIGHT / 2 - 4, "text-anchor": "middle", class: "t-faint" }, "47 … 3"));
+  group.appendChild(createSvgElement("text", { x: middleX + 46, y: CELL_TOP + CELL_HEIGHT / 2 + 14, "text-anchor": "middle", class: "t-faint" }, "WPRI"));
+  // 아래쪽 3비트
+  const LOW_FIELDS = [[2, "JVT"], [1, "FCSR"], [0, "C"]];
+  const lowStartX = middleX + 100;
+  const LOW_CELL_WIDTH = (800 - lowStartX) / LOW_FIELDS.length;
+  LOW_FIELDS.forEach(([bitIndex, name], position) => {
+    const cellX = lowStartX + position * LOW_CELL_WIDTH;
+    group.appendChild(createSvgElement("rect", { x: cellX + 1, y: CELL_TOP, width: LOW_CELL_WIDTH - 2, height: CELL_HEIGHT, rx: 4, class: "f-teal-soft" }));
+    group.appendChild(createSvgElement("text", { x: cellX + LOW_CELL_WIDTH / 2, y: 8, "text-anchor": "middle", class: "t-faint", style: "font-size:10px" }, bitIndex));
+    group.appendChild(createSvgElement("text", { x: cellX + LOW_CELL_WIDTH / 2, y: CELL_TOP + CELL_HEIGHT / 2 + 4, "text-anchor": "middle", class: "t-mono t-bold", style: "font-size:13px" }, name));
+  });
+})();
+</script>
+</body>
+</html>

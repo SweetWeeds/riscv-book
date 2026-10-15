@@ -1,0 +1,1269 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>03 레지스터와 프로그래머 모델 · RISC-V Book</title>
+<meta name="description" content="RISC-V 프로그래머가 보는 상태: x0–x31과 pc, 항상 0인 x0, 플래그 레지스터가 없는 이유, ABI 이름, x1·x5 링크 레지스터와 반환 주소 스택 힌트, 부동소수점·벡터·CSR 레지스터 미리 보기, RV32E, 바이트 주소 리틀 엔디언 메모리를 그림과 시뮬레이터로 익힌다.">
+<link rel="icon" href="../assets/img/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/style.css">
+<script src="../assets/js/book.js"></script>
+<script src="../assets/js/riscv.js"></script>
+<style>
+  /* 레지스터 탐색기 */
+  .register-explorer { display: grid; grid-template-columns: minmax(0, 1fr); }
+  @media (min-width: 820px) { .register-explorer { grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr); } }
+  .register-grid { display: grid; gap: 5px; grid-template-columns: repeat(auto-fill, minmax(76px, 1fr)); }
+  .register-button { font: inherit; font-family: var(--mono); text-align: left; border: 1px solid var(--border); border-radius: 8px; padding: 5px 8px; cursor: pointer; color: var(--text); background: var(--bg-elev); line-height: 1.3; min-width: 0; transition: opacity 0.2s; }
+  .register-button .number { display: block; font-size: 10.5px; color: var(--text-faint); }
+  .register-button .name { font-weight: 700; font-size: 14px; }
+  .register-button.role-zero { background: var(--surface); }
+  .register-button.role-link { background: var(--accent-2-soft); border-color: var(--accent-2); }
+  .register-button.role-pointer { background: var(--violet-soft); border-color: var(--violet); }
+  .register-button.role-temporary { background: var(--teal-soft); border-color: var(--teal); }
+  .register-button.role-saved { background: var(--ok-soft); border-color: var(--ok); }
+  .register-button.role-argument { background: var(--accent-soft); border-color: var(--accent); }
+  .register-button.is-dimmed { opacity: 0.25; }
+  .register-button.is-absent { opacity: 0.18; text-decoration: line-through; cursor: not-allowed; }
+  .register-button.selected { outline: 3px solid var(--accent-2); outline-offset: 1px; }
+  .register-detail { padding: 16px 18px; border-left: 1px solid var(--border); font-size: 15px; min-width: 0; }
+  @media (max-width: 819px) { .register-detail { border-left: 0; border-top: 1px solid var(--border); } }
+  .register-detail h4 { margin: 0 0 6px; font-size: 19px; font-family: var(--mono); }
+  .register-detail p { margin: 8px 0; color: var(--text-dim); }
+  .register-detail ul { margin: 6px 0 0; padding-left: 1.2em; color: var(--text-dim); font-size: 14px; }
+  .register-legend { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+  .register-legend span { font-size: 12px; padding: 2px 9px; border-radius: 999px; border: 1px solid var(--border); color: var(--text-dim); }
+  .register-legend .role-link { background: var(--accent-2-soft); }
+  .register-legend .role-pointer { background: var(--violet-soft); }
+  .register-legend .role-temporary { background: var(--teal-soft); }
+  .register-legend .role-saved { background: var(--ok-soft); }
+  .register-legend .role-argument { background: var(--accent-soft); }
+  .register-legend .role-zero { background: var(--surface); }
+  /* 메모리 시각화 */
+  .memory-row { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 4px; }
+  .memory-byte { border: 1px solid var(--border); border-radius: 8px; padding: 6px 2px; text-align: center; font-family: var(--mono); background: var(--bg-elev); min-width: 0; transition: background 0.3s, border-color 0.3s; }
+  .memory-byte .address { display: block; font-size: 10px; color: var(--text-faint); }
+  .memory-byte .byte-value { display: block; font-size: 15px; font-weight: 700; }
+  .memory-byte .significance { display: block; font-size: 10px; color: var(--accent-2); min-height: 14px; }
+  .memory-byte.is-written { background: var(--accent-2-soft); border-color: var(--accent-2); }
+  .memory-byte.is-read { background: var(--accent-soft); border-color: var(--accent); }
+  .register-bits { font-family: var(--mono); font-size: 14px; overflow-wrap: anywhere; margin-top: 12px; padding: 10px 12px; border-radius: 10px; background: var(--canvas-bg); border: 1px solid var(--border); }
+  .register-bits .extended { color: var(--accent-2); font-weight: 700; }
+  .register-bits .loaded { color: var(--accent); font-weight: 700; }
+  .control input.hex-input { width: 150px; }
+  /* x0 마법 */
+  .pseudo-row { display: flex; flex-wrap: wrap; gap: 6px; }
+  .pseudo-row .button { font-family: var(--mono); font-size: 13px; padding: 5px 10px; }
+  .pseudo-row .button.on { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); font-weight: 700; }
+  .expansion-list { display: grid; gap: 12px; margin-top: 14px; }
+  .expansion-item { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; background: var(--canvas-bg); min-width: 0; }
+  .expansion-item .assembly { font-family: var(--mono); font-size: 15px; font-weight: 700; overflow-wrap: anywhere; }
+  .expansion-item .assembly-abi { font-family: var(--mono); font-size: 13px; color: var(--text-dim); }
+  .bitfield .field.zero-register { background: var(--accent-2-soft); box-shadow: inset 0 0 0 2px var(--accent-2); }
+  .expansion-scroll { overflow-x: auto; }
+  .expansion-scroll .bitfield { min-width: 520px; }
+</style>
+</head>
+<body data-chapter="registers">
+<main class="chapter">
+  <header class="chapter-hero">
+    <div class="eyebrow">Chapter 03</div>
+    <h1>레지스터와 프로그래머 모델</h1>
+    <p class="lead">어셈블리 프로그래머나 컴파일러가 보는 CPU는 놀랄 만큼 단순하다. <strong>32개의 정수 레지스터와 pc 하나, 그리고 바이트 단위로 번지가 매겨진 메모리</strong>가 전부다. 조건 플래그도, 전용 스택 레지스터도, 누산기도 없다. 이 장에서는 RISC-V 베이스 ISA의 <b>프로그래머 모델</b>을 하나씩 뜯어보고, 그중 가장 독특한 레지스터 x0가 어떻게 수많은 명령을 “공짜로” 만들어 내는지 살펴본다.</p>
+    <ul class="objectives">
+      <li>x0–x31, pc, XLEN으로 이루어진 비특권 상태를 그림으로 설명한다.</li>
+      <li>x0가 항상 0인 이유와, x0 덕분에 생기는 의사 명령(nop·mv·neg·j·ret …)을 안다.</li>
+      <li>조건 플래그 레지스터가 없을 때의 장단점을 x86·Arm과 비교한다.</li>
+      <li>zero·ra·sp·gp·tp·t·s·a 같은 ABI 이름과 역할을 구별한다.</li>
+      <li>x1·x5 링크 레지스터와 반환 주소 스택(RAS) 힌트 규칙을 읽는다.</li>
+      <li>f·v 레지스터와 CSR이 언제 생기는지, RV32E가 왜 16개만 두는지 안다.</li>
+      <li>바이트 주소, 리틀 엔디언, 정렬, 주소 공간 순환을 직접 실험한다.</li>
+    </ul>
+    <div class="spec-meta">
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html" target="_blank" rel="noopener">Unpriv · RV32I Programmers' Model</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/unpriv/intro.html" target="_blank" rel="noopener">Unpriv · Introduction (Memory)</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32e.html" target="_blank" rel="noopener">Unpriv · RV32E/RV64E</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/abi/index.html" target="_blank" rel="noopener">psABI · Register Convention</a>
+    </div>
+  </header>
+
+  <!-- ============================================================ -->
+  <section id="programmers-model">
+    <h2>프로그래머가 보는 상태: x0–x31과 pc</h2>
+    <p>규격은 베이스 정수 ISA의 비특권 상태를 표 하나로 정리한다. <b>x0부터 x31까지 32개의 정수 레지스터</b>는 모두 폭이 XLEN 비트다(RV32I는 32, RV64I는 64). 여기에 <b>현재 명령의 주소를 담는 pc</b>가 하나 더 있다. 그것이 전부다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 820 410" role="img" aria-label="x0부터 x31까지 32개 정수 레지스터와 pc">
+        <text x="40" y="30" class="t t-bold">정수 레지스터 파일</text>
+        <text x="40" y="48" class="t-faint" style="font-family:var(--mono)">XLEN-1</text><text x="380" y="48" text-anchor="end" class="t-faint" style="font-family:var(--mono)">0</text>
+        <text x="420" y="48" class="t-faint" style="font-family:var(--mono)">XLEN-1</text><text x="760" y="48" text-anchor="end" class="t-faint" style="font-family:var(--mono)">0</text>
+        <rect x="40" y="56" width="340" height="16" rx="3" class="f-surface"/><text x="48" y="68.5" class="t-mono" style="font-size:11.5px">x0</text><text x="88" y="68.5" class="t-dim" style="font-size:11.5px">zero</text><text x="372" y="68.5" text-anchor="end" class="t-faint" style="font-size:11px;font-family:var(--mono)">0000 … 0000 (고정)</text>
+        <rect x="40" y="74" width="340" height="16" rx="3" class="f-gold-soft"/><text x="48" y="86.5" class="t-mono" style="font-size:11.5px">x1</text><text x="88" y="86.5" class="t-dim" style="font-size:11.5px">ra</text>
+        <rect x="40" y="92" width="340" height="16" rx="3" class="f-violet-soft"/><text x="48" y="104.5" class="t-mono" style="font-size:11.5px">x2</text><text x="88" y="104.5" class="t-dim" style="font-size:11.5px">sp</text>
+        <rect x="40" y="110" width="340" height="16" rx="3" class="f-violet-soft"/><text x="48" y="122.5" class="t-mono" style="font-size:11.5px">x3</text><text x="88" y="122.5" class="t-dim" style="font-size:11.5px">gp</text>
+        <rect x="40" y="128" width="340" height="16" rx="3" class="f-violet-soft"/><text x="48" y="140.5" class="t-mono" style="font-size:11.5px">x4</text><text x="88" y="140.5" class="t-dim" style="font-size:11.5px">tp</text>
+        <rect x="40" y="146" width="340" height="16" rx="3" class="f-teal-soft"/><text x="48" y="158.5" class="t-mono" style="font-size:11.5px">x5</text><text x="88" y="158.5" class="t-dim" style="font-size:11.5px">t0</text>
+        <rect x="40" y="164" width="340" height="16" rx="3" class="f-teal-soft"/><text x="48" y="176.5" class="t-mono" style="font-size:11.5px">x6</text><text x="88" y="176.5" class="t-dim" style="font-size:11.5px">t1</text>
+        <rect x="40" y="182" width="340" height="16" rx="3" class="f-teal-soft"/><text x="48" y="194.5" class="t-mono" style="font-size:11.5px">x7</text><text x="88" y="194.5" class="t-dim" style="font-size:11.5px">t2</text>
+        <rect x="40" y="200" width="340" height="16" rx="3" class="f-ok-soft"/><text x="48" y="212.5" class="t-mono" style="font-size:11.5px">x8</text><text x="88" y="212.5" class="t-dim" style="font-size:11.5px">s0/fp</text>
+        <rect x="40" y="218" width="340" height="16" rx="3" class="f-ok-soft"/><text x="48" y="230.5" class="t-mono" style="font-size:11.5px">x9</text><text x="88" y="230.5" class="t-dim" style="font-size:11.5px">s1</text>
+        <rect x="40" y="236" width="340" height="16" rx="3" class="f-accent-soft"/><text x="48" y="248.5" class="t-mono" style="font-size:11.5px">x10</text><text x="88" y="248.5" class="t-dim" style="font-size:11.5px">a0</text>
+        <rect x="40" y="254" width="340" height="16" rx="3" class="f-accent-soft"/><text x="48" y="266.5" class="t-mono" style="font-size:11.5px">x11</text><text x="88" y="266.5" class="t-dim" style="font-size:11.5px">a1</text>
+        <rect x="40" y="272" width="340" height="16" rx="3" class="f-accent-soft"/><text x="48" y="284.5" class="t-mono" style="font-size:11.5px">x12</text><text x="88" y="284.5" class="t-dim" style="font-size:11.5px">a2</text>
+        <rect x="40" y="290" width="340" height="16" rx="3" class="f-accent-soft"/><text x="48" y="302.5" class="t-mono" style="font-size:11.5px">x13</text><text x="88" y="302.5" class="t-dim" style="font-size:11.5px">a3</text>
+        <rect x="40" y="308" width="340" height="16" rx="3" class="f-accent-soft"/><text x="48" y="320.5" class="t-mono" style="font-size:11.5px">x14</text><text x="88" y="320.5" class="t-dim" style="font-size:11.5px">a4</text>
+        <rect x="40" y="326" width="340" height="16" rx="3" class="f-accent-soft"/><text x="48" y="338.5" class="t-mono" style="font-size:11.5px">x15</text><text x="88" y="338.5" class="t-dim" style="font-size:11.5px">a5</text>
+        <rect x="420" y="56" width="340" height="16" rx="3" class="f-accent-soft"/><text x="428" y="68.5" class="t-mono" style="font-size:11.5px">x16</text><text x="468" y="68.5" class="t-dim" style="font-size:11.5px">a6</text>
+        <rect x="420" y="74" width="340" height="16" rx="3" class="f-accent-soft"/><text x="428" y="86.5" class="t-mono" style="font-size:11.5px">x17</text><text x="468" y="86.5" class="t-dim" style="font-size:11.5px">a7</text>
+        <rect x="420" y="92" width="340" height="16" rx="3" class="f-ok-soft"/><text x="428" y="104.5" class="t-mono" style="font-size:11.5px">x18</text><text x="468" y="104.5" class="t-dim" style="font-size:11.5px">s2</text>
+        <rect x="420" y="110" width="340" height="16" rx="3" class="f-ok-soft"/><text x="428" y="122.5" class="t-mono" style="font-size:11.5px">x19</text><text x="468" y="122.5" class="t-dim" style="font-size:11.5px">s3</text>
+        <rect x="420" y="128" width="340" height="16" rx="3" class="f-ok-soft"/><text x="428" y="140.5" class="t-mono" style="font-size:11.5px">x20</text><text x="468" y="140.5" class="t-dim" style="font-size:11.5px">s4</text>
+        <rect x="420" y="146" width="340" height="16" rx="3" class="f-ok-soft"/><text x="428" y="158.5" class="t-mono" style="font-size:11.5px">x21</text><text x="468" y="158.5" class="t-dim" style="font-size:11.5px">s5</text>
+        <rect x="420" y="164" width="340" height="16" rx="3" class="f-ok-soft"/><text x="428" y="176.5" class="t-mono" style="font-size:11.5px">x22</text><text x="468" y="176.5" class="t-dim" style="font-size:11.5px">s6</text>
+        <rect x="420" y="182" width="340" height="16" rx="3" class="f-ok-soft"/><text x="428" y="194.5" class="t-mono" style="font-size:11.5px">x23</text><text x="468" y="194.5" class="t-dim" style="font-size:11.5px">s7</text>
+        <rect x="420" y="200" width="340" height="16" rx="3" class="f-ok-soft"/><text x="428" y="212.5" class="t-mono" style="font-size:11.5px">x24</text><text x="468" y="212.5" class="t-dim" style="font-size:11.5px">s8</text>
+        <rect x="420" y="218" width="340" height="16" rx="3" class="f-ok-soft"/><text x="428" y="230.5" class="t-mono" style="font-size:11.5px">x25</text><text x="468" y="230.5" class="t-dim" style="font-size:11.5px">s9</text>
+        <rect x="420" y="236" width="340" height="16" rx="3" class="f-ok-soft"/><text x="428" y="248.5" class="t-mono" style="font-size:11.5px">x26</text><text x="468" y="248.5" class="t-dim" style="font-size:11.5px">s10</text>
+        <rect x="420" y="254" width="340" height="16" rx="3" class="f-ok-soft"/><text x="428" y="266.5" class="t-mono" style="font-size:11.5px">x27</text><text x="468" y="266.5" class="t-dim" style="font-size:11.5px">s11</text>
+        <rect x="420" y="272" width="340" height="16" rx="3" class="f-teal-soft"/><text x="428" y="284.5" class="t-mono" style="font-size:11.5px">x28</text><text x="468" y="284.5" class="t-dim" style="font-size:11.5px">t3</text>
+        <rect x="420" y="290" width="340" height="16" rx="3" class="f-teal-soft"/><text x="428" y="302.5" class="t-mono" style="font-size:11.5px">x29</text><text x="468" y="302.5" class="t-dim" style="font-size:11.5px">t4</text>
+        <rect x="420" y="308" width="340" height="16" rx="3" class="f-teal-soft"/><text x="428" y="320.5" class="t-mono" style="font-size:11.5px">x30</text><text x="468" y="320.5" class="t-dim" style="font-size:11.5px">t5</text>
+        <rect x="420" y="326" width="340" height="16" rx="3" class="f-teal-soft"/><text x="428" y="338.5" class="t-mono" style="font-size:11.5px">x31</text><text x="468" y="338.5" class="t-dim" style="font-size:11.5px">t6</text>
+        <rect x="40" y="356" width="340" height="22" rx="4" class="f-elev"/>
+        <text x="48" y="372" class="t-mono t-bold" style="font-size:12px">pc</text>
+        <text x="88" y="372" class="t-dim" style="font-size:12px">지금 실행 중인 명령의 주소</text>
+        <g transform="translate(420,352)" style="font-size:12px">
+          <rect width="12" height="12" class="f-accent-soft"/><text x="17" y="10" class="t-dim" style="font-size:12px">인자·반환</text>
+          <rect x="86" width="12" height="12" class="f-ok-soft"/><text x="103" y="10" class="t-dim" style="font-size:12px">저장(s)</text>
+          <rect x="160" width="12" height="12" class="f-teal-soft"/><text x="177" y="10" class="t-dim" style="font-size:12px">임시(t)</text>
+          <rect x="236" width="12" height="12" class="f-violet-soft"/><text x="253" y="10" class="t-dim" style="font-size:12px">포인터</text>
+          <rect x="0" y="22" width="12" height="12" class="f-gold-soft"/><text x="17" y="32" class="t-dim" style="font-size:12px">복귀 주소</text>
+          <rect x="86" y="22" width="12" height="12" class="f-surface"/><text x="103" y="32" class="t-dim" style="font-size:12px">항상 0</text>
+          <text x="160" y="32" class="t-faint" style="font-size:12px">색은 ABI 관례일 뿐, 하드웨어에겐 모두 같다</text>
+        </g>
+      </svg></div>
+      <figcaption><b>그림 3-1.</b> 베이스 정수 ISA의 비특권 상태. 하드웨어 입장에서 x1–x31은 모두 똑같은 범용 레지스터이고, x0만 모든 비트가 0으로 고정되어 있다. 색으로 표시한 역할(ra, sp, a0 …)은 ISA가 아니라 호출 규약(ABI)이 정한 약속이다.</figcaption>
+    </figure>
+
+    <div class="callout spec"><strong>규격 원문에서</strong>
+      <blockquote>“There is no dedicated stack pointer or subroutine return address link register in the Base Integer ISA; the instruction encoding allows any x register to be used for these purposes. However, the standard software calling convention uses register x1 to hold the return address for a call, with register x5 available as an alternate link register.”</blockquote>
+      <p><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html" target="_blank" rel="noopener">Volume I, RV32I — Programmers' Model for Base Integer ISA</a></p></div>
+
+    <h3>왜 32개인가, 왜 5비트 칸이 고정되어 있나</h3>
+    <p>레지스터가 32개이니 레지스터를 가리키는 칸은 5비트다. 규격 해설은 16개로도 컴파일된 정수 코드에는 충분하다고 인정하면서도, 32개를 고른 이유를 이렇게 설명한다. 16비트 명령 안에 3-주소 형식(rd, rs1, rs2)을 넣으면 16개 레지스터로도 완전한 ISA를 만들 수 없고, 24비트 같은 어중간한 길이는 피하고 싶었다. 일단 32비트 명령을 택하자 32개 레지스터를 지원하기는 쉬웠고, 레지스터가 많으면 루프 펼치기나 소프트웨어 파이프라이닝 같은 고성능 코드에도 유리하다.</p>
+    <p>더 중요한 것은 <b>칸의 위치</b>다. 모든 형식에서 rs1·rs2·rd가 같은 비트 위치에 있다. 덕분에 하드웨어는 명령의 종류를 다 해독하기 전에 레지스터 파일부터 읽기 시작할 수 있다. 명령 형식은 <a href="encoding.html">4장</a>에서 자세히 다룬다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 820 330" role="img" aria-label="여섯 명령 형식에서 rs1, rs2, rd 칸이 같은 위치에 있음을 보여 주는 그림">
+        <rect x="280" y="50" width="100" height="246" rx="6" fill="none" stroke="var(--teal)" stroke-width="1.6" stroke-dasharray="6 4"/>
+        <rect x="380" y="50" width="100" height="246" rx="6" fill="none" stroke="var(--teal)" stroke-width="1.6" stroke-dasharray="6 4"/>
+        <rect x="540" y="50" width="100" height="246" rx="6" fill="none" stroke="var(--teal)" stroke-width="1.6" stroke-dasharray="6 4"/>
+        <g style="font-family:var(--mono)">
+          <text x="150" y="42" text-anchor="middle" class="t-faint">31</text><text x="290" y="42" text-anchor="middle" class="t-faint">24</text><text x="390" y="42" text-anchor="middle" class="t-faint">19</text><text x="550" y="42" text-anchor="middle" class="t-faint">11</text><text x="630" y="42" text-anchor="middle" class="t-faint">7</text><text x="770" y="42" text-anchor="middle" class="t-faint">0</text>
+        </g>
+        <text x="124" y="78" text-anchor="end" class="t t-bold">R형</text>
+        <rect x="140" y="58" width="140" height="30" rx="3" class="f-violet-soft"/><text x="210.0" y="78" text-anchor="middle" class="t-mono" style="font-size:12px">funct7</text>
+        <rect x="280" y="58" width="100" height="30" rx="3" class="f-teal-soft"/><text x="330.0" y="78" text-anchor="middle" class="t-mono t-bold" style="font-size:12px">rs2</text>
+        <rect x="380" y="58" width="100" height="30" rx="3" class="f-teal-soft"/><text x="430.0" y="78" text-anchor="middle" class="t-mono t-bold" style="font-size:12px">rs1</text>
+        <rect x="480" y="58" width="60" height="30" rx="3" class="f-violet-soft"/><text x="510.0" y="78" text-anchor="middle" class="t-mono" style="font-size:12px">funct3</text>
+        <rect x="540" y="58" width="100" height="30" rx="3" class="f-teal-soft"/><text x="590.0" y="78" text-anchor="middle" class="t-mono t-bold" style="font-size:12px">rd</text>
+        <rect x="640" y="58" width="140" height="30" rx="3" class="f-accent-soft"/><text x="710.0" y="78" text-anchor="middle" class="t-mono" style="font-size:12px">opcode</text>
+        <text x="124" y="118" text-anchor="end" class="t t-bold">I형</text>
+        <rect x="140" y="98" width="240" height="30" rx="3" class="f-gold-soft"/><text x="260.0" y="118" text-anchor="middle" class="t-mono" style="font-size:12px">imm[11:0]</text>
+        <rect x="380" y="98" width="100" height="30" rx="3" class="f-teal-soft"/><text x="430.0" y="118" text-anchor="middle" class="t-mono t-bold" style="font-size:12px">rs1</text>
+        <rect x="480" y="98" width="60" height="30" rx="3" class="f-violet-soft"/><text x="510.0" y="118" text-anchor="middle" class="t-mono" style="font-size:12px">funct3</text>
+        <rect x="540" y="98" width="100" height="30" rx="3" class="f-teal-soft"/><text x="590.0" y="118" text-anchor="middle" class="t-mono t-bold" style="font-size:12px">rd</text>
+        <rect x="640" y="98" width="140" height="30" rx="3" class="f-accent-soft"/><text x="710.0" y="118" text-anchor="middle" class="t-mono" style="font-size:12px">opcode</text>
+        <text x="124" y="158" text-anchor="end" class="t t-bold">S형</text>
+        <rect x="140" y="138" width="140" height="30" rx="3" class="f-gold-soft"/><text x="210.0" y="158" text-anchor="middle" class="t-mono" style="font-size:12px">imm[11:5]</text>
+        <rect x="280" y="138" width="100" height="30" rx="3" class="f-teal-soft"/><text x="330.0" y="158" text-anchor="middle" class="t-mono t-bold" style="font-size:12px">rs2</text>
+        <rect x="380" y="138" width="100" height="30" rx="3" class="f-teal-soft"/><text x="430.0" y="158" text-anchor="middle" class="t-mono t-bold" style="font-size:12px">rs1</text>
+        <rect x="480" y="138" width="60" height="30" rx="3" class="f-violet-soft"/><text x="510.0" y="158" text-anchor="middle" class="t-mono" style="font-size:12px">funct3</text>
+        <rect x="540" y="138" width="100" height="30" rx="3" class="f-gold-soft"/><text x="590.0" y="158" text-anchor="middle" class="t-mono" style="font-size:12px">imm[4:0]</text>
+        <rect x="640" y="138" width="140" height="30" rx="3" class="f-accent-soft"/><text x="710.0" y="158" text-anchor="middle" class="t-mono" style="font-size:12px">opcode</text>
+        <text x="124" y="198" text-anchor="end" class="t t-bold">B형</text>
+        <rect x="140" y="178" width="140" height="30" rx="3" class="f-gold-soft"/><text x="210.0" y="198" text-anchor="middle" class="t-mono" style="font-size:12px">imm</text>
+        <rect x="280" y="178" width="100" height="30" rx="3" class="f-teal-soft"/><text x="330.0" y="198" text-anchor="middle" class="t-mono t-bold" style="font-size:12px">rs2</text>
+        <rect x="380" y="178" width="100" height="30" rx="3" class="f-teal-soft"/><text x="430.0" y="198" text-anchor="middle" class="t-mono t-bold" style="font-size:12px">rs1</text>
+        <rect x="480" y="178" width="60" height="30" rx="3" class="f-violet-soft"/><text x="510.0" y="198" text-anchor="middle" class="t-mono" style="font-size:12px">funct3</text>
+        <rect x="540" y="178" width="100" height="30" rx="3" class="f-gold-soft"/><text x="590.0" y="198" text-anchor="middle" class="t-mono" style="font-size:12px">imm</text>
+        <rect x="640" y="178" width="140" height="30" rx="3" class="f-accent-soft"/><text x="710.0" y="198" text-anchor="middle" class="t-mono" style="font-size:12px">opcode</text>
+        <text x="124" y="238" text-anchor="end" class="t t-bold">U형</text>
+        <rect x="140" y="218" width="400" height="30" rx="3" class="f-gold-soft"/><text x="340.0" y="238" text-anchor="middle" class="t-mono" style="font-size:12px">imm[31:12]</text>
+        <rect x="540" y="218" width="100" height="30" rx="3" class="f-teal-soft"/><text x="590.0" y="238" text-anchor="middle" class="t-mono t-bold" style="font-size:12px">rd</text>
+        <rect x="640" y="218" width="140" height="30" rx="3" class="f-accent-soft"/><text x="710.0" y="238" text-anchor="middle" class="t-mono" style="font-size:12px">opcode</text>
+        <text x="124" y="278" text-anchor="end" class="t t-bold">J형</text>
+        <rect x="140" y="258" width="400" height="30" rx="3" class="f-gold-soft"/><text x="340.0" y="278" text-anchor="middle" class="t-mono" style="font-size:12px">imm[20|10:1|11|19:12]</text>
+        <rect x="540" y="258" width="100" height="30" rx="3" class="f-teal-soft"/><text x="590.0" y="278" text-anchor="middle" class="t-mono t-bold" style="font-size:12px">rd</text>
+        <rect x="640" y="258" width="140" height="30" rx="3" class="f-accent-soft"/><text x="710.0" y="278" text-anchor="middle" class="t-mono" style="font-size:12px">opcode</text>
+        <text x="330" y="318" text-anchor="middle" class="t-teal">rs2 [24:20]</text>
+        <text x="430" y="318" text-anchor="middle" class="t-teal">rs1 [19:15]</text>
+        <text x="590" y="318" text-anchor="middle" class="t-teal">rd [11:7]</text>
+      </svg></div>
+      <figcaption><b>그림 3-2.</b> 여섯 가지 32비트 명령 형식. 점선 기둥 안의 레지스터 칸(청록)은 형식이 바뀌어도 자리가 움직이지 않는다. 5비트이므로 x0–x31을 가리킬 수 있다. RV32E에서는 x16–x31을 가리키는 값이 예약되어 있다.</figcaption>
+    </figure>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="x0">
+    <h2>x0: 언제나 0인 레지스터</h2>
+    <p>규격의 정의는 한 줄이다. “레지스터 x0는 모든 비트가 0으로 고정되어 있다.” x0를 읽으면 항상 0이 나오고, x0에 쓰는 결과는 그냥 버려진다. 레지스터 하나를 통째로 상수 0에 바친 셈인데, 이 덕분에 ISA는 훨씬 작아진다. 0이 필요한 곳에 언제든 x0를 쓰면 되니, “레지스터 복사”, “부호 반전”, “무조건 점프”, “0과 비교해 분기” 같은 명령을 따로 만들 필요가 없다. 어셈블러가 <span class="term">의사 명령</span><span class="english">(pseudoinstruction)</span>으로 이름만 붙여 주면 된다.</p>
+
+    <div class="sim" id="alu-animation-sim">
+      <div class="sim-head"><span class="sim-tag animation">ANIMATION</span><h3>레지스터와 ALU 사이의 데이터 흐름</h3></div>
+      <div class="sim-view"><canvas id="alu-canvas" aria-label="레지스터 값이 ALU로 흘러가 계산되고 목적 레지스터로 돌아가는 애니메이션"></canvas></div>
+      <div class="step-description" id="alu-description">명령마다 원천 레지스터 값이 ALU로 흘러가고, 결과가 목적 레지스터로 돌아온다.</div>
+      <div class="sim-controls">
+        <div class="control"><span>재생</span><div class="button-row"><button class="button primary" id="alu-play-button">멈춤</button><button class="button" id="alu-next-button">다음 명령</button></div></div>
+        <label class="control"><span>속도 <output id="alu-speed-output"></output></span><input type="range" id="alu-speed" min="1" max="4" value="2"></label>
+      </div>
+      <div class="sim-note">네 번째 명령 <code>add zero, a1, a2</code>를 눈여겨보자. ALU는 12를 계산해 x0로 보내지만, x0는 그대로 0이다. 결과를 버리고 싶을 때(예: 반환 주소가 필요 없는 점프) 목적지를 x0로 두는 이유다.</div>
+    </div>
+
+    <p>x0를 이용하는 대표적인 의사 명령을 정리하면 다음과 같다. 모두 규격의 명령 설명이나 어셈블리 매뉴얼에 나오는 표준 확장이다.</p>
+    <div class="table-wrap"><table class="instruction-table compact">
+      <thead><tr><th>의사 명령</th><th>실제 명령</th><th>x0의 역할</th></tr></thead>
+      <tbody>
+        <tr><td>nop</td><td><code>addi x0, x0, 0</code></td><td>읽기도 쓰기도 x0 → 아무 효과 없음</td></tr>
+        <tr><td>li rd, imm</td><td><code>addi rd, x0, imm</code></td><td>0 + 즉시값 (12비트 범위일 때)</td></tr>
+        <tr><td>mv rd, rs</td><td><code>addi rd, rs, 0</code></td><td>(x0 없이 즉시값 0으로 만든다)</td></tr>
+        <tr><td>neg rd, rs</td><td><code>sub rd, x0, rs</code></td><td>0 − rs</td></tr>
+        <tr><td>snez rd, rs</td><td><code>sltu rd, x0, rs</code></td><td>0 &lt;u rs ⇔ rs ≠ 0</td></tr>
+        <tr><td>beqz rs, L</td><td><code>beq rs, x0, L</code></td><td>0과 비교</td></tr>
+        <tr><td>bgtz rs, L</td><td><code>blt x0, rs, L</code></td><td>0 &lt; rs</td></tr>
+        <tr><td>j L</td><td><code>jal x0, L</code></td><td>복귀 주소를 버림</td></tr>
+        <tr><td>jr rs</td><td><code>jalr x0, 0(rs)</code></td><td>복귀 주소를 버림</td></tr>
+        <tr><td>ret</td><td><code>jalr x0, 0(x1)</code></td><td>복귀 주소를 버리고 ra로 점프</td></tr>
+      </tbody>
+    </table></div>
+
+    <div class="sim" id="x0-magic-sim">
+      <div class="sim-head"><span class="sim-tag">SIMULATOR</span><h3>x0 마법: 의사 명령 펼쳐 보기</h3></div>
+      <div class="sim-pad">
+        <div class="pseudo-row" id="pseudo-buttons"></div>
+        <div class="control wide" style="margin-top:14px"><span>직접 입력 (riscv.js 어셈블러가 이해하는 한 줄)</span><input type="text" id="pseudo-input" value="neg a0, a1" spellcheck="false" autocomplete="off" aria-label="어셈블리 한 줄"></div>
+        <div class="expansion-list" id="pseudo-expansion"></div>
+      </div>
+      <div class="step-description" id="pseudo-description"></div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">실제 명령 수</span><span class="value" id="pseudo-count">—</span></div>
+        <div class="stat"><span class="key">x0를 쓰는 레지스터 칸</span><span class="value" id="pseudo-zero-count">—</span></div>
+        <div class="stat"><span class="key">기계어</span><span class="value" id="pseudo-machine">—</span></div>
+      </div>
+      <div class="sim-note">금색 테두리 칸이 값 0, 곧 x0를 가리키는 레지스터 칸이다. <code>li a0, 5</code>와 <code>li a0, 0x12345678</code>을 비교해 보자. 작은 상수는 x0에 더해 한 명령으로 끝나지만, 큰 상수는 <code>lui</code>가 상위 비트를 직접 만들기 때문에 x0가 필요 없다.</div>
+    </div>
+
+    <div class="callout deep"><strong>rd = x0 인 명령은 HINT 공간이 된다</strong><p>x0에 쓰는 명령은 결과가 버려지므로 아키텍처 상태를 바꾸지 않는다. 규격은 이런 인코딩 가운데 정식 <code>nop</code>(<code>addi x0, x0, 0</code>)을 뺀 나머지 상당수를 <b>HINT</b>로 지정해, 성능 힌트용으로 쓸 수 있게 남겨 두었다. 예를 들어 Zihintpause의 <code>pause</code>는 후행 집합이 비어 있는(succ=0) <code>fence</code> 인코딩을, Zicbop의 프리페치는 <code>ori</code>의 rd=x0 변형을 쓴다. 힌트를 모르는 옛 코어에서는 그냥 nop처럼 동작하므로 호환성이 깨지지 않는다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="no-flags">
+    <h2>플래그 레지스터가 없다</h2>
+    <p>x86과 Arm에는 비교나 산술 결과의 성질(0인지, 음수인지, 올림수가 났는지, 넘쳤는지)을 기록하는 <span class="term">조건 코드</span><span class="english">(condition codes, flags)</span> 레지스터가 있다. 분기 명령은 그 플래그를 읽는다. RISC-V에는 이런 레지스터가 <b>없다</b>. 대신 분기 명령이 두 레지스터를 직접 비교한다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 300" role="img" aria-label="x86, Arm, RISC-V의 비교와 분기 방식 비교">
+        <defs><marker id="flags-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker></defs>
+        <!-- x86 -->
+        <g transform="translate(10,10)">
+          <rect width="270" height="280" rx="14" class="f-elev"/>
+          <text x="135" y="28" text-anchor="middle" class="t t-bold">x86-64</text>
+          <rect x="20" y="46" width="230" height="34" rx="8" class="f-surface"/><text x="135" y="68" text-anchor="middle" class="t-mono">cmp  eax, ebx</text>
+          <path d="M135 82 V112" class="s-accent flow-dash" marker-end="url(#flags-arrow)"/>
+          <rect x="20" y="116" width="230" height="56" rx="8" class="f-warn-soft"/>
+          <text x="135" y="138" text-anchor="middle" class="t-warn">EFLAGS (숨은 상태)</text>
+          <text x="135" y="160" text-anchor="middle" class="t-mono" style="font-size:12px">CF · ZF · SF · OF · …</text>
+          <path d="M135 174 V204" class="s-accent flow-dash" marker-end="url(#flags-arrow)"/>
+          <rect x="20" y="208" width="230" height="34" rx="8" class="f-surface"/><text x="135" y="230" text-anchor="middle" class="t-mono">jl   label</text>
+          <text x="135" y="266" text-anchor="middle" class="t-faint">대부분의 산술 명령도 플래그를 바꾼다</text>
+        </g>
+        <!-- Arm -->
+        <g transform="translate(295,10)">
+          <rect width="270" height="280" rx="14" class="f-elev"/>
+          <text x="135" y="28" text-anchor="middle" class="t t-bold">Arm A64</text>
+          <rect x="20" y="46" width="230" height="34" rx="8" class="f-surface"/><text x="135" y="68" text-anchor="middle" class="t-mono">cmp  x0, x1</text>
+          <path d="M135 82 V112" class="s-accent flow-dash" marker-end="url(#flags-arrow)"/>
+          <rect x="20" y="116" width="230" height="56" rx="8" class="f-warn-soft"/>
+          <text x="135" y="138" text-anchor="middle" class="t-warn">NZCV (숨은 상태)</text>
+          <text x="135" y="160" text-anchor="middle" class="t-mono" style="font-size:12px">N · Z · C · V</text>
+          <path d="M135 174 V204" class="s-accent flow-dash" marker-end="url(#flags-arrow)"/>
+          <rect x="20" y="208" width="230" height="34" rx="8" class="f-surface"/><text x="135" y="230" text-anchor="middle" class="t-mono">b.lt label</text>
+          <text x="135" y="266" text-anchor="middle" class="t-faint">adds 처럼 s가 붙은 명령만 플래그를 바꾼다</text>
+        </g>
+        <!-- RISC-V -->
+        <g transform="translate(580,10)">
+          <rect width="270" height="280" rx="14" class="f-accent-soft"/>
+          <text x="135" y="28" text-anchor="middle" class="t t-bold">RISC-V</text>
+          <rect x="20" y="46" width="230" height="56" rx="8" class="f-elev"/>
+          <text x="135" y="68" text-anchor="middle" class="t-mono">blt  a0, a1, label</text>
+          <text x="135" y="90" text-anchor="middle" class="t-faint">비교와 분기가 한 명령</text>
+          <rect x="20" y="116" width="230" height="56" rx="8" fill="none" stroke="var(--text-faint)" stroke-dasharray="5 4"/>
+          <text x="135" y="140" text-anchor="middle" class="t-dim">플래그 없음</text>
+          <text x="135" y="160" text-anchor="middle" class="t-faint">숨은 상태가 없다</text>
+          <rect x="20" y="186" width="230" height="56" rx="8" class="f-elev"/>
+          <text x="135" y="208" text-anchor="middle" class="t-mono">slt  t0, a0, a1</text>
+          <text x="135" y="230" text-anchor="middle" class="t-faint">비교 결과가 필요하면 레지스터에</text>
+          <text x="135" y="266" text-anchor="middle" class="t-faint">결과는 언제나 보이는 레지스터에 남는다</text>
+        </g>
+      </svg></div>
+      <figcaption><b>그림 3-3.</b> 비교와 분기. x86과 Arm은 비교 결과를 숨은 플래그 레지스터에 남기고 다음 분기가 그것을 읽는다(흐르는 점선). RISC-V는 비교와 분기를 한 명령에 묶었고, 비교 결과 자체가 필요하면 <code>slt</code>로 일반 레지스터에 0/1을 쓴다.</figcaption>
+    </figure>
+
+    <p>규격 해설은 이 결정의 이유를 여러 가지로 든다. 비교-분기를 합친 명령은 일반 파이프라인에 잘 들어맞고, <b>추가 조건 코드 상태나 임시 레지스터가 필요 없으며</b>, 정적 코드 크기와 명령어 가져오기 트래픽을 줄인다. 분기가 명령어 흐름 앞쪽에서 일찍 보이므로 예측도 빨리 할 수 있다. 플래그는 비순차 실행 코어에서 특히 골칫거리다. 거의 모든 명령이 플래그를 쓰면 그 플래그도 레지스터처럼 이름 바꾸기(renaming)를 해야 하기 때문이다.</p>
+    <p>대가도 있다. 올림수(carry)나 넘침(overflow)을 알고 싶으면 명령을 더 써야 한다. 규격은 그 비용이 크지 않다며 직접 예를 든다.</p>
+    <div class="codebox" data-title="규격의 넘침 검사 예 (Volume I, Integer Computational Instructions)" id="overflow-code"></div>
+    <div class="callout spec"><strong>규격 원문에서</strong>
+      <blockquote>“This design was motivated by the observation that a combined compare-and-branch instruction fits into a regular pipeline, avoids additional condition code state or use of a temporary register, and reduces static code size and dynamic instruction fetch traffic.”</blockquote>
+      <p><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html" target="_blank" rel="noopener">Volume I, RV32I — Conditional Branches</a></p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="abi-names">
+    <h2>ABI 이름과 역할</h2>
+    <p>하드웨어에게 x10과 x18은 똑같은 레지스터다. 그러나 따로 컴파일된 함수끼리 서로를 부르려면 “인자는 어디에 넣고, 어떤 레지스터는 호출 뒤에도 값이 남아 있어야 하는가”를 약속해야 한다. 이 약속이 <b>호출 규약</b>이고, RISC-V psABI 규격이 정한다. 어셈블리에서는 번호 대신 역할이 드러나는 <b>ABI 이름</b>을 주로 쓴다. 자세한 규칙과 스택 프레임은 <a href="abi.html">7장</a>에서 다룬다.</p>
+
+    <div class="sim" id="register-explorer-sim">
+      <div class="sim-head"><span class="sim-tag">EXPLORER</span><h3>레지스터 파일 탐색기</h3></div>
+      <div class="register-explorer">
+        <div class="sim-pad">
+          <div class="register-grid" id="register-grid"></div>
+          <div class="register-legend">
+            <span class="role-zero">항상 0</span><span class="role-link">복귀 주소</span><span class="role-pointer">포인터</span><span class="role-argument">인자·반환</span><span class="role-temporary">임시 (호출자 저장)</span><span class="role-saved">저장 (피호출자 저장)</span>
+          </div>
+        </div>
+        <div class="register-detail" id="register-detail"></div>
+      </div>
+      <div class="sim-controls">
+        <div class="control"><span>보기</span><div class="segmented" id="register-filter"><button data-value="all" class="on">전체</button><button data-value="argument">인자·반환</button><button data-value="caller">호출 뒤 보존 안 됨</button><button data-value="callee">호출 뒤 보존됨</button><button data-value="compressed">C의 3비트 칸</button></div></div>
+        <div class="control"><span>베이스</span><div class="segmented" id="register-base"><button data-value="i" class="on">RV32I / RV64I</button><button data-value="e">RV32E / RV64E</button></div></div>
+      </div>
+      <div class="sim-note">레지스터를 눌러 역할과 특이 사항을 읽어 보자. “C의 3비트 칸”을 고르면 압축 명령의 짧은 레지스터 칸이 가리킬 수 있는 8개(x8–x15)만 남는다. 자주 쓰는 s0·s1·a0–a5가 이 범위에 모인 것은 우연이 아니다. RV32E로 바꾸면 x16–x31이 사라진다.</div>
+    </div>
+
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>레지스터</th><th>ABI 이름</th><th>뜻 (psABI)</th><th>호출 뒤 보존?</th></tr></thead>
+      <tbody>
+        <tr><td><code>x0</code></td><td>zero</td><td>항상 0</td><td>— (바뀌지 않음)</td></tr>
+        <tr><td><code>x1</code></td><td>ra</td><td>복귀 주소</td><td>아니오</td></tr>
+        <tr><td><code>x2</code></td><td>sp</td><td>스택 포인터</td><td>예</td></tr>
+        <tr><td><code>x3</code></td><td>gp</td><td>전역 포인터</td><td>— (할당 대상 아님)</td></tr>
+        <tr><td><code>x4</code></td><td>tp</td><td>스레드 포인터</td><td>— (할당 대상 아님)</td></tr>
+        <tr><td><code>x5–x7</code></td><td>t0–t2</td><td>임시</td><td>아니오</td></tr>
+        <tr><td><code>x8–x9</code></td><td>s0–s1</td><td>피호출자 저장 (s0 = 프레임 포인터 fp)</td><td>예</td></tr>
+        <tr><td><code>x10–x17</code></td><td>a0–a7</td><td>인자 (a0·a1은 반환값도)</td><td>아니오</td></tr>
+        <tr><td><code>x18–x27</code></td><td>s2–s11</td><td>피호출자 저장</td><td>예</td></tr>
+        <tr><td><code>x28–x31</code></td><td>t3–t6</td><td>임시</td><td>아니오</td></tr>
+      </tbody>
+    </table></div>
+    <div class="callout tip"><strong>gp와 tp는 건드리지 않는다</strong><p>psABI는 “표준 ABI에서 프로시저는 정수 레지스터 tp와 gp를 수정해서는 안 된다. 시그널 처리기가 그 값에 의존할 수 있기 때문이다”라고 적는다. gp는 링커가 전역 변수 접근을 짧게 만드는 데(7장의 링커 완화), tp는 스레드 지역 저장소(TLS)를 가리키는 데 쓴다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="link-registers">
+    <h2>x1·x5 링크 레지스터와 반환 주소 스택 힌트</h2>
+    <p>베이스 ISA에는 “함수 호출 명령”이나 “복귀 명령”이 따로 없다. <code>jal</code>과 <code>jalr</code>은 아무 레지스터에나 복귀 주소(pc+4)를 남길 수 있다. 그러나 고성능 코어는 복귀 주소를 미리 맞히는 <span class="term">반환 주소 스택</span><span class="english">(RAS, return-address stack)</span>을 갖고 있고, 그러려면 어떤 점프가 호출이고 어떤 점프가 복귀인지 알아야 한다. RISC-V는 별도의 힌트 비트 대신 <b>레지스터 번호</b>로 그 뜻을 전한다. 기준은 <b>x1(ra)과 x5(t0)</b>, 두 링크 레지스터다.</p>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>rd가 x1/x5?</th><th>rs1이 x1/x5?</th><th>rd = rs1?</th><th>RAS 동작 (JALR)</th><th>대표 예</th></tr></thead>
+      <tbody>
+        <tr><td>아니오</td><td>아니오</td><td>—</td><td>없음</td><td><code>jr a5</code> (switch 점프 테이블)</td></tr>
+        <tr><td>아니오</td><td>예</td><td>—</td><td><b>Pop</b></td><td><code>ret</code> = <code>jalr x0, 0(ra)</code></td></tr>
+        <tr><td>예</td><td>아니오</td><td>—</td><td><b>Push</b></td><td><code>jalr ra, 0(a5)</code> (함수 포인터 호출)</td></tr>
+        <tr><td>예</td><td>예</td><td>아니오</td><td><b>Pop 한 뒤 Push</b></td><td><code>jalr x5, 0(x1)</code> (코루틴 전환)</td></tr>
+        <tr><td>예</td><td>예</td><td>예</td><td><b>Push</b></td><td><code>auipc ra, …; jalr ra, …(ra)</code></td></tr>
+      </tbody>
+    </table></div>
+    <p><code>jal</code>은 rd가 x1이나 x5일 때만 RAS에 push한다. 마지막 줄의 규칙이 재미있다. rs1과 rd가 같은 링크 레지스터면 pop 없이 push만 하는데, 이는 <code>auipc ra, imm20; jalr ra, imm12(ra)</code> 같은 먼 거리 호출 두 명령을 하나로 묶어(macro-op fusion) 처리할 수 있게 하려는 것이다. x5를 대체 링크 레지스터로 고른 이유도 규격에 있다. 호출 규약에서 임시 레지스터라 자유롭게 쓸 수 있고, 인코딩이 x1과 한 비트만 다르다(00001 ↔ 00101). 압축 코드에서 레지스터를 저장·복원하는 “밀리코드” 루틴을 부를 때 ra를 보존하는 용도로 쓴다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 820 320" role="img" aria-label="함수 호출과 복귀에 따라 반환 주소 스택이 push와 pop되는 애니메이션">
+        <text x="30" y="30" class="t t-bold">실행 흐름</text>
+        <text x="560" y="30" class="t t-bold">반환 주소 스택 (하드웨어 예측기)</text>
+        <!-- 코드 줄 -->
+        <rect x="30" y="50" width="440" height="40" rx="8" class="f-gold-soft" opacity="0">
+          <animate attributeName="opacity" dur="8s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;0.05;0.22;0.25;1"/>
+        </rect>
+        <rect x="30" y="100" width="440" height="40" rx="8" class="f-gold-soft" opacity="0">
+          <animate attributeName="opacity" dur="8s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;0.25;0.3;0.47;0.5;1"/>
+        </rect>
+        <rect x="30" y="150" width="440" height="40" rx="8" class="f-gold-soft" opacity="0">
+          <animate attributeName="opacity" dur="8s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;0.5;0.55;0.72;0.75;1"/>
+        </rect>
+        <rect x="30" y="200" width="440" height="40" rx="8" class="f-gold-soft" opacity="0">
+          <animate attributeName="opacity" dur="8s" repeatCount="indefinite" values="0;0;1;1;0" keyTimes="0;0.75;0.8;0.97;1"/>
+        </rect>
+        <g style="font-family:var(--mono)">
+          <text x="44" y="76" class="t-faint">0x1000</text><text x="120" y="76" class="t-mono">main: jal  ra, f</text><text x="456" y="76" text-anchor="end" class="t-accent" style="font-size:13px">rd=x1 → push</text>
+          <text x="44" y="126" class="t-faint">0x2008</text><text x="120" y="126" class="t-mono">f:    jal  ra, g</text><text x="456" y="126" text-anchor="end" class="t-accent" style="font-size:13px">rd=x1 → push</text>
+          <text x="44" y="176" class="t-faint">0x3010</text><text x="120" y="176" class="t-mono">g:    ret</text><text x="456" y="176" text-anchor="end" class="t-ok" style="font-size:13px">rs1=x1, rd=x0 → pop</text>
+          <text x="44" y="226" class="t-faint">0x2010</text><text x="120" y="226" class="t-mono">f:    ret</text><text x="456" y="226" text-anchor="end" class="t-ok" style="font-size:13px">rs1=x1, rd=x0 → pop</text>
+        </g>
+        <text x="30" y="276" class="t-faint">(f는 g를 부르기 전에 ra를 스택 메모리에 저장했다가 되살린다고 가정 — 7장)</text>
+        <!-- 스택 -->
+        <path d="M560 60 V240 H760 V60" fill="none" stroke="var(--text-faint)" stroke-width="2"/>
+        <g opacity="0">
+          <animate attributeName="opacity" dur="8s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;0.04;0.08;0.8;0.84;1"/>
+          <rect x="572" y="186" width="176" height="44" rx="8" class="f-accent-soft"/>
+          <text x="660" y="213" text-anchor="middle" class="t-mono t-bold">0x1004</text>
+        </g>
+        <g opacity="0">
+          <animate attributeName="opacity" dur="8s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;0.29;0.33;0.55;0.59;1"/>
+          <rect x="572" y="134" width="176" height="44" rx="8" class="f-accent-soft"/>
+          <text x="660" y="161" text-anchor="middle" class="t-mono t-bold">0x200c</text>
+        </g>
+        <!-- 예측 결과 표시 -->
+        <g opacity="0">
+          <animate attributeName="opacity" dur="8s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;0.55;0.58;0.72;0.75;1"/>
+          <text x="660" y="276" text-anchor="middle" class="t-ok">예측: 0x200c 로 복귀</text>
+        </g>
+        <g opacity="0">
+          <animate attributeName="opacity" dur="8s" repeatCount="indefinite" values="0;0;1;1;0" keyTimes="0;0.8;0.83;0.97;1"/>
+          <text x="660" y="276" text-anchor="middle" class="t-ok">예측: 0x1004 로 복귀</text>
+        </g>
+        <text x="660" y="300" text-anchor="middle" class="t-faint">스택 맨 위가 다음 ret의 예상 목적지</text>
+      </svg></div>
+      <figcaption><b>그림 3-4.</b> 레지스터 번호로 전하는 호출·복귀 힌트. <code>jal ra, …</code>는 복귀 주소(pc+4)를 RAS에 넣고, <code>ret</code>(rs1 = x1, rd = x0)은 RAS에서 꺼내 목적지를 미리 예측한다. 힌트일 뿐이므로 예측이 틀려도 결과는 정확하다. 실제 목적지는 언제나 ra 레지스터의 값이다.</figcaption>
+    </figure>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="other-register-files">
+    <h2>확장이 더하는 레지스터: f·v·CSR</h2>
+    <p>베이스 ISA의 상태는 x 레지스터와 pc뿐이지만, 확장을 얹으면 상태가 늘어난다. 각각 뒤의 장에서 자세히 다루니 여기서는 지도만 그려 두자.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 320" role="img" aria-label="부동소수점 레지스터, 벡터 레지스터, CSR 주소 공간">
+        <!-- f 레지스터 -->
+        <g transform="translate(10,10)">
+          <rect width="270" height="300" rx="14" class="f-teal-soft"/>
+          <text x="135" y="30" text-anchor="middle" class="t t-bold">f0–f31 (F·D·Q)</text>
+          <text x="135" y="50" text-anchor="middle" class="t-dim">폭 FLEN: F=32 · D=64 · Q=128</text>
+          <g transform="translate(40,66)" class="f-teal-soft">
+            <rect width="190" height="10" rx="2"/><rect y="14" width="190" height="10" rx="2"/><rect y="28" width="190" height="10" rx="2"/><rect y="42" width="190" height="10" rx="2"/><rect y="56" width="190" height="10" rx="2"/><rect y="70" width="190" height="10" rx="2"/>
+          </g>
+          <text x="135" y="168" text-anchor="middle" class="t-faint">… 32개</text>
+          <rect x="40" y="186" width="190" height="34" rx="8" class="f-elev"/>
+          <text x="135" y="208" text-anchor="middle" class="t-mono">fcsr = frm | fflags</text>
+          <text x="135" y="244" text-anchor="middle" class="t-faint">반올림 모드와 예외 플래그</text>
+          <text x="135" y="264" text-anchor="middle" class="t-faint">(fcsr은 CSR 0x003)</text>
+          <text x="135" y="288" text-anchor="middle" class="t-accent" style="font-size:13px">12장</text>
+        </g>
+        <!-- v 레지스터 -->
+        <g transform="translate(295,10)">
+          <rect width="270" height="300" rx="14" class="f-violet-soft"/>
+          <text x="135" y="30" text-anchor="middle" class="t t-bold">v0–v31 (V)</text>
+          <text x="135" y="50" text-anchor="middle" class="t-dim">폭 VLEN: 구현이 정함 (V는 ≥ 128)</text>
+          <g transform="translate(20,66)">
+            <rect width="230" height="14" rx="2" class="f-violet-soft"/><rect y="20" width="230" height="14" rx="2" class="f-violet-soft"/><rect y="40" width="230" height="14" rx="2" class="f-violet-soft"/><rect y="60" width="230" height="14" rx="2" class="f-violet-soft"/>
+            <line x1="57.5" y1="0" x2="57.5" y2="74" stroke="var(--violet)" stroke-dasharray="2 3"/><line x1="115" y1="0" x2="115" y2="74" stroke="var(--violet)" stroke-dasharray="2 3"/><line x1="172.5" y1="0" x2="172.5" y2="74" stroke="var(--violet)" stroke-dasharray="2 3"/>
+          </g>
+          <text x="135" y="168" text-anchor="middle" class="t-faint">… 32개, 원소로 나뉨</text>
+          <rect x="30" y="186" width="210" height="34" rx="8" class="f-elev"/>
+          <text x="135" y="208" text-anchor="middle" class="t-mono">vl · vtype · vstart …</text>
+          <text x="135" y="244" text-anchor="middle" class="t-faint">벡터 길이·원소 폭 설정 CSR</text>
+          <text x="135" y="264" text-anchor="middle" class="t-faint">psABI: 호출 뒤 보존 안 됨</text>
+          <text x="135" y="288" text-anchor="middle" class="t-accent" style="font-size:13px">15장</text>
+        </g>
+        <!-- CSR -->
+        <g transform="translate(580,10)">
+          <rect width="270" height="300" rx="14" class="f-gold-soft"/>
+          <text x="135" y="30" text-anchor="middle" class="t t-bold">CSR (Zicsr)</text>
+          <text x="135" y="50" text-anchor="middle" class="t-dim">12비트 주소 → 4096칸</text>
+          <rect x="20" y="66" width="230" height="96" rx="8" class="f-elev"/>
+          <text x="32" y="88" class="t-mono" style="font-size:11px">0x001–0x003 fflags·frm·fcsr</text>
+          <text x="32" y="110" class="t-mono" style="font-size:11px">0xC00–0xC02 cycle·time·instret</text>
+          <text x="32" y="132" class="t-mono" style="font-size:11px">0x300 mstatus · 0x301 misa</text>
+          <text x="32" y="154" class="t-mono" style="font-size:11px">… 특권 모드별 수백 개</text>
+          <text x="135" y="196" text-anchor="middle" class="t-faint">x 레지스터와는 다른 별도 공간</text>
+          <text x="135" y="216" text-anchor="middle" class="t-faint">csrrw · csrrs · csrrc 로만 접근</text>
+          <text x="135" y="264" text-anchor="middle" class="t-faint">주소 비트가 접근 권한도 나타냄</text>
+          <text x="135" y="288" text-anchor="middle" class="t-accent" style="font-size:13px">16·17장</text>
+        </g>
+      </svg></div>
+      <figcaption><b>그림 3-5.</b> 확장이 더하는 상태. F를 얹으면 32개의 부동소수점 레지스터와 <code>fcsr</code>이, V를 얹으면 VLEN 비트짜리 벡터 레지스터 32개와 설정 CSR이 생긴다. CSR은 x 레지스터와 전혀 다른 4096칸짜리 주소 공간으로, Zicsr의 전용 명령으로만 읽고 쓴다.</figcaption>
+    </figure>
+    <div class="callout tip"><strong>f 레지스터가 없는 부동소수점</strong><p>Zfinx 계열 확장은 f 레지스터 없이 x 레지스터로 부동소수점 연산을 한다. 레지스터 파일을 통째로 아끼므로 작은 코어와 문맥 전환 비용에 유리하다. 대신 F와는 소프트웨어 호환이 되지 않는다(<a href="floating-point.html">12장</a>).</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="rv32e">
+    <h2>RV32E: 레지스터를 16개로 줄이면</h2>
+    <p>RV32E와 RV64E는 RV32I·RV64I에서 <b>단 하나</b>, 정수 레지스터 수만 16개(x0–x15)로 줄였다. 명령 인코딩은 그대로이고, x16–x31을 가리키는 인코딩은 예약된다. 왜 이런 변형이 필요할까? 규격 해설이 숫자로 답한다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 820 220" role="img" aria-label="작은 RV32I 코어 면적 중 위쪽 16개 레지스터가 차지하는 비율">
+        <text x="30" y="34" class="t t-bold">작은 RV32I 코어 (메모리 제외 면적)</text>
+        <rect x="30" y="52" width="570" height="54" rx="8" class="f-accent-soft"/>
+        <text x="315" y="84" text-anchor="middle" class="t">나머지 로직 + x0–x15 (약 3/4)</text>
+        <rect x="600" y="52" width="190" height="54" rx="8" class="f-gold-soft"/>
+        <text x="695" y="76" text-anchor="middle" class="t t-bold">x16–x31</text>
+        <text x="695" y="96" text-anchor="middle" class="t-dim">약 1/4</text>
+        <text x="30" y="148" class="t t-bold">RV32E 코어</text>
+        <rect x="30" y="160" width="570" height="40" rx="8" class="f-accent-soft"/>
+        <text x="315" y="186" text-anchor="middle" class="t">같은 기능 · 면적과 전력 약 25% 감소</text>
+        <rect x="600" y="160" width="190" height="40" rx="8" fill="none" stroke="var(--text-faint)" stroke-dasharray="6 4"/>
+        <text x="695" y="186" text-anchor="middle" class="t-faint">없음</text>
+      </svg></div>
+      <figcaption><b>그림 3-6.</b> 규격 해설: “작은 RV32I 코어 구현에서 위쪽 16개 레지스터는 메모리를 뺀 전체 코어 면적의 약 4분의 1을 차지하므로, 이를 없애면 약 25%의 코어 면적과 그에 따른 전력을 줄인다.” 레지스터 파일은 플립플롭 덩어리라 작은 코어에서 비중이 크다.</figcaption>
+    </figure>
+    <p>레지스터가 16개면 호출 규약도 달라져야 한다. psABI의 <b>ILP32E</b> 호출 규약은 인자 레지스터를 a0–a5 여섯 개, 피호출자 저장을 s0–s1 두 개, 임시를 t0–t2 세 개만 쓰고, 스택 정렬도 16바이트가 아니라 4바이트로 완화한다(psABI 1.0에서 ILP32E의 상태는 Draft다). 위 탐색기에서 “RV32E”를 눌러 무엇이 남는지 확인해 보자.</p>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="memory">
+    <h2>메모리: 바이트 주소, 리틀 엔디언, 정렬</h2>
+    <p>하트(hart)는 <b>2<sup>XLEN</sup> 바이트</b>짜리 하나의 주소 공간을 본다. 주소 하나가 바이트 하나를 가리킨다. 규격은 워드(word)를 32비트(4바이트)로 정하고, 하프워드는 16비트, 더블워드는 64비트, 쿼드워드는 128비트다. x86의 “워드 = 16비트”와 다르니 주의하자.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 820 340" role="img" aria-label="순환하는 주소 공간. 가장 높은 주소 다음이 0번지">
+        <defs><marker id="wrap-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent-2)"/></marker>
+          <path id="wrap-path" d="M 228.8 46.7 A 140 140 0 0 1 263.5 63.1"/></defs>
+        <g transform="translate(40,0)">
+        <circle cx="190" cy="180" r="140" fill="none" stroke="var(--border)" stroke-width="18"/>
+        <circle cx="190" cy="180" r="140" fill="none" class="s-accent flow-dash"/>
+        <!-- 눈금 -->
+        <line x1="190" y1="30" x2="190" y2="58" stroke="var(--text)" stroke-width="2"/>
+        <text x="200" y="22" class="t-mono t-bold">0x00000000</text>
+        <text x="180" y="22" text-anchor="end" class="t-mono t-bold">0xFFFFFFFF</text>
+        <line x1="330" y1="180" x2="350" y2="180" stroke="var(--text-faint)"/><text x="356" y="185" class="t-mono" style="font-size:12px">0x40000000</text>
+        <line x1="190" y1="320" x2="190" y2="338" stroke="var(--text-faint)"/><text x="200" y="334" class="t-mono" style="font-size:12px">0x80000000</text>
+        <line x1="30" y1="180" x2="50" y2="180" stroke="var(--text-faint)"/><text x="24" y="166" text-anchor="end" class="t-mono" style="font-size:12px">0xC000</text><text x="24" y="182" text-anchor="end" class="t-mono" style="font-size:12px">0000</text>
+        <!-- 넘어가는 접근 -->
+        <path d="M 151.2 46.7 A 140 140 0 0 1 228.8 46.7" fill="none" stroke="var(--accent-2)" stroke-width="5" marker-end="url(#wrap-arrow)"/>
+        <circle r="6" fill="var(--accent-2)"><animateMotion dur="2.4s" begin="-0.3s" repeatCount="indefinite" path="M 151.2 46.7 A 140 140 0 0 1 228.8 46.7"/></circle>
+        <text x="190" y="110" text-anchor="middle" class="t-gold">0xFFFFFFFE + 4</text>
+        <text x="190" y="130" text-anchor="middle" class="t-gold">= 0x00000002</text>
+        <text x="190" y="190" text-anchor="middle" class="t-dim">RV32: 2³² 바이트</text>
+        </g>
+        <!-- 설명 -->
+        <rect x="470" y="50" width="340" height="240" rx="12" class="f-elev"/>
+        <text x="488" y="80" class="t t-bold">주소 계산은 넘침을 무시한다</text>
+        <text x="488" y="112" class="t-mono">a1 = 0xFFFFFFFE</text>
+        <text x="488" y="136" class="t-mono">lw  a0, 4(a1)</text>
+        <text x="488" y="168" class="t-dim">유효 주소 = (a1 + 4) mod 2³²</text>
+        <text x="488" y="190" class="t-dim">           = 0x00000002</text>
+        <text x="488" y="226" class="t-faint">그 주소에 실제로 접근할 수 있는지는</text>
+        <text x="488" y="246" class="t-faint">실행 환경(EEI)이 정한다. 접근할 수 없는</text>
+        <text x="488" y="266" class="t-faint">주소면 보통 예외가 난다.</text>
+      </svg></div>
+      <figcaption><b>그림 3-7.</b> 순환하는 주소 공간. 규격은 “메모리 주소 공간은 원형이어서, 주소 2<sup>XLEN</sup>−1의 바이트는 주소 0의 바이트와 이웃한다”고 정한다. 하드웨어의 주소 계산은 넘침을 무시하고 2<sup>XLEN</sup>을 법으로 감싸 돈다.</figcaption>
+    </figure>
+
+    <h3>리틀 엔디언</h3>
+    <p>여러 바이트로 된 값을 메모리에 놓을 때, 가장 낮은 자리 바이트를 가장 낮은 주소에 두면 <span class="term">리틀 엔디언</span><span class="english">(little-endian)</span>, 반대면 <span class="term">빅 엔디언</span><span class="english">(big-endian)</span>이다. RISC-V는 리틀 엔디언으로 시작했다. 규격 해설은 그 이유로 상업적으로 리틀 엔디언이 지배적이라는 점(x86 전부, Arm 위의 iOS·Android·Windows)과 하드웨어 설계자에게 더 자연스럽다는 점을 든다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 820 250" role="img" aria-label="0x12345678을 리틀 엔디언과 빅 엔디언으로 저장한 모습">
+        <text x="30" y="34" class="t t-bold">sw 로 0x12345678 을 0x100 번지에 저장하면</text>
+        <g style="font-family:var(--mono)">
+          <text x="250" y="70" text-anchor="middle" class="t-faint">0x100</text><text x="370" y="70" text-anchor="middle" class="t-faint">0x101</text><text x="490" y="70" text-anchor="middle" class="t-faint">0x102</text><text x="610" y="70" text-anchor="middle" class="t-faint">0x103</text>
+        </g>
+        <text x="30" y="110" class="t t-bold">리틀 엔디언</text><text x="30" y="128" class="t-faint">RISC-V 기본</text>
+        <rect x="195" y="82" width="110" height="46" rx="8" class="f-accent"/><text x="250" y="112" text-anchor="middle" class="t-on-accent" style="font-family:var(--mono);font-size:17px">78</text>
+        <rect x="315" y="82" width="110" height="46" rx="8" class="f-accent-soft"/><text x="370" y="112" text-anchor="middle" class="t-mono" style="font-size:17px">56</text>
+        <rect x="435" y="82" width="110" height="46" rx="8" class="f-accent-soft"/><text x="490" y="112" text-anchor="middle" class="t-mono" style="font-size:17px">34</text>
+        <rect x="555" y="82" width="110" height="46" rx="8" class="f-accent-soft"/><text x="610" y="112" text-anchor="middle" class="t-mono" style="font-size:17px">12</text>
+        <text x="690" y="104" class="t-dim">낮은 자리 바이트가</text><text x="690" y="122" class="t-dim">낮은 주소에</text>
+        <text x="30" y="184" class="t t-bold">빅 엔디언</text><text x="30" y="202" class="t-faint">특권 규격이 선택 정의</text>
+        <rect x="195" y="156" width="110" height="46" rx="8" class="f-gold-soft"/><text x="250" y="186" text-anchor="middle" class="t-mono" style="font-size:17px">12</text>
+        <rect x="315" y="156" width="110" height="46" rx="8" class="f-gold-soft"/><text x="370" y="186" text-anchor="middle" class="t-mono" style="font-size:17px">34</text>
+        <rect x="435" y="156" width="110" height="46" rx="8" class="f-gold-soft"/><text x="490" y="186" text-anchor="middle" class="t-mono" style="font-size:17px">56</text>
+        <rect x="555" y="156" width="110" height="46" rx="8" class="f-gold"/><text x="610" y="186" text-anchor="middle" class="t-mono" style="font-size:17px;fill:var(--bg)">78</text>
+        <text x="690" y="178" class="t-dim">높은 자리 바이트가</text><text x="690" y="196" class="t-dim">낮은 주소에</text>
+        <text x="410" y="236" text-anchor="middle" class="t-faint">lbu a0, 0x100 → 리틀: 0x78 / 빅: 0x12</text>
+      </svg></div>
+      <figcaption><b>그림 3-8.</b> 같은 워드, 다른 바이트 순서. 진한 칸이 가장 낮은 자리 바이트(0x78)다. 바이트 하나만 읽으면 차이가 바로 드러난다.</figcaption>
+    </figure>
+    <p>엄밀히 말해 규격은 “RISC-V 베이스 ISA의 메모리 시스템은 리틀 엔디언이거나 빅 엔디언이며, 특권 아키텍처가 바이 엔디언 동작을 추가로 정의한다”고 적는다. 특권 규격의 <code>mstatus</code>에는 모드별 데이터 엔디언을 고르는 <b>MBE·SBE·UBE</b> 비트가 있다(RV64 <code>mstatus</code>의 비트 37·36·6, RV32에서는 MBE·SBE가 <code>mstatush</code>의 비트 5·4). 다만 RVI20·RVA 프로파일은 리틀 엔디언을 요구하고, psABI도 빅 엔디언 호출 규약을 아직 정의하지 않았으므로 현실의 RISC-V 소프트웨어는 거의 모두 리틀 엔디언이다. <b>명령어</b>는 메모리 엔디언과 상관없이 언제나 16비트 리틀 엔디언 파슬로 저장된다(<a href="modular.html">2장</a>).</p>
+
+    <h3>정렬과 비정렬 접근</h3>
+    <p>크기가 N 바이트인 접근의 주소가 N의 배수면 <b>자연 정렬</b>되었다고 한다. 규격은 “EEI와 관계없이 자연 정렬된 적재·저장은 주소 비정렬 예외를 일으키지 않는다”고 보장한다. 정렬되지 않은 접근은 실행 환경(EEI)에 따라 다르다.</p>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>EEI의 선택</th><th>비정렬 적재·저장은</th></tr></thead>
+      <tbody>
+        <tr><td>완전 지원을 보장</td><td>하드웨어가 처리하거나, 보이지 않는 트랩(invisible trap)으로 소프트웨어가 대신 처리한다. 프로그램은 예외를 보지 않는다. 느릴 수는 있다.</td></tr>
+        <tr><td>보장하지 않음</td><td>성공할 수도, <b>address-misaligned</b> 예외가 날 수도 있다. 부작용이 있는 영역처럼 흉내 내면 안 되는 곳이라면 <b>access-fault</b> 예외가 대신 날 수도 있다.</td></tr>
+      </tbody>
+    </table></div>
+    <p>비정렬 접근이 성공하더라도 <b>원자성</b>은 보장되지 않는다. 자연 정렬된 접근만 원자적으로 실행됨이 보장된다. 참고로 RVA20U64부터의 응용 프로세서 프로파일은 주 메모리에 대한 비정렬 적재·저장 지원을 요구(Zicclsm)하지만, “아주 느릴 수 있으니 정확성을 위해서만 기대하라”고 덧붙인다.</p>
+
+    <div class="sim" id="memory-sim">
+      <div class="sim-head"><span class="sim-tag">SIMULATOR</span><h3>엔디언과 부호 확장 실험실 (RV32)</h3></div>
+      <div class="sim-pad">
+        <div class="memory-row" id="memory-row"></div>
+        <div class="register-bits" id="memory-register-bits">a0 = —</div>
+      </div>
+      <div class="step-description" id="memory-description"></div>
+      <div class="sim-controls">
+        <label class="control"><span>저장할 값 (a1)</span><input type="text" class="hex-input" id="memory-value" value="0x8badf00d" spellcheck="false" autocomplete="off"></label>
+        <div class="control"><span>저장 명령</span><div class="segmented" id="memory-store-width"><button data-value="4" class="on">sw</button><button data-value="2">sh</button><button data-value="1">sb</button></div></div>
+        <div class="control"><span>엔디언</span><div class="segmented" id="memory-endianness"><button data-value="little" class="on">리틀</button><button data-value="big">빅</button></div></div>
+        <label class="control"><span>주소 <output id="memory-offset-output"></output></span><input type="range" id="memory-offset" min="0" max="7" value="0"></label>
+        <div class="control"><span>적재 명령</span><div class="segmented" id="memory-load-kind"><button data-value="lw" class="on">lw</button><button data-value="lh">lh</button><button data-value="lhu">lhu</button><button data-value="lb">lb</button><button data-value="lbu">lbu</button></div></div>
+        <div class="control"><span>실행</span><div class="button-row"><button class="button primary" id="memory-store-button">저장</button><button class="button" id="memory-load-button">적재 → a0</button><button class="button" id="memory-clear-button">메모리 지우기</button></div></div>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">유효 주소</span><span class="value" id="memory-address">—</span></div>
+        <div class="stat"><span class="key">정렬</span><span class="value" id="memory-alignment">—</span></div>
+        <div class="stat"><span class="key">a0 (16진)</span><span class="value" id="memory-hex">—</span></div>
+        <div class="stat"><span class="key">a0 (부호 있는 10진)</span><span class="value" id="memory-decimal">—</span></div>
+      </div>
+      <div class="sim-note"><code>0x8badf00d</code>를 0x1000에 <code>sw</code>로 저장한 뒤, 같은 주소에서 <code>lb</code>와 <code>lbu</code>를 차례로 해 보자. 맨 아래 바이트 0x0d는 양수라 둘이 같지만, 주소를 0x1003으로 옮겨 0x8b를 읽으면 <code>lb</code>는 위쪽 24비트를 1로 채운다(금색). 엔디언을 빅으로 바꾸어 다시 저장하면 바이트 순서가 뒤집힌다.</div>
+    </div>
+  </section>
+
+  <section class="keypoints" id="summary">
+    <h2>핵심 정리</h2>
+    <ol>
+      <li>베이스 정수 ISA의 비특권 상태는 XLEN 비트짜리 <b>x0–x31</b>과 <b>pc</b>뿐이다. 전용 스택 포인터나 링크 레지스터는 하드웨어에 없고, 역할은 ABI가 정한다.</li>
+      <li>레지스터 칸(rs1·rs2·rd)은 5비트이고 모든 형식에서 같은 위치에 있어, 해독 전에 레지스터를 읽을 수 있다.</li>
+      <li><b>x0는 항상 0</b>이고 쓰기는 버려진다. 덕분에 nop·li·neg·j·jr·ret·beqz 같은 의사 명령이 새 인코딩 없이 생긴다.</li>
+      <li>RISC-V에는 <b>조건 플래그가 없다</b>. 분기가 두 레지스터를 직접 비교하고, 비교 결과가 필요하면 slt로 레지스터에 남긴다.</li>
+      <li>ABI 이름: zero, ra, sp, gp, tp, t0–t6, s0–s11, a0–a7. sp·s 레지스터는 호출 뒤 보존, ra·t·a는 보존되지 않는다.</li>
+      <li>x1과 x5는 링크 레지스터로, jal/jalr의 rd·rs1 번호가 반환 주소 스택의 push/pop 힌트가 된다.</li>
+      <li>F는 f0–f31과 fcsr을, V는 v0–v31과 벡터 CSR을 더한다. CSR은 12비트 주소의 별도 공간이다. RV32E는 레지스터를 16개로 줄여 코어 면적을 약 25% 아낀다.</li>
+      <li>메모리는 바이트 주소, 2<sup>XLEN</sup> 크기의 순환 공간이며, 사실상 리틀 엔디언이다. 자연 정렬된 접근은 비정렬 예외를 내지 않는다.</li>
+    </ol>
+  </section>
+
+  <section id="quiz">
+    <h2>확인 퀴즈</h2>
+    <div class="quiz">
+      <div class="quiz-question"><p><code>add x0, a1, a2</code>를 실행하면?</p><div class="options">
+        <button class="option">불법 명령 예외가 난다</button>
+        <button class="option">x0가 a1+a2가 되었다가 다음 명령에서 0이 된다</button>
+        <button class="option" data-correct>계산 결과는 버려지고 x0는 계속 0이다</button>
+        <button class="option">a1에 결과가 들어간다</button>
+      </div><div class="quiz-explanation">x0에 쓰는 것은 합법이며 결과는 버려진다. 이런 인코딩 상당수는 HINT로 예약되어 있다.</div></div>
+      <div class="quiz-question"><p><code>ret</code> 의사 명령의 실제 인코딩은?</p><div class="options">
+        <button class="option">jal x0, 0</button>
+        <button class="option" data-correct>jalr x0, 0(x1)</button>
+        <button class="option">jalr x1, 0(x0)</button>
+        <button class="option">전용 RET opcode</button>
+      </div><div class="quiz-explanation">ra(x1)로 점프하고, 새 복귀 주소는 필요 없으니 rd = x0로 버린다. rs1이 링크 레지스터이고 rd는 아니므로 RAS에서 pop하라는 힌트도 된다.</div></div>
+      <div class="quiz-question"><p>RISC-V에 조건 플래그 레지스터가 없어서 생기는 장점이 <b>아닌</b> 것은?</p><div class="options">
+        <button class="option">비순차 코어에서 플래그 이름 바꾸기가 필요 없다</button>
+        <button class="option">비교-분기가 한 명령이라 코드가 짧아진다</button>
+        <button class="option" data-correct>여러 비트 덧셈의 올림수 전파가 한 명령으로 끝난다</button>
+        <button class="option">숨은 상태가 없어 명령 사이 의존이 레지스터로만 드러난다</button>
+      </div><div class="quiz-explanation">올림수 플래그가 없으므로 다중 정밀도 덧셈은 sltu 같은 명령을 더 써서 올림수를 계산해야 한다. 그것이 플래그 없는 설계의 대가다.</div></div>
+      <div class="quiz-question"><p>psABI에서 함수 호출 뒤에도 값이 보존되어야 하는 레지스터 묶음은?</p><div class="options">
+        <button class="option">a0–a7</button>
+        <button class="option">t0–t6</button>
+        <button class="option" data-correct>sp, s0–s11</button>
+        <button class="option">ra, gp, tp</button>
+      </div><div class="quiz-explanation">sp와 s 레지스터는 피호출자가 보존한다. ra·a·t는 보존되지 않고, gp·tp는 아예 할당 대상이 아니다.</div></div>
+      <div class="quiz-question"><p><code>jalr x1, 0(x5)</code>는 반환 주소 스택에 어떤 힌트를 주는가?</p><div class="options">
+        <button class="option">없음</button>
+        <button class="option">Pop만</button>
+        <button class="option">Push만</button>
+        <button class="option" data-correct>Pop 한 뒤 Push</button>
+      </div><div class="quiz-explanation">rd와 rs1이 모두 링크 레지스터(x1/x5)이면서 서로 다르므로 pop 후 push다. 코루틴 전환을 위한 규칙이다.</div></div>
+      <div class="quiz-question"><p>리틀 엔디언 RV32에서 0x1000 번지에 <code>sw</code>로 0x8BADF00D를 저장한 뒤 <code>lb a0, 0x1003</code>을 실행하면 a0는?</p><div class="options">
+        <button class="option">0x0000008B</button>
+        <button class="option" data-correct>0xFFFFFF8B</button>
+        <button class="option">0x0000000D</button>
+        <button class="option">0xFFFFFF0D</button>
+      </div><div class="quiz-explanation">리틀 엔디언이면 0x1003에 가장 높은 자리 바이트 0x8B가 있다. lb는 부호 확장하므로 최상위 비트 1이 위로 복사되어 0xFFFFFF8B가 된다.</div></div>
+      <div class="quiz-question"><p>RV32E가 RV32I와 다른 점은?</p><div class="options">
+        <button class="option">명령어 인코딩이 16비트다</button>
+        <button class="option" data-correct>정수 레지스터가 x0–x15 16개뿐이다</button>
+        <button class="option">곱셈 명령이 기본으로 들어 있다</button>
+        <button class="option">XLEN이 16이다</button>
+      </div><div class="quiz-explanation">규격은 “유일한 변화는 정수 레지스터 수를 16개로 줄인 것”이라고 적는다. 인코딩은 같고, x16–x31을 가리키는 인코딩은 예약된다.</div></div>
+    </div>
+  </section>
+
+  <section id="references">
+    <h2>더 읽을거리</h2>
+    <ul class="references">
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html" target="_blank" rel="noopener">Volume I — RV32I Base Integer Instruction Set, Version 2.1</a> (프로그래머 모델, JAL/JALR의 RAS 힌트 표, 적재·저장과 비정렬)</li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/intro.html" target="_blank" rel="noopener">Volume I — Introduction: Memory, Base Instruction-Length Encoding</a></li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32e.html" target="_blank" rel="noopener">Volume I — RV32E and RV64E Base Integer Instruction Sets</a></li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/priv/machine.html" target="_blank" rel="noopener">Volume II — Machine-Level ISA: mstatus의 MBE·SBE·UBE</a></li>
+      <li><a href="https://docs.riscv.org/reference/abi/index.html" target="_blank" rel="noopener">RISC-V ABIs Specification v1.0 — Register Convention, ILP32E</a></li>
+    </ul>
+  </section>
+</main>
+
+<script>
+/* ---------------------------------------------------------------------------
+   규격의 넘침 검사 예를 코드 상자에 칠해 넣는다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const SOURCE = [
+    "# 부호 없는 덧셈의 올림(넘침): 분기 하나 추가",
+    "        add  t0, t1, t2",
+    "        bltu t0, t1, overflow",
+    "# 부호 있는 덧셈, 한쪽 부호를 알 때 (+imm)",
+    "        addi t0, t1, 100",
+    "        blt  t0, t1, overflow",
+    "# 일반적인 부호 있는 덧셈: 세 명령 추가",
+    "        add  t0, t1, t2",
+    "        slti t3, t2, 0",
+    "        slt  t4, t0, t1",
+    "        bne  t3, t4, overflow",
+  ].join("\n");
+  document.getElementById("overflow-code").innerHTML = window.Riscv.highlightAssembly(SOURCE);
+})();
+
+/* ---------------------------------------------------------------------------
+   레지스터와 ALU 애니메이션: 원천 값이 ALU로, 결과가 목적 레지스터로 흐른다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const REGISTER_NAMES = ["zero", "a0", "a1", "a2", "a3", "t0"];
+  const INITIAL_VALUES = { zero: 0, a0: 0, a1: 7, a2: 5, a3: 0, t0: 0 };
+  // 단계별 시간(초). 속도 슬라이더가 이 시간을 나눈다.
+  const PHASE_DURATIONS = [0.5, 0.8, 0.45, 0.8, 0.8];
+  const PROGRAM = [
+    { text: "add  a0, a1, a2", sources: ["a1", "a2"], destination: "a0", compute: (first, second) => first + second, note: "a1 + a2 = 12 를 a0에 쓴다." },
+    { text: "addi t0, zero, 42   # li t0, 42", sources: ["zero"], immediate: 42, destination: "t0", compute: (first, second) => first + second, note: "x0(=0)에 즉시값 42를 더한다. 이것이 li의 정체다." },
+    { text: "sub  a3, zero, a1   # neg a3, a1", sources: ["zero", "a1"], destination: "a3", compute: (first, second) => first - second, note: "0 − a1 = −7. 부호 반전 명령이 따로 없어도 된다." },
+    { text: "add  zero, a1, a2", sources: ["a1", "a2"], destination: "zero", compute: (first, second) => first + second, note: "결과 12는 x0로 가지만 버려진다. x0는 여전히 0이다." },
+    { text: "addi a0, a1, 0      # mv a0, a1", sources: ["a1"], immediate: 0, destination: "a0", compute: (first, second) => first + second, note: "즉시값 0을 더해 복사한다. 이것이 mv의 정체다." },
+  ];
+  const MINIMUM_FONT_SIZE = 11;
+  const MAXIMUM_ROW_HEIGHT = 52;
+  const FONT_SCALE = 0.019;
+  const ANIMATION_ASPECT_RATIO = 0.5;
+
+  const canvas = document.getElementById("alu-canvas");
+  const description = document.getElementById("alu-description");
+  const playButton = document.getElementById("alu-play-button");
+  let values = Object.assign({}, INITIAL_VALUES);
+  let instructionIndex = 0;
+  let phaseIndex = 0;
+  let phaseTime = 0;
+  let speedMultiplier = 1;
+  let pendingResult = null;
+
+  function layout(width, height) {
+    const rowHeight = Math.min(MAXIMUM_ROW_HEIGHT, (height - 80) / REGISTER_NAMES.length);
+    const registerLeft = 16;
+    const registerWidth = Math.max(120, width * 0.3);
+    const top = 56;
+    const aluCenterX = width * 0.66;
+    const aluCenterY = top + rowHeight * REGISTER_NAMES.length / 2;
+    const aluHalfHeight = Math.min(70, height * 0.24);
+    const aluWidth = Math.max(70, width * 0.13);
+    return { rowHeight, registerLeft, registerWidth, top, aluCenterX, aluCenterY, aluHalfHeight, aluWidth };
+  }
+  function registerAnchor(geometry, name) {
+    const index = REGISTER_NAMES.indexOf(name);
+    return { x: geometry.registerLeft + geometry.registerWidth, y: geometry.top + index * geometry.rowHeight + geometry.rowHeight / 2 };
+  }
+  function aluInputs(geometry) {
+    const left = geometry.aluCenterX - geometry.aluWidth / 2;
+    return [
+      { x: left, y: geometry.aluCenterY - geometry.aluHalfHeight * 0.5 },
+      { x: left, y: geometry.aluCenterY + geometry.aluHalfHeight * 0.5 },
+    ];
+  }
+  function aluOutput(geometry) {
+    return { x: geometry.aluCenterX + geometry.aluWidth / 2, y: geometry.aluCenterY };
+  }
+
+  function draw(context, width, height, colors) {
+    const geometry = layout(width, height);
+    const fontSize = Math.max(MINIMUM_FONT_SIZE, Math.round(width * FONT_SCALE));
+    const instruction = PROGRAM[instructionIndex];
+    const phaseFraction = book.clamp(phaseTime / (PHASE_DURATIONS[phaseIndex] / speedMultiplier), 0, 1);
+    book.drawText(context, instruction.text, 16, 26, { size: fontSize + 3, bold: true, mono: true, color: colors.text });
+
+    // 레지스터 파일
+    REGISTER_NAMES.forEach((name, index) => {
+      const y = geometry.top + index * geometry.rowHeight;
+      const isSource = instruction.sources.includes(name) && phaseIndex <= 1;
+      const isDestination = name === instruction.destination && phaseIndex >= 3;
+      book.roundedRectangle(context, geometry.registerLeft, y + 3, geometry.registerWidth, geometry.rowHeight - 6, 7);
+      let fill = colors.elevated;
+      if (name === "zero") fill = colors.surface;
+      if (isSource) fill = colors.accentSoft;
+      if (isDestination) fill = colors.goldSoft;
+      context.fillStyle = fill;
+      context.fill();
+      context.strokeStyle = isSource ? colors.accent : (isDestination ? colors.gold : colors.border);
+      context.lineWidth = isSource || isDestination ? 2 : 1;
+      context.stroke();
+      const middleY = y + geometry.rowHeight / 2;
+      book.drawText(context, name, geometry.registerLeft + 10, middleY, { size: fontSize, mono: true, bold: true, color: colors.text });
+      book.drawText(context, String(values[name]), geometry.registerLeft + geometry.registerWidth - 10, middleY, { size: fontSize, mono: true, align: "right", color: name === "zero" ? colors.dim : colors.text });
+    });
+
+    // ALU 사다리꼴
+    const left = geometry.aluCenterX - geometry.aluWidth / 2;
+    const right = geometry.aluCenterX + geometry.aluWidth / 2;
+    context.beginPath();
+    context.moveTo(left, geometry.aluCenterY - geometry.aluHalfHeight);
+    context.lineTo(right, geometry.aluCenterY - geometry.aluHalfHeight * 0.45);
+    context.lineTo(right, geometry.aluCenterY + geometry.aluHalfHeight * 0.45);
+    context.lineTo(left, geometry.aluCenterY + geometry.aluHalfHeight);
+    context.closePath();
+    const isComputing = phaseIndex === 2;
+    context.fillStyle = isComputing ? colors.goldSoft : colors.accentSoft;
+    context.fill();
+    context.strokeStyle = isComputing ? colors.gold : colors.accent;
+    context.lineWidth = 2;
+    context.stroke();
+    book.drawText(context, "ALU", geometry.aluCenterX, geometry.aluCenterY, { size: fontSize + 2, bold: true, align: "center", color: colors.text });
+
+    // 즉시값 상자
+    const inputs = aluInputs(geometry);
+    if (instruction.immediate !== undefined) {
+      const boxX = geometry.aluCenterX - geometry.aluWidth * 0.4;
+      const boxY = geometry.aluCenterY + geometry.aluHalfHeight + 14;
+      book.roundedRectangle(context, boxX, boxY, geometry.aluWidth * 0.8, fontSize * 2, 6);
+      context.fillStyle = colors.goldSoft;
+      context.fill();
+      book.drawText(context, "imm " + instruction.immediate, boxX + geometry.aluWidth * 0.4, boxY + fontSize, { size: fontSize, mono: true, align: "center", color: colors.text });
+    }
+
+    // 연결선
+    const output = aluOutput(geometry);
+    instruction.sources.forEach((name, index) => {
+      const from = registerAnchor(geometry, name);
+      book.drawArrow(context, from.x + 4, from.y, inputs[index].x - 2, inputs[index].y, { color: colors.border, width: 1.5, headSize: 7, dash: [4, 4] });
+    });
+    const destinationAnchor = registerAnchor(geometry, instruction.destination);
+    const returnX = Math.min(width - 14, output.x + 30);
+    context.save();
+    context.strokeStyle = colors.border;
+    context.setLineDash([4, 4]);
+    context.lineWidth = 1.5;
+    context.beginPath();
+    context.moveTo(output.x, output.y);
+    context.lineTo(returnX, output.y);
+    context.lineTo(returnX, geometry.top - 10);
+    context.lineTo(destinationAnchor.x + 24, geometry.top - 10);
+    context.lineTo(destinationAnchor.x + 24, destinationAnchor.y);
+    context.lineTo(destinationAnchor.x + 4, destinationAnchor.y);
+    context.stroke();
+    context.restore();
+
+    // 움직이는 값
+    if (phaseIndex === 1) {
+      const eased = book.easeInOut(phaseFraction);
+      instruction.sources.forEach((name, index) => {
+        const from = registerAnchor(geometry, name);
+        drawToken(context, book.linearInterpolate(from.x, inputs[index].x, eased), book.linearInterpolate(from.y, inputs[index].y, eased), values[name], colors, fontSize);
+      });
+      if (instruction.immediate !== undefined) {
+        const immediateStartX = geometry.aluCenterX;
+        const immediateStartY = geometry.aluCenterY + geometry.aluHalfHeight + 14 + fontSize;
+        drawToken(context, book.linearInterpolate(immediateStartX, inputs[1].x, eased), book.linearInterpolate(immediateStartY, inputs[1].y, eased), instruction.immediate, colors, fontSize);
+      }
+    }
+    if (phaseIndex === 3 && pendingResult !== null) {
+      const points = [
+        { x: output.x, y: output.y }, { x: returnX, y: output.y }, { x: returnX, y: geometry.top - 10 },
+        { x: destinationAnchor.x + 24, y: geometry.top - 10 }, { x: destinationAnchor.x + 24, y: destinationAnchor.y }, { x: destinationAnchor.x + 4, y: destinationAnchor.y },
+      ];
+      const position = pointAlongPolyline(points, book.easeInOut(phaseFraction));
+      drawToken(context, position.x, position.y, pendingResult, colors, fontSize);
+    }
+    if (phaseIndex === 4 && instruction.destination === "zero") {
+      const anchor = registerAnchor(geometry, "zero");
+      book.drawText(context, "✕ 버려짐", anchor.x + 34, anchor.y, { size: fontSize, bold: true, color: colors.bad });
+    }
+  }
+
+  function drawToken(context, x, y, value, colors, fontSize) {
+    const radius = fontSize * 1.2;
+    context.beginPath();
+    context.arc(x, y, radius, 0, Math.PI * 2);
+    context.fillStyle = colors.gold;
+    context.fill();
+    book.drawText(context, String(value), x, y, { size: fontSize - 1, bold: true, mono: true, align: "center", color: colors.onAccent });
+  }
+  function pointAlongPolyline(points, fraction) {
+    const lengths = [];
+    let total = 0;
+    for (let index = 1; index < points.length; index += 1) {
+      const length = Math.hypot(points[index].x - points[index - 1].x, points[index].y - points[index - 1].y);
+      lengths.push(length);
+      total += length;
+    }
+    let remaining = fraction * total;
+    for (let index = 1; index < points.length; index += 1) {
+      const length = lengths[index - 1];
+      if (remaining <= length || index === points.length - 1) {
+        const segmentFraction = length === 0 ? 0 : remaining / length;
+        return { x: book.linearInterpolate(points[index - 1].x, points[index].x, segmentFraction), y: book.linearInterpolate(points[index - 1].y, points[index].y, segmentFraction) };
+      }
+      remaining -= length;
+    }
+    return points[points.length - 1];
+  }
+
+  function enterPhase(nextPhase) {
+    phaseIndex = nextPhase;
+    phaseTime = 0;
+    const instruction = PROGRAM[instructionIndex];
+    if (phaseIndex === 2) {
+      const first = values[instruction.sources[0]];
+      const second = instruction.immediate !== undefined ? instruction.immediate : values[instruction.sources[1]];
+      pendingResult = instruction.compute(first, second);
+    }
+    if (phaseIndex === 4 && instruction.destination !== "zero") {
+      values[instruction.destination] = pendingResult;
+    }
+    if (phaseIndex === 0 || phaseIndex === 4) description.innerHTML = "<code>" + instruction.text.split("#")[0].trim() + "</code> — " + instruction.note;
+  }
+  function nextInstruction() {
+    instructionIndex = (instructionIndex + 1) % PROGRAM.length;
+    if (instructionIndex === 0) values = Object.assign({}, INITIAL_VALUES);
+    pendingResult = null;
+    enterPhase(0);
+  }
+
+  enterPhase(0);
+  const view = book.createCanvas(canvas, draw, { aspectRatio: ANIMATION_ASPECT_RATIO, minimumHeight: 300, maximumHeight: 420 });
+  const loop = book.animationLoop(canvas, (deltaSeconds) => {
+    phaseTime += deltaSeconds;
+    if (phaseTime >= PHASE_DURATIONS[phaseIndex] / speedMultiplier) {
+      if (phaseIndex === PHASE_DURATIONS.length - 1) nextInstruction();
+      else enterPhase(phaseIndex + 1);
+    }
+    view.redraw();
+  });
+  function updatePlayLabel() {
+    playButton.textContent = loop.isRunning() ? "멈춤" : "재생";
+  }
+  playButton.addEventListener("click", () => {
+    if (loop.isRunning()) loop.stop();
+    else loop.start();
+    updatePlayLabel();
+  });
+  document.getElementById("alu-next-button").addEventListener("click", () => {
+    // 지금 명령을 끝까지 반영하고 다음 명령으로 넘어간다
+    if (phaseIndex < 2) enterPhase(2);
+    if (phaseIndex < 4) enterPhase(4);
+    nextInstruction();
+    view.redraw();
+  });
+  book.range("alu-speed", (value) => { speedMultiplier = value / 2; }, (value) => "×" + (value / 2));
+  updatePlayLabel();
+})();
+
+/* ---------------------------------------------------------------------------
+   x0 마법: riscv.js 어셈블러로 의사 명령을 펼쳐 비트 칸을 보여 준다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const Riscv = window.Riscv;
+  const book = window.RiscvBook;
+  const PRESETS = [
+    { source: "nop", note: "읽기·쓰기 모두 x0인 addi. 규격이 정한 정식 NOP 인코딩이다." },
+    { source: "li a0, 5", note: "0 + 5. 12비트 범위 상수는 x0에 더해 한 명령으로 만든다." },
+    { source: "li a0, 0x12345678", note: "큰 상수는 lui가 상위 20비트를 직접 만들고 addi가 하위 12비트를 더한다. x0가 필요 없다." },
+    { source: "mv a0, a1", note: "즉시값 0을 더하는 addi. x0 대신 즉시값 0을 쓴 경우다." },
+    { source: "neg a0, a1", note: "0 − a1. rs1 칸에 x0가 들어간다." },
+    { source: "snez a0, a1", note: "0 <u a1 이면 1. 즉 a1이 0이 아니면 1이다." },
+    { source: "seqz a0, a1", note: "a1 <u 1 이면 1, 즉 a1 = 0 이면 1. 이 경우는 x0 없이 즉시값 1을 쓴다." },
+    { source: "beqz a0, 16", note: "a0 = x0 이면 16바이트 앞으로 분기. rs2 칸이 x0다." },
+    { source: "bgtz a0, 16", note: "x0 < a0 이면 분기. 피연산자 순서를 바꿔 blt 하나로 해결한다." },
+    { source: "j 64", note: "jal의 rd를 x0로 두어 복귀 주소를 버린다." },
+    { source: "jr a5", note: "jalr의 rd를 x0로 두어 복귀 주소를 버린다." },
+    { source: "ret", note: "jalr x0, 0(x1). rd = x0, rs1 = x1 이라 RAS pop 힌트가 된다." },
+  ];
+  const ZERO_REGISTER = 0;
+  const buttonRow = document.getElementById("pseudo-buttons");
+  const input = document.getElementById("pseudo-input");
+  const expansion = document.getElementById("pseudo-expansion");
+  const description = document.getElementById("pseudo-description");
+
+  PRESETS.forEach((preset) => {
+    const button = document.createElement("button");
+    button.className = "button";
+    button.textContent = preset.source;
+    button.addEventListener("click", () => {
+      input.value = preset.source;
+      render();
+    });
+    buttonRow.appendChild(button);
+  });
+
+  function fieldHtml(field) {
+    const width = field.high - field.low + 1;
+    const isZeroRegister = field.kind === "register" && field.value === ZERO_REGISTER && field.name !== "rs1/uimm";
+    let valueText = book.toBinary(field.value, width);
+    if (field.kind === "register") valueText = "x" + field.value;
+    return '<div class="field ' + field.kind + (isZeroRegister ? " zero-register" : "") + '" style="flex-grow:' + width + '">' +
+      '<div class="range"><span>' + field.high + "</span><span>" + (width > 1 ? field.low : "") + '</span></div><div class="name">' + field.name + '</div><div class="value">' + valueText + "</div></div>";
+  }
+
+  function render() {
+    const source = input.value.trim();
+    buttonRow.querySelectorAll(".button").forEach((button) => button.classList.toggle("on", button.textContent === source));
+    const preset = PRESETS.find((item) => item.source === source);
+    const program = Riscv.assemble(source);
+    if (program.errors.length || !program.words.length) {
+      expansion.innerHTML = "";
+      const message = program.errors.length ? program.errors[0].message : "명령이 없다.";
+      description.innerHTML = "⚠️ " + message;
+      ["pseudo-count", "pseudo-zero-count", "pseudo-machine"].forEach((id) => { document.getElementById(id).textContent = "—"; });
+      return;
+    }
+    let zeroFieldCount = 0;
+    expansion.innerHTML = program.words.map((entry) => {
+      const decoded = Riscv.decode(entry.word);
+      decoded.fields.forEach((field) => {
+        if (field.kind === "register" && field.value === ZERO_REGISTER) zeroFieldCount += 1;
+      });
+      const plainText = Riscv.disassemble(entry.word, { useAbiNames: false });
+      const abiText = Riscv.disassemble(entry.word, { useAbiNames: true });
+      return '<div class="expansion-item"><div class="assembly">' + plainText + '</div><div class="assembly-abi">ABI 이름으로: ' + abiText + " · " + book.toHex(entry.word) + '</div><div class="expansion-scroll"><div class="bitfield">' + decoded.fields.map(fieldHtml).join("") + "</div></div></div>";
+    }).join("");
+    document.getElementById("pseudo-count").textContent = program.words.length;
+    document.getElementById("pseudo-zero-count").textContent = zeroFieldCount;
+    document.getElementById("pseudo-machine").textContent = program.words.map((entry) => book.toHex(entry.word)).join(" ");
+    description.innerHTML = "<code>" + source + "</code> → " + (preset ? preset.note : "어셈블러가 펼친 결과다. 금색 칸이 x0를 가리킨다.");
+  }
+  input.addEventListener("input", render);
+  render();
+})();
+
+/* ---------------------------------------------------------------------------
+   레지스터 파일 탐색기
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const Riscv = window.Riscv;
+  const REGISTER_COUNT = 32;
+  const EMBEDDED_REGISTER_COUNT = 16;
+  const COMPRESSED_FIRST = 8;
+  const COMPRESSED_LAST = 15;
+  const INITIAL_SELECTION = 1;
+  const ROLE_OF = (number) => {
+    if (number === 0) return "zero";
+    if (number === 1) return "link";
+    if (number >= 2 && number <= 4) return "pointer";
+    if ((number >= 5 && number <= 7) || number >= 28) return "temporary";
+    if (number === 8 || number === 9 || (number >= 18 && number <= 27)) return "saved";
+    return "argument";
+  };
+  const ROLE_LABELS = { zero: "항상 0", link: "복귀 주소", pointer: "포인터", temporary: "임시", saved: "피호출자 저장", argument: "인자·반환" };
+  const PRESERVATION = (number) => {
+    if (number === 0) return "— (바뀌지 않음)";
+    if (number === 3 || number === 4) return "— (할당 대상 아님)";
+    if (number === 2 || ROLE_OF(number) === "saved") return "예 (피호출자가 보존)";
+    return "아니오 (필요하면 호출자가 저장)";
+  };
+  const NOTES = {
+    0: ["모든 비트가 0으로 고정. 쓰기는 무시된다.", "nop·li·neg·j·ret 같은 의사 명령의 재료.", "rd=x0 인 많은 인코딩은 HINT로 예약."],
+    1: ["jal/jalr의 rd가 x1이면 반환 주소 스택 push 힌트.", "rs1이 x1인 jalr(ret)은 pop 힌트.", "C 확장의 c.jalr·c.jal(RV32)은 x1에 복귀 주소를 쓴다."],
+    2: ["표준 ABI에서 항상 16바이트로 정렬(ILP32E는 4바이트).", "C 확장은 sp 기준 적재·저장(c.lwsp 등)을 따로 둔다.", "스택은 아래(낮은 주소)로 자란다."],
+    3: ["링커가 __global_pointer$ 를 넣어 두고 ±2KiB 안의 전역 변수를 한 명령으로 접근한다.", "프로시저는 수정하면 안 된다."],
+    4: ["스레드 지역 저장소(TLS)의 기준 주소.", "프로시저는 수정하면 안 된다."],
+    5: ["대체 링크 레지스터: x1과 인코딩이 한 비트만 다르다(00101).", "밀리코드(저장·복원 루틴) 호출에 쓰며 RAS 힌트도 x1과 같다."],
+    8: ["프레임 포인터(fp)를 쓴다면 반드시 s0에 둔다.", "C의 3비트 레지스터 칸으로 가리킬 수 있다."],
+    10: ["첫 번째 인자이자 첫 번째 반환값.", "교육용 에뮬레이터의 시스템 호출 인자."],
+    11: ["두 번째 인자이자 두 번째 반환값(2×XLEN 값의 상위 절반 등)."],
+    17: ["여덟 번째 인자. 리눅스에서는 시스템 호출 번호를 담는다."],
+  };
+  const grid = document.getElementById("register-grid");
+  const detail = document.getElementById("register-detail");
+  let filter = "all";
+  let base = "i";
+  let selectedNumber = INITIAL_SELECTION;
+  const buttons = [];
+
+  for (let number = 0; number < REGISTER_COUNT; number += 1) {
+    const button = document.createElement("button");
+    button.className = "register-button role-" + ROLE_OF(number);
+    button.innerHTML = '<span class="number">x' + number + '</span><span class="name">' + Riscv.ABI_NAMES[number] + "</span>";
+    button.addEventListener("click", () => {
+      if (isAbsent(number)) return;
+      selectedNumber = number;
+      render();
+    });
+    grid.appendChild(button);
+    buttons.push(button);
+  }
+
+  function isAbsent(number) {
+    return base === "e" && number >= EMBEDDED_REGISTER_COUNT;
+  }
+  function matchesFilter(number) {
+    if (filter === "all") return true;
+    if (filter === "argument") return number >= 10 && number <= 17;
+    if (filter === "caller") return number === 1 || ROLE_OF(number) === "temporary" || ROLE_OF(number) === "argument";
+    if (filter === "callee") return number === 2 || ROLE_OF(number) === "saved";
+    if (filter === "compressed") return number >= COMPRESSED_FIRST && number <= COMPRESSED_LAST;
+    return true;
+  }
+
+  function render() {
+    if (isAbsent(selectedNumber)) selectedNumber = INITIAL_SELECTION;
+    buttons.forEach((button, number) => {
+      button.classList.toggle("is-absent", isAbsent(number));
+      button.classList.toggle("is-dimmed", !isAbsent(number) && !matchesFilter(number));
+      button.classList.toggle("selected", number === selectedNumber);
+    });
+    const number = selectedNumber;
+    const role = ROLE_OF(number);
+    const abiName = number === 8 ? "s0 / fp" : Riscv.ABI_NAMES[number];
+    const notes = (NOTES[number] || []).slice();
+    if (number >= COMPRESSED_FIRST && number <= COMPRESSED_LAST && number !== 8) notes.push("C의 3비트 레지스터 칸(x8–x15)으로 가리킬 수 있다.");
+    if (base === "e") {
+      if (number >= 10 && number <= 15) notes.push("ILP32E에서도 인자 레지스터(a0–a5)다.");
+      if (number === 8 || number === 9) notes.push("ILP32E에서 피호출자 저장 레지스터는 s0·s1 둘뿐이다.");
+    }
+    detail.innerHTML = "<h4>x" + number + " · " + abiName + "</h4>" +
+      '<span class="pill">' + ROLE_LABELS[role] + "</span>" +
+      "<p>" + Riscv.REGISTER_DESCRIPTIONS[number] + "</p>" +
+      "<p>호출 뒤 보존: <b>" + PRESERVATION(number) + "</b></p>" +
+      "<p>5비트 인코딩: <code>" + number.toString(2).padStart(5, "0") + "</code></p>" +
+      (notes.length ? "<ul>" + notes.map((note) => "<li>" + note + "</li>").join("") + "</ul>" : "");
+  }
+  window.RiscvBook.segmented("register-filter", (value) => { filter = value; render(); });
+  window.RiscvBook.segmented("register-base", (value) => { base = value; render(); });
+  render();
+})();
+
+/* ---------------------------------------------------------------------------
+   엔디언과 부호 확장 실험실: 8바이트 메모리에 저장하고 다시 읽는다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const BASE_ADDRESS = 0x1000;
+  const MEMORY_SIZE = 8;
+  const BITS_PER_BYTE = 8;
+  const XLEN = 32;
+  const LOAD_KINDS = {
+    lw: { size: 4, isSigned: true }, lh: { size: 2, isSigned: true }, lhu: { size: 2, isSigned: false },
+    lb: { size: 1, isSigned: true }, lbu: { size: 1, isSigned: false },
+  };
+  const STORE_NAMES = { 4: "sw", 2: "sh", 1: "sb" };
+  const memory = new Uint8Array(MEMORY_SIZE);
+  let storeWidth = 4;
+  let isLittleEndian = true;
+  let offset = 0;
+  let loadKind = "lw";
+  let highlightedBytes = [];
+  let highlightKind = "";
+  let lastLoad = null;
+
+  const row = document.getElementById("memory-row");
+  const description = document.getElementById("memory-description");
+  const bitsBox = document.getElementById("memory-register-bits");
+
+  function parseValue() {
+    const text = document.getElementById("memory-value").value.trim().replace(/_/g, "");
+    const isHex = /^0x[0-9a-f]+$/i.test(text);
+    const isDecimal = /^-?[0-9]+$/.test(text);
+    if (!isHex && !isDecimal) return null;
+    return Number(BigInt.asUintN(XLEN, BigInt(text)));
+  }
+  // 엔디언에 따라 접근 안의 i번째 주소가 값의 몇 번째 바이트(0 = 가장 낮은 자리)를 담는지
+  function significanceAt(index, size) {
+    return isLittleEndian ? index : size - 1 - index;
+  }
+  function isAligned(size) {
+    return (BASE_ADDRESS + offset) % size === 0;
+  }
+  function alignmentText(size) {
+    return isAligned(size) ? "정렬됨" : "비정렬";
+  }
+  function fitsInView(size) {
+    return offset + size <= MEMORY_SIZE;
+  }
+
+  function store() {
+    const value = parseValue();
+    if (value === null) {
+      description.innerHTML = "⚠️ 값은 0x로 시작하는 16진수나 10진수로 적자.";
+      return;
+    }
+    if (!fitsInView(storeWidth)) {
+      description.innerHTML = "⚠️ 이 접근은 그림의 8바이트 범위를 넘는다. 주소를 줄이자.";
+      return;
+    }
+    highlightedBytes = [];
+    for (let index = 0; index < storeWidth; index += 1) {
+      const significance = significanceAt(index, storeWidth);
+      memory[offset + index] = (value >>> (significance * BITS_PER_BYTE)) & 0xff;
+      highlightedBytes.push(offset + index);
+    }
+    highlightKind = "is-written";
+    const valueText = book.toHex(value & (storeWidth === 4 ? 0xffffffff : (1 << (storeWidth * BITS_PER_BYTE)) - 1), storeWidth * BITS_PER_BYTE);
+    let text = "<code>" + STORE_NAMES[storeWidth] + " a1, " + book.toHex(BASE_ADDRESS + offset, 16) + "</code>: a1의 하위 " + storeWidth + "바이트 " + valueText + "를 " + (isLittleEndian ? "낮은 자리부터" : "높은 자리부터") + " 차례로 놓았다.";
+    if (!isAligned(storeWidth)) text += " <b>비정렬 저장</b>이다. 실행 환경에 따라 그대로 처리되거나 예외가 날 수 있다.";
+    description.innerHTML = text;
+    render();
+  }
+
+  function load() {
+    const kind = LOAD_KINDS[loadKind];
+    if (!fitsInView(kind.size)) {
+      description.innerHTML = "⚠️ 이 접근은 그림의 8바이트 범위를 넘는다. 주소를 줄이자.";
+      return;
+    }
+    let raw = 0;
+    highlightedBytes = [];
+    for (let index = 0; index < kind.size; index += 1) {
+      const significance = significanceAt(index, kind.size);
+      raw += memory[offset + index] * Math.pow(2, significance * BITS_PER_BYTE);
+      highlightedBytes.push(offset + index);
+    }
+    highlightKind = "is-read";
+    const loadedBits = kind.size * BITS_PER_BYTE;
+    const signBit = Math.floor(raw / Math.pow(2, loadedBits - 1)) % 2;
+    let result = raw;
+    if (kind.isSigned && signBit === 1 && loadedBits < XLEN) result = raw + (Math.pow(2, XLEN) - Math.pow(2, loadedBits));
+    lastLoad = { result: result >>> 0, loadedBits, isSigned: kind.isSigned, signBit };
+    let text = "<code>" + loadKind + " a0, " + book.toHex(BASE_ADDRESS + offset, 16) + "</code>: " + kind.size + "바이트를 읽어 " + book.toHex(raw, loadedBits) + "를 얻었다. ";
+    if (loadedBits < XLEN) {
+      if (kind.isSigned) text += "최상위 비트가 " + signBit + "이므로 위쪽 " + (XLEN - loadedBits) + "비트를 " + signBit + "로 채운다(부호 확장).";
+      else text += "위쪽 " + (XLEN - loadedBits) + "비트를 0으로 채운다(0 확장).";
+    }
+    if (!isAligned(kind.size)) text += " <b>비정렬 적재</b>다.";
+    description.innerHTML = text;
+    render();
+  }
+
+  function render() {
+    row.innerHTML = Array.from(memory, (byte, index) => {
+      const isHighlighted = highlightedBytes.includes(index);
+      let significanceLabel = "";
+      if (isHighlighted) {
+        const accessSize = highlightedBytes.length;
+        const significance = significanceAt(index - highlightedBytes[0], accessSize);
+        if (significance === 0) significanceLabel = "LSB";
+        if (significance === accessSize - 1 && accessSize > 1) significanceLabel = "MSB";
+      }
+      return '<div class="memory-byte' + (isHighlighted ? " " + highlightKind : "") + '"><span class="address">' + (BASE_ADDRESS + index).toString(16) + '</span><span class="byte-value">' + byte.toString(16).padStart(2, "0") + '</span><span class="significance">' + significanceLabel + "</span></div>";
+    }).join("");
+    const kind = LOAD_KINDS[loadKind];
+    document.getElementById("memory-address").textContent = book.toHex(BASE_ADDRESS + offset, 16);
+    document.getElementById("memory-alignment").textContent = "저장 " + alignmentText(storeWidth) + " · 적재 " + alignmentText(kind.size);
+    if (lastLoad) {
+      const binary = book.toBinary(lastLoad.result, XLEN);
+      const extendedLength = XLEN - lastLoad.loadedBits;
+      const extendedPart = binary.slice(0, extendedLength);
+      const loadedPart = binary.slice(extendedLength);
+      bitsBox.innerHTML = "a0 = " + (extendedLength ? '<span class="extended">' + extendedPart + "</span>" : "") + '<span class="loaded">' + loadedPart + "</span>" + '<br><span style="color:var(--text-faint)">금색 = ' + (lastLoad.isSigned ? "부호 확장" : "0 확장") + "으로 채운 비트 · 파랑 = 메모리에서 읽은 비트</span>";
+      document.getElementById("memory-hex").textContent = book.toHex(lastLoad.result);
+      document.getElementById("memory-decimal").textContent = String(lastLoad.result | 0);
+    }
+  }
+
+  book.segmented("memory-store-width", (value) => { storeWidth = Number(value); render(); });
+  book.segmented("memory-endianness", (value) => { isLittleEndian = value === "little"; render(); });
+  book.segmented("memory-load-kind", (value) => { loadKind = value; render(); });
+  book.range("memory-offset", (value) => { offset = value; render(); }, (value) => book.toHex(BASE_ADDRESS + value, 16));
+  document.getElementById("memory-store-button").addEventListener("click", store);
+  document.getElementById("memory-load-button").addEventListener("click", load);
+  document.getElementById("memory-clear-button").addEventListener("click", () => {
+    memory.fill(0);
+    highlightedBytes = [];
+    lastLoad = null;
+    bitsBox.textContent = "a0 = —";
+    ["memory-hex", "memory-decimal"].forEach((id) => { document.getElementById(id).textContent = "—"; });
+    description.innerHTML = "메모리를 0으로 지웠다.";
+    render();
+  });
+  store();
+})();
+</script>
+</body>
+</html>

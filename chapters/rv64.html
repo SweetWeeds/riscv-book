@@ -1,0 +1,1329 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>06 RV64I, RV32E, 그리고 RV128 · RISC-V Book</title>
+<meta name="description" content="XLEN이 64로 넓어질 때 무엇이 바뀌고 무엇이 그대로인지, W 명령과 32비트 값의 부호 확장 규칙, 64비트 상수 만들기, 레지스터를 16개로 줄인 RV32E/RV64E, 그리고 규격에서 빠진 RV128I의 현재 상태를 그림과 시뮬레이터로 살펴본다.">
+<link rel="icon" href="../assets/img/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/style.css">
+<script src="../assets/js/book.js"></script>
+<script src="../assets/js/riscv.js"></script>
+<style>
+  /* 64비트 값을 위·아래 32비트 두 줄로 보여 주는 비트 띠 */
+  .bit-strip-label { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 11px; color: var(--text-faint); margin: 6px 0 2px; }
+  .bit-strip { display: grid; grid-template-columns: repeat(32, minmax(0, 1fr)); gap: 1px; }
+  .bit-strip span { height: 20px; display: flex; align-items: center; justify-content: center; border-radius: 2px; background: var(--surface); color: var(--text-faint); font-family: var(--mono); font-size: 10px; box-sizing: border-box; }
+  .bit-strip span.one { background: var(--accent); color: var(--on-accent); }
+  .bit-strip span.extended { background: var(--accent-2-soft); }
+  .bit-strip span.extended.one { background: var(--accent-2); color: var(--on-accent); }
+  .bit-strip span.differs { outline: 2px solid var(--bad); outline-offset: -2px; }
+  @media (max-width: 560px) { .bit-strip span { font-size: 0; height: 14px; } }
+
+  .result-grid { display: grid; gap: 14px; grid-template-columns: minmax(0, 1fr); }
+  @media (min-width: 760px) { .result-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
+  .result-panel { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; background: var(--canvas-bg); min-width: 0; }
+  .result-panel h4 { margin: 0 0 4px !important; font-size: 15px; font-family: var(--mono); color: var(--accent); }
+  .result-panel.word h4 { color: var(--accent-2); }
+  .result-panel .hex { font-family: var(--mono); font-size: 14px; font-weight: 700; overflow-wrap: anywhere; }
+  .result-panel .decimal { font-family: var(--mono); font-size: 12.5px; color: var(--text-dim); overflow-wrap: anywhere; }
+  .operand-line { font-family: var(--mono); font-size: 13px; color: var(--text-dim); margin: 0 0 10px; overflow-wrap: anywhere; }
+  .operand-line b { color: var(--text); }
+  .preset-row { display: flex; flex-wrap: wrap; gap: 6px; }
+  .preset-row .button { font-size: 13px; padding: 5px 10px; }
+
+  .constant-layout { display: grid; grid-template-columns: minmax(0, 1fr); }
+  @media (min-width: 760px) { .constant-layout { grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.4fr); } }
+  .sequence-list { font-family: var(--mono); font-size: 13.5px; margin: 0; padding: 12px 0; list-style: none; border-right: 1px solid var(--border); background: var(--canvas-bg); counter-reset: sequence; }
+  @media (max-width: 759px) { .sequence-list { border-right: 0; border-bottom: 1px solid var(--border); } }
+  .sequence-list li { counter-increment: sequence; padding: 3px 14px; margin: 0; white-space: nowrap; overflow-x: auto; color: var(--text-dim); }
+  .sequence-list li::before { content: counter(sequence) ". "; color: var(--text-faint); }
+  .sequence-list li.done { color: var(--text); }
+  .sequence-list li.current { background: var(--accent-2-soft); box-shadow: inset 3px 0 0 var(--accent-2); color: var(--text); font-weight: 700; }
+
+  .register-file-grid { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 4px; }
+  @media (max-width: 560px) { .register-file-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+  .register-file-grid .cell { padding: 4px 6px; text-align: center; }
+  .register-file-grid .cell .cell-name { justify-content: center; }
+  .register-file-grid .cell .cell-value { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: clip; }
+  .register-file-grid .cell.removed { opacity: 0.35; border-style: dashed; }
+  .register-file-grid .cell.conflict { background: var(--bad-soft); border-color: var(--bad); opacity: 1; }
+  .register-file-grid .cell.used { background: var(--accent-soft); border-color: var(--accent); }
+  .area-bar { display: flex; height: 26px; border-radius: 7px; overflow: hidden; border: 1px solid var(--border); margin: 4px 0 10px; font-size: 12px; font-weight: 700; }
+  .area-bar span { display: flex; align-items: center; justify-content: center; white-space: nowrap; overflow: hidden; transition: flex-basis 0.5s ease, opacity 0.5s; }
+  .area-bar .core-rest { background: var(--accent-soft); color: var(--accent); }
+  .area-bar .upper-registers { background: var(--bad-soft); color: var(--bad); }
+  .area-bar .upper-registers.saved { background: transparent; color: var(--ok); border-left: 2px dashed var(--ok); }
+  .check-list { font-family: var(--mono); font-size: 13px; line-height: 1.55; max-height: 260px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--canvas-bg); padding: 8px 10px; margin-top: 10px; }
+  .check-list .row { white-space: nowrap; }
+  .check-list .row.bad { color: var(--bad); font-weight: 700; }
+  .check-list .row.ok { color: var(--text-dim); }
+  .rv32e-layout { display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr); }
+  @media (min-width: 760px) { .rv32e-layout { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
+  .rv32e-layout textarea { width: 100%; min-height: 200px; font-family: var(--mono); font-size: 13px; line-height: 1.5; color: var(--text); background: var(--canvas-bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; resize: vertical; box-sizing: border-box; }
+  .mini-heading { font-size: 13px; font-weight: 700; color: var(--text-dim); margin: 0 0 6px; }
+</style>
+</head>
+<body data-chapter="rv64">
+<main class="chapter">
+  <header class="chapter-hero">
+    <div class="eyebrow">Chapter 06</div>
+    <h1>RV64I, RV32E, 그리고 RV128</h1>
+    <p class="lead">5장의 RV32I는 레지스터가 32비트였다. 서버와 스마트폰은 4 GiB보다 큰 메모리를 다뤄야 하므로 <strong>레지스터와 주소를 64비트로 넓힌 RV64I</strong>가 필요하다. 반대로 아주 작은 마이크로컨트롤러는 레지스터 32개조차 부담스러워 <strong>레지스터를 16개로 줄인 RV32E</strong>를 쓴다. 이 장에서는 베이스 ISA가 넓어지고 좁아질 때 무엇이 바뀌고 무엇이 그대로 남는지, 그리고 한때 규격에 있었던 RV128I가 지금 어떤 상태인지를 살펴본다.</p>
+    <ul class="objectives">
+      <li>XLEN=64가 되면 레지스터·pc·주소 공간·시프트 양이 어떻게 달라지는지 안다.</li>
+      <li>RV64I가 새로 더한 12개 명령(<code>ld</code>·<code>sd</code>·<code>lwu</code>와 9개의 *W 명령)의 역할을 구별한다.</li>
+      <li>“32비트 값은 64비트 레지스터에 부호 확장된 꼴로 보관한다”는 규칙과 그 덕분에 비교·분기가 그대로 동작하는 이유를 설명한다.</li>
+      <li>RV64에서 <code>lui</code>·<code>auipc</code>의 부호 확장과, 64비트 상수를 만드는 <code>li</code> 전개(최대 8개 명령)를 이해한다.</li>
+      <li>RV32E/RV64E가 레지스터를 16개로 줄인 이유와 ILP32E 호출 규약의 차이를 안다.</li>
+      <li>RV128I가 v20260120 규격에서 어떤 상태인지, RV64 하트가 RV32 코드를 돌리는 방법(UXL·SXL)을 안다.</li>
+    </ul>
+    <div class="spec-meta">
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/unpriv/rv64.html" target="_blank" rel="noopener">Unprivileged · RV64I 2.1</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32e.html" target="_blank" rel="noopener">Unprivileged · RV32E/RV64E 2.0</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/unpriv/intro.html" target="_blank" rel="noopener">Unprivileged · Introduction</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/priv/machine.html" target="_blank" rel="noopener">Privileged · mstatus UXL/SXL</a>
+    </div>
+  </header>
+
+  <!-- ============================================================ -->
+  <section id="xlen">
+    <h2>XLEN=64: 무엇이 넓어지나</h2>
+    <p>규격은 정수 레지스터의 비트 폭을 <span class="term">XLEN</span><span class="english">(integer register width)</span>이라 부른다. RV64I는 RV32I 위에 지어진 베이스 ISA로, 규격의 RV64I 장은 “RV32I와 다른 점만” 적는다. 핵심은 한 줄이다. <b>정수 레지스터 x1–x31과 pc, 그리고 사용자 주소 공간이 64비트로 넓어진다.</b> 명령어 길이는 여전히 32비트이고, 형식(R·I·S·B·U·J)과 opcode 배치도 RV32I 그대로다. 그래서 <code>add</code>는 RV64에서 그냥 64비트 덧셈이 된다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 290" role="img" aria-label="32비트 레지스터가 64비트로 넓어지며 위쪽 32비트가 부호 비트로 채워지는 애니메이션">
+        <text x="424" y="24" text-anchor="end" class="t t-bold">XLEN =</text>
+        <text x="432" y="24" class="t-accent" style="font-size:16px">32<animate attributeName="opacity" values="1;1;0;0;1" keyTimes="0;0.25;0.3;0.95;1" dur="7s" repeatCount="indefinite"/></text>
+        <text x="432" y="24" class="t-gold" style="font-size:16px" opacity="0">64<animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;0.25;0.3;0.95;1" dur="7s" repeatCount="indefinite"/></text>
+        <!-- 비트 번호 -->
+        <text x="40" y="56" class="t-faint">63</text>
+        <text x="436" y="56" text-anchor="end" class="t-faint">32</text>
+        <text x="444" y="56" class="t-faint">31</text>
+        <text x="840" y="56" text-anchor="end" class="t-faint">0</text>
+        <line x1="440" y1="44" x2="440" y2="214" class="s-line s-dashed"/>
+
+        <!-- a0 = 0x80000000 -->
+        <text x="40" y="76" class="t-dim">a0 ← 0x80000000 (부호 있는 32비트로 −2³¹)</text>
+        <g transform="translate(0,84)">
+          <rect x="440" width="50" height="36" rx="4" class="f-gold-soft"/><text x="465" y="23" text-anchor="middle" class="t-mono">1000</text>
+          <rect x="490" width="50" height="36" rx="4" class="f-elev"/><text x="515" y="23" text-anchor="middle" class="t-mono">0000</text>
+          <rect x="540" width="50" height="36" rx="4" class="f-elev"/><text x="565" y="23" text-anchor="middle" class="t-mono">0000</text>
+          <rect x="590" width="50" height="36" rx="4" class="f-elev"/><text x="615" y="23" text-anchor="middle" class="t-mono">0000</text>
+          <rect x="640" width="50" height="36" rx="4" class="f-elev"/><text x="665" y="23" text-anchor="middle" class="t-mono">0000</text>
+          <rect x="690" width="50" height="36" rx="4" class="f-elev"/><text x="715" y="23" text-anchor="middle" class="t-mono">0000</text>
+          <rect x="740" width="50" height="36" rx="4" class="f-elev"/><text x="765" y="23" text-anchor="middle" class="t-mono">0000</text>
+          <rect x="790" width="50" height="36" rx="4" class="f-elev"/><text x="815" y="23" text-anchor="middle" class="t-mono">0000</text>
+          <!-- 위쪽 32비트: 오른쪽부터 차례로 부호 비트(1)가 복사된다 -->
+          <g opacity="0"><animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;0.30;0.34;0.95;1" dur="7s" repeatCount="indefinite"/><rect x="390" width="50" height="36" rx="4" class="f-gold-soft"/><text x="415" y="23" text-anchor="middle" class="t-mono">1111</text></g>
+          <g opacity="0"><animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;0.34;0.38;0.95;1" dur="7s" repeatCount="indefinite"/><rect x="340" width="50" height="36" rx="4" class="f-gold-soft"/><text x="365" y="23" text-anchor="middle" class="t-mono">1111</text></g>
+          <g opacity="0"><animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;0.38;0.42;0.95;1" dur="7s" repeatCount="indefinite"/><rect x="290" width="50" height="36" rx="4" class="f-gold-soft"/><text x="315" y="23" text-anchor="middle" class="t-mono">1111</text></g>
+          <g opacity="0"><animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;0.42;0.46;0.95;1" dur="7s" repeatCount="indefinite"/><rect x="240" width="50" height="36" rx="4" class="f-gold-soft"/><text x="265" y="23" text-anchor="middle" class="t-mono">1111</text></g>
+          <g opacity="0"><animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;0.46;0.50;0.95;1" dur="7s" repeatCount="indefinite"/><rect x="190" width="50" height="36" rx="4" class="f-gold-soft"/><text x="215" y="23" text-anchor="middle" class="t-mono">1111</text></g>
+          <g opacity="0"><animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;0.50;0.54;0.95;1" dur="7s" repeatCount="indefinite"/><rect x="140" width="50" height="36" rx="4" class="f-gold-soft"/><text x="165" y="23" text-anchor="middle" class="t-mono">1111</text></g>
+          <g opacity="0"><animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;0.54;0.58;0.95;1" dur="7s" repeatCount="indefinite"/><rect x="90" width="50" height="36" rx="4" class="f-gold-soft"/><text x="115" y="23" text-anchor="middle" class="t-mono">1111</text></g>
+          <g opacity="0"><animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;0.58;0.62;0.95;1" dur="7s" repeatCount="indefinite"/><rect x="40" width="50" height="36" rx="4" class="f-gold-soft"/><text x="65" y="23" text-anchor="middle" class="t-mono">1111</text></g>
+        </g>
+
+        <!-- a1 = 5 -->
+        <text x="40" y="150" class="t-dim">a1 ← 5</text>
+        <g transform="translate(0,158)">
+          <rect x="440" width="50" height="36" rx="4" class="f-teal-soft"/><text x="465" y="23" text-anchor="middle" class="t-mono">0000</text>
+          <rect x="490" width="50" height="36" rx="4" class="f-elev"/><text x="515" y="23" text-anchor="middle" class="t-mono">0000</text>
+          <rect x="540" width="50" height="36" rx="4" class="f-elev"/><text x="565" y="23" text-anchor="middle" class="t-mono">0000</text>
+          <rect x="590" width="50" height="36" rx="4" class="f-elev"/><text x="615" y="23" text-anchor="middle" class="t-mono">0000</text>
+          <rect x="640" width="50" height="36" rx="4" class="f-elev"/><text x="665" y="23" text-anchor="middle" class="t-mono">0000</text>
+          <rect x="690" width="50" height="36" rx="4" class="f-elev"/><text x="715" y="23" text-anchor="middle" class="t-mono">0000</text>
+          <rect x="740" width="50" height="36" rx="4" class="f-elev"/><text x="765" y="23" text-anchor="middle" class="t-mono">0000</text>
+          <rect x="790" width="50" height="36" rx="4" class="f-elev"/><text x="815" y="23" text-anchor="middle" class="t-mono">0101</text>
+          <g opacity="0"><animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;0.30;0.34;0.95;1" dur="7s" repeatCount="indefinite"/><rect x="390" width="50" height="36" rx="4" class="f-surface"/><text x="415" y="23" text-anchor="middle" class="t-mono">0000</text></g>
+          <g opacity="0"><animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;0.34;0.38;0.95;1" dur="7s" repeatCount="indefinite"/><rect x="340" width="50" height="36" rx="4" class="f-surface"/><text x="365" y="23" text-anchor="middle" class="t-mono">0000</text></g>
+          <g opacity="0"><animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;0.38;0.42;0.95;1" dur="7s" repeatCount="indefinite"/><rect x="290" width="50" height="36" rx="4" class="f-surface"/><text x="315" y="23" text-anchor="middle" class="t-mono">0000</text></g>
+          <g opacity="0"><animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;0.42;0.46;0.95;1" dur="7s" repeatCount="indefinite"/><rect x="240" width="50" height="36" rx="4" class="f-surface"/><text x="265" y="23" text-anchor="middle" class="t-mono">0000</text></g>
+          <g opacity="0"><animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;0.46;0.50;0.95;1" dur="7s" repeatCount="indefinite"/><rect x="190" width="50" height="36" rx="4" class="f-surface"/><text x="215" y="23" text-anchor="middle" class="t-mono">0000</text></g>
+          <g opacity="0"><animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;0.50;0.54;0.95;1" dur="7s" repeatCount="indefinite"/><rect x="140" width="50" height="36" rx="4" class="f-surface"/><text x="165" y="23" text-anchor="middle" class="t-mono">0000</text></g>
+          <g opacity="0"><animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;0.54;0.58;0.95;1" dur="7s" repeatCount="indefinite"/><rect x="90" width="50" height="36" rx="4" class="f-surface"/><text x="115" y="23" text-anchor="middle" class="t-mono">0000</text></g>
+          <g opacity="0"><animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;0.58;0.62;0.95;1" dur="7s" repeatCount="indefinite"/><rect x="40" width="50" height="36" rx="4" class="f-surface"/><text x="65" y="23" text-anchor="middle" class="t-mono">0000</text></g>
+        </g>
+        <!-- 부호 비트에서 위로 복사되는 흐름 -->
+        <path d="M465 84 C465 66 300 66 300 82" class="s-gold flow-dash" opacity="0"><animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.28;0.32;0.62;0.66;1" dur="7s" repeatCount="indefinite"/></path>
+
+        <g opacity="0"><animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;0.62;0.68;0.95;1" dur="7s" repeatCount="indefinite"/>
+          <text x="40" y="232" class="t-mono">a0 = 0xFFFFFFFF_80000000</text>
+          <text x="440" y="232" class="t-mono">a1 = 0x00000000_00000005</text>
+          <text x="40" y="256" class="t-dim">bit 31(부호 비트)을 위쪽 32비트에 복사한다 → 64비트로 읽어도 같은 −2³¹, 같은 5</text>
+        </g>
+        <text x="40" y="280" class="t-faint">명령어는 그대로 32비트 · 레지스터·pc·주소만 64비트로</text>
+      </svg></div>
+      <figcaption><b>그림 6-1.</b> 32비트 레지스터가 64비트로 넓어지는 모습. RV64에서 32비트 값을 레지스터에 담을 때는 bit 31(금색 칸)을 위쪽 32비트 전체에 복사한다. 이것이 이 장 전체를 꿰뚫는 <b>부호 확장 규칙</b>이다. 음수(−2³¹)는 위쪽이 모두 1, 양수(5)는 모두 0이 된다.</figcaption>
+    </figure>
+
+    <p>RV32I와 RV64I의 차이를 표로 모으면 생각보다 짧다.</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>항목</th><th>RV32I</th><th>RV64I</th></tr></thead>
+      <tbody>
+        <tr><td>정수 레지스터·pc 폭</td><td>32비트</td><td>64비트</td></tr>
+        <tr><td>사용자 주소 공간</td><td>2³² 바이트</td><td>2⁶⁴ 바이트 (실제로 쓸 수 있는 범위는 실행 환경이 정한다)</td></tr>
+        <tr><td>명령어 길이와 형식</td><td>32비트, R·I·S·B·U·J</td><td>같음</td></tr>
+        <tr><td>즉시값 시프트의 shamt</td><td>5비트 (0–31)</td><td>6비트 (0–63)</td></tr>
+        <tr><td><code>sll</code>·<code>srl</code>·<code>sra</code>가 보는 시프트 양</td><td><code>rs2[4:0]</code></td><td><code>rs2[5:0]</code></td></tr>
+        <tr><td><code>lui</code>·<code>auipc</code> 결과</td><td>32비트 그대로</td><td>32비트 결과를 64비트로 부호 확장</td></tr>
+        <tr><td>적재·저장</td><td><code>lb</code> <code>lh</code> <code>lw</code> <code>lbu</code> <code>lhu</code> <code>sb</code> <code>sh</code> <code>sw</code></td><td>+ <code>ld</code>, <code>lwu</code>, <code>sd</code> (<code>lw</code>는 부호 확장)</td></tr>
+        <tr><td>32비트 연산 전용 명령</td><td>필요 없음 (모든 연산이 32비트)</td><td>*W 명령 9개</td></tr>
+        <tr><td>상수 하나를 만드는 <code>li</code></td><td>최대 2개 명령</td><td>최대 8개 명령 (이 장의 방식 기준)</td></tr>
+      </tbody>
+    </table></div>
+    <div class="callout deep"><strong>RV32I는 RV64I의 부분집합이 아니다</strong><p>규격 서론은 “왜 RV32I를 RV64I의 엄격한 부분집합으로 만들지 않았나”라는 질문에 직접 답한다. 베이스 ISA를 따로 두면 각자 자기 폭에 맞게 최적화할 수 있다는 것이다. 예를 들어 <code>add</code>는 RV32I에서 32비트 덧셈, RV64I에서 64비트 덧셈이다. 같은 기계어가 두 베이스에서 다른 결과를 낼 수 있으므로, RV64 하트가 RV32 프로그램을 돌리려면 “지금은 32비트 모드”라고 알려 주는 장치가 필요하다(<a href="#compatibility">마지막 절</a>).</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="new-instructions">
+    <h2>RV64I가 더한 12개 명령</h2>
+    <p>RV64I가 새로 더한 명령은 열두 개뿐이다. 64비트를 메모리와 주고받는 <code>ld</code>·<code>sd</code>, 32비트를 0 확장으로 읽는 <code>lwu</code>, 그리고 <b>32비트 값을 위한 *W 명령 9개</b>다. *W 명령은 두 개의 새 major opcode, <code>OP-IMM-32</code>(0011011)와 <code>OP-32</code>(0111011)를 쓴다. 이름 그대로 OP-IMM과 OP의 “32비트 판”이다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 300" role="img" aria-label="RISC-V 기본 opcode 지도에서 RV64I가 쓰는 칸">
+        <text x="20" y="30" class="t-faint">inst[6:5] ↓ · inst[4:2] →</text>
+        <g class="t-faint">
+          <text x="146" y="48" text-anchor="middle" class="t-faint">000</text><text x="238" y="48" text-anchor="middle" class="t-faint">001</text>
+          <text x="330" y="48" text-anchor="middle" class="t-faint">010</text><text x="422" y="48" text-anchor="middle" class="t-faint">011</text>
+          <text x="514" y="48" text-anchor="middle" class="t-faint">100</text><text x="606" y="48" text-anchor="middle" class="t-faint">101</text>
+          <text x="698" y="48" text-anchor="middle" class="t-faint">110</text><text x="790" y="48" text-anchor="middle" class="t-faint">111 (&gt;32b)</text>
+        </g>
+        <text x="60" y="84" text-anchor="middle" class="t-faint">00</text>
+        <text x="60" y="134" text-anchor="middle" class="t-faint">01</text>
+        <text x="60" y="184" text-anchor="middle" class="t-faint">10</text>
+        <text x="60" y="234" text-anchor="middle" class="t-faint">11</text>
+        <g font-size="13">
+          <!-- 00 행 -->
+          <rect x="102" y="58" width="88" height="42" rx="7" class="f-accent-soft"/><text x="146" y="84" text-anchor="middle" class="t">LOAD</text>
+          <rect x="194" y="58" width="88" height="42" rx="7" class="f-surface"/><text x="238" y="84" text-anchor="middle" class="t-dim">LOAD-FP</text>
+          <rect x="286" y="58" width="88" height="42" rx="7" class="f-surface"/><text x="330" y="84" text-anchor="middle" class="t-dim">custom-0</text>
+          <rect x="378" y="58" width="88" height="42" rx="7" class="f-surface"/><text x="422" y="84" text-anchor="middle" class="t-dim">MISC-MEM</text>
+          <rect x="470" y="58" width="88" height="42" rx="7" class="f-accent-soft"/><text x="514" y="84" text-anchor="middle" class="t">OP-IMM</text>
+          <rect x="562" y="58" width="88" height="42" rx="7" class="f-surface"/><text x="606" y="84" text-anchor="middle" class="t-dim">AUIPC</text>
+          <rect x="654" y="58" width="88" height="42" rx="7" class="f-gold-soft blink-highlight"/><text x="698" y="84" text-anchor="middle" class="t t-bold">OP-IMM-32</text>
+          <rect x="746" y="58" width="88" height="42" rx="7" class="f-surface"/><text x="790" y="84" text-anchor="middle" class="t-faint">reserved</text>
+          <!-- 01 행 -->
+          <rect x="102" y="108" width="88" height="42" rx="7" class="f-accent-soft"/><text x="146" y="134" text-anchor="middle" class="t">STORE</text>
+          <rect x="194" y="108" width="88" height="42" rx="7" class="f-surface"/><text x="238" y="134" text-anchor="middle" class="t-dim">STORE-FP</text>
+          <rect x="286" y="108" width="88" height="42" rx="7" class="f-surface"/><text x="330" y="134" text-anchor="middle" class="t-dim">custom-1</text>
+          <rect x="378" y="108" width="88" height="42" rx="7" class="f-surface"/><text x="422" y="134" text-anchor="middle" class="t-dim">AMO</text>
+          <rect x="470" y="108" width="88" height="42" rx="7" class="f-surface"/><text x="514" y="134" text-anchor="middle" class="t-dim">OP</text>
+          <rect x="562" y="108" width="88" height="42" rx="7" class="f-surface"/><text x="606" y="134" text-anchor="middle" class="t-dim">LUI</text>
+          <rect x="654" y="108" width="88" height="42" rx="7" class="f-gold-soft blink-highlight"/><text x="698" y="134" text-anchor="middle" class="t t-bold">OP-32</text>
+          <rect x="746" y="108" width="88" height="42" rx="7" class="f-surface"/><text x="790" y="134" text-anchor="middle" class="t-faint">reserved</text>
+          <!-- 10 행 -->
+          <rect x="102" y="158" width="88" height="42" rx="7" class="f-surface"/><text x="146" y="184" text-anchor="middle" class="t-dim">MADD</text>
+          <rect x="194" y="158" width="88" height="42" rx="7" class="f-surface"/><text x="238" y="184" text-anchor="middle" class="t-dim">MSUB</text>
+          <rect x="286" y="158" width="88" height="42" rx="7" class="f-surface"/><text x="330" y="184" text-anchor="middle" class="t-dim">NMSUB</text>
+          <rect x="378" y="158" width="88" height="42" rx="7" class="f-surface"/><text x="422" y="184" text-anchor="middle" class="t-dim">NMADD</text>
+          <rect x="470" y="158" width="88" height="42" rx="7" class="f-surface"/><text x="514" y="184" text-anchor="middle" class="t-dim">OP-FP</text>
+          <rect x="562" y="158" width="88" height="42" rx="7" class="f-surface"/><text x="606" y="184" text-anchor="middle" class="t-dim">OP-V</text>
+          <rect x="654" y="158" width="88" height="42" rx="7" class="f-surface"/><text x="698" y="184" text-anchor="middle" class="t-dim">custom-2</text>
+          <rect x="746" y="158" width="88" height="42" rx="7" class="f-surface"/><text x="790" y="184" text-anchor="middle" class="t-faint">reserved</text>
+          <!-- 11 행 -->
+          <rect x="102" y="208" width="88" height="42" rx="7" class="f-surface"/><text x="146" y="234" text-anchor="middle" class="t-dim">BRANCH</text>
+          <rect x="194" y="208" width="88" height="42" rx="7" class="f-surface"/><text x="238" y="234" text-anchor="middle" class="t-dim">JALR</text>
+          <rect x="286" y="208" width="88" height="42" rx="7" class="f-surface"/><text x="330" y="234" text-anchor="middle" class="t-faint">reserved</text>
+          <rect x="378" y="208" width="88" height="42" rx="7" class="f-surface"/><text x="422" y="234" text-anchor="middle" class="t-dim">JAL</text>
+          <rect x="470" y="208" width="88" height="42" rx="7" class="f-surface"/><text x="514" y="234" text-anchor="middle" class="t-dim">SYSTEM</text>
+          <rect x="562" y="208" width="88" height="42" rx="7" class="f-surface"/><text x="606" y="234" text-anchor="middle" class="t-dim">OP-VE</text>
+          <rect x="654" y="208" width="88" height="42" rx="7" class="f-surface"/><text x="698" y="234" text-anchor="middle" class="t-dim">custom-3</text>
+          <rect x="746" y="208" width="88" height="42" rx="7" class="f-surface"/><text x="790" y="234" text-anchor="middle" class="t-faint">reserved</text>
+        </g>
+        <rect x="102" y="268" width="16" height="16" rx="3" class="f-gold-soft"/><text x="124" y="281" class="t-dim">RV64I 전용 opcode: *W 명령 9개</text>
+        <rect x="420" y="268" width="16" height="16" rx="3" class="f-accent-soft"/><text x="442" y="281" class="t-dim">RV64I가 funct3·shamt를 더 쓰는 opcode</text>
+      </svg></div>
+      <figcaption><b>그림 6-2.</b> 기본 opcode 지도(inst[1:0]=11)에서 RV64I가 쓰는 칸. 금색 두 칸 <code>OP-IMM-32</code>와 <code>OP-32</code>는 RV64I가 *W 명령을 위해 쓰는 opcode다. 파란 칸은 RV32I와 같은 opcode이지만 RV64I가 새 funct3(<code>ld</code>·<code>lwu</code>·<code>sd</code>)나 6비트 shamt를 더한 곳이다. 칸 이름은 v20260120 규격의 표를 따랐다.</figcaption>
+    </figure>
+
+    <div class="table-wrap"><table class="instruction-table compact">
+      <thead><tr><th>명령</th><th>opcode</th><th>funct3</th><th>funct7</th><th>뜻</th></tr></thead>
+      <tbody>
+        <tr><td>ld</td><td>LOAD 0000011</td><td>011</td><td>—</td><td>64비트 적재</td></tr>
+        <tr><td>lwu</td><td>LOAD 0000011</td><td>110</td><td>—</td><td>32비트 적재, <b>0 확장</b> (<code>lw</code>는 부호 확장)</td></tr>
+        <tr><td>sd</td><td>STORE 0100011</td><td>011</td><td>—</td><td>64비트 저장</td></tr>
+        <tr><td>addiw</td><td>OP-IMM-32 0011011</td><td>000</td><td>—</td><td>32비트 덧셈 후 부호 확장. <code>addiw rd, rs, 0</code> = <code>sext.w</code></td></tr>
+        <tr><td>slliw</td><td>OP-IMM-32</td><td>001</td><td>0000000</td><td>32비트 왼쪽 시프트 (shamt 5비트)</td></tr>
+        <tr><td>srliw</td><td>OP-IMM-32</td><td>101</td><td>0000000</td><td>32비트 논리 오른쪽 시프트</td></tr>
+        <tr><td>sraiw</td><td>OP-IMM-32</td><td>101</td><td>0100000</td><td>32비트 산술 오른쪽 시프트</td></tr>
+        <tr><td>addw</td><td>OP-32 0111011</td><td>000</td><td>0000000</td><td>32비트 덧셈</td></tr>
+        <tr><td>subw</td><td>OP-32</td><td>000</td><td>0100000</td><td>32비트 뺄셈. <code>subw rd, x0, rs</code> = <code>negw</code></td></tr>
+        <tr><td>sllw</td><td>OP-32</td><td>001</td><td>0000000</td><td>32비트 왼쪽 시프트, 양은 <code>rs2[4:0]</code></td></tr>
+        <tr><td>srlw</td><td>OP-32</td><td>101</td><td>0000000</td><td>32비트 논리 오른쪽 시프트</td></tr>
+        <tr><td>sraw</td><td>OP-32</td><td>101</td><td>0100000</td><td>32비트 산술 오른쪽 시프트</td></tr>
+      </tbody>
+    </table></div>
+    <p>눈여겨볼 점은 <b>*W가 붙은 명령이 덧셈·뺄셈·시프트뿐</b>이라는 것이다. <code>andw</code>, <code>orw</code>, <code>xorw</code>, <code>sltw</code> 같은 명령은 없다. 비교 명령과 논리 연산은 64비트 판을 그대로 써도 32비트 결과가 맞게 나오기 때문이다. 그 이유가 다음 절의 주제다.</p>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="sign-extension">
+    <h2>32비트 값은 부호 확장해서 보관한다</h2>
+    <p>C의 <code>int</code>나 <code>unsigned int</code>는 RV64에서도 32비트다. 이런 값을 64비트 레지스터에 어떻게 담을지 정해 두지 않으면, 연산할 때마다 위쪽 32비트를 정리하는 명령이 붙어야 한다. RV64I는 컴파일러와 호출 규약이 지키는 하나의 약속, 즉 <span class="term">부호 확장 불변식</span><span class="english">(sign-extension invariant)</span>으로 이 문제를 푼다.</p>
+    <div class="callout spec"><strong>규격 원문에서</strong>
+      <blockquote>“The compiler and calling convention maintain an invariant that all 32-bit values are held in a sign-extended format in 64-bit registers. Even 32-bit unsigned integers extend bit 31 into bits 63 through 32.”</blockquote>
+      <p><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/rv64.html" target="_blank" rel="noopener">Volume I, RV64I · Integer Computational Instructions</a> — 부호 없는 32비트 값까지 bit 31을 위로 복사한다는 점이 핵심이다.</p></div>
+    <p><b>부호 없는 값까지 부호 확장한다</b>는 말이 처음엔 이상하게 들린다. <code>0xFFFFFFFF</code>(부호 없는 4294967295)가 레지스터에서는 <code>0xFFFFFFFF_FFFFFFFF</code>로 보관된다는 뜻이다. 그런데 이렇게 하면 놀라운 일이 생긴다. 64비트 <code>sltu</code>·<code>bltu</code>로 비교해도 32비트 부호 없는 비교와 결과가 같다. 아래 그림이 그 이유다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 270" role="img" aria-label="부호 없는 32비트 값이 부호 확장된 64비트 값으로 옮겨질 때 크기 순서가 유지되는 모습">
+        <defs>
+          <path id="r6-order-path-low" d="M300 70 C300 130 80 110 80 168"/>
+          <path id="r6-order-path-high" d="M560 70 C560 130 780 110 780 168"/>
+        </defs>
+        <text x="430" y="22" text-anchor="middle" class="t t-bold">32비트 값 (부호 없는 해석, 0 → 2³²−1)</text>
+        <rect x="170" y="34" width="260" height="34" rx="6" class="f-teal-soft"/>
+        <text x="300" y="56" text-anchor="middle" class="t">A: 0 … 0x7FFFFFFF</text>
+        <rect x="430" y="34" width="260" height="34" rx="6" class="f-violet-soft"/>
+        <text x="560" y="56" text-anchor="middle" class="t">B: 0x80000000 … 0xFFFFFFFF</text>
+
+        <use href="#r6-order-path-low" class="s-accent flow-dash"/>
+        <use href="#r6-order-path-high" class="s-accent flow-dash"/>
+        <circle r="5" fill="var(--teal)"><animateMotion dur="2.6s" begin="-0.4s" repeatCount="indefinite"><mpath href="#r6-order-path-low"/></animateMotion></circle>
+        <circle r="5" fill="var(--violet)"><animateMotion dur="2.6s" begin="-1.7s" repeatCount="indefinite"><mpath href="#r6-order-path-high"/></animateMotion></circle>
+        <text x="250" y="152" text-anchor="middle" class="t-dim">위 32비트 = 0</text>
+        <text x="620" y="152" text-anchor="middle" class="t-dim">위 32비트 = 1…1</text>
+        <text x="430" y="112" text-anchor="middle" class="t-gold">A &lt; B 이면 A′ &lt; B′ — 순서가 그대로다</text>
+
+        <text x="430" y="134" text-anchor="middle" class="t-faint">64비트 레지스터 (부호 없는 해석, 0 → 2⁶⁴−1)</text>
+        <rect x="30" y="170" width="800" height="34" rx="6" class="f-surface"/>
+        <rect x="30" y="170" width="100" height="34" rx="6" class="f-teal-soft"/>
+        <text x="80" y="192" text-anchor="middle" class="t t-bold">A′</text>
+        <rect x="730" y="170" width="100" height="34" rx="6" class="f-violet-soft"/>
+        <text x="780" y="192" text-anchor="middle" class="t t-bold">B′</text>
+        <text x="430" y="192" text-anchor="middle" class="t-faint">32비트 값은 이 사이에 절대 오지 않는다</text>
+        <text x="30" y="226" class="t-mono" style="font-size:12px">0x00000000_00000000</text>
+        <text x="830" y="226" text-anchor="end" class="t-mono" style="font-size:12px">0xFFFFFFFF_FFFFFFFF</text>
+        <text x="30" y="250" class="t-dim">A′: 0 … 0x00000000_7FFFFFFF</text>
+        <text x="830" y="250" text-anchor="end" class="t-dim">B′: 0xFFFFFFFF_80000000 … 끝</text>
+      </svg></div>
+      <figcaption><b>그림 6-3.</b> 부호 없는 32비트 값을 부호 확장해 64비트에 담아도 <b>크기 순서가 보존된다</b>. 아래쪽 절반(A)은 64비트 공간의 맨 앞으로, 위쪽 절반(B)은 맨 끝으로 가고 둘 다 안에서는 순서가 그대로다. 그래서 64비트 <code>sltu</code>·<code>bltu</code>·<code>bgeu</code>가 32비트 부호 없는 비교 결과를 그대로 낸다. 부호 있는 비교(<code>slt</code>·<code>blt</code>)는 부호 확장의 정의상 당연히 맞는다.</figcaption>
+    </figure>
+
+    <p>규격은 이 불변식에서 따라 나오는 결과를 이렇게 정리한다.</p>
+    <ul>
+      <li><b>부호 있는 ↔ 부호 없는 32비트 변환은 아무 명령도 필요 없다.</b> 비트 모양이 같기 때문이다.</li>
+      <li><b>부호 있는 32비트 → 64비트 변환도 공짜다.</b> 이미 부호 확장되어 있다.</li>
+      <li><b>64비트 <code>sltu</code>와 부호 없는 분기</b>가 32비트 부호 없는 값에도 맞게 동작한다(그림 6-3).</li>
+      <li><b>64비트 논리 연산</b>(<code>and</code>·<code>or</code>·<code>xor</code>)은 부호 확장된 두 값을 받으면 결과도 부호 확장된 꼴이다. 위쪽 32비트가 모두 bit 31의 복사본이니, 비트마다 같은 연산을 하면 결과의 위쪽도 결과 bit 31의 복사본이 된다.</li>
+      <li>그래서 새로 필요한 것은 <b>덧셈·뺄셈·시프트</b>뿐이다. 이 연산들은 32비트 결과의 bit 31을 넘어 자리올림이 생기거나(덧셈), 위쪽 비트가 아래로 들어오기 때문에(오른쪽 시프트) 64비트 판으로는 정규형이 깨진다.</li>
+    </ul>
+    <p>*W 명령의 정의는 단순하다. <b>입력의 위쪽 32비트는 무시하고, 아래 32비트로 계산한 뒤, 결과 32비트를 64비트로 부호 확장해 쓴다.</b> 그러니 결과는 언제나 정규형이다. 아래 시뮬레이터로 64비트 판과 W 판의 차이를 비트 단위로 비교해 보자.</p>
+
+    <div class="sim" id="sign-extension-sim">
+      <div class="sim-head"><span class="sim-tag">SIMULATOR</span><h3>add vs addw: 부호 확장 탐색기</h3></div>
+      <div class="sim-pad">
+        <p class="operand-line" id="sign-operands"></p>
+        <div class="result-grid">
+          <div class="result-panel" id="sign-normal-panel">
+            <h4 id="sign-normal-title">add</h4>
+            <div class="hex" id="sign-normal-hex"></div>
+            <div class="decimal" id="sign-normal-decimal"></div>
+            <div class="bit-strip-label"><span>63</span><span>위쪽 32비트</span><span>32</span></div>
+            <div class="bit-strip" id="sign-normal-upper"></div>
+            <div class="bit-strip-label"><span>31</span><span>아래쪽 32비트</span><span>0</span></div>
+            <div class="bit-strip" id="sign-normal-lower"></div>
+          </div>
+          <div class="result-panel word" id="sign-word-panel">
+            <h4 id="sign-word-title">addw</h4>
+            <div class="hex" id="sign-word-hex"></div>
+            <div class="decimal" id="sign-word-decimal"></div>
+            <div class="bit-strip-label"><span>63</span><span>bit 31의 복사본</span><span>32</span></div>
+            <div class="bit-strip" id="sign-word-upper"></div>
+            <div class="bit-strip-label"><span>31</span><span>32비트 결과</span><span>0</span></div>
+            <div class="bit-strip" id="sign-word-lower"></div>
+          </div>
+        </div>
+      </div>
+      <div class="step-description" id="sign-description"></div>
+      <div class="sim-controls">
+        <div class="control"><span>연산</span>
+          <div class="segmented" id="sign-operation">
+            <button data-value="add" class="on">add</button><button data-value="sub">sub</button><button data-value="sll">sll</button><button data-value="srl">srl</button><button data-value="sra">sra</button>
+          </div>
+        </div>
+        <label class="control"><span>rs1 (16진수 또는 10진수)</span><input type="text" id="sign-first-input" value="0x7fffffff" spellcheck="false" autocomplete="off" size="22"></label>
+        <label class="control"><span>rs2</span><input type="text" id="sign-second-input" value="1" spellcheck="false" autocomplete="off" size="22"></label>
+        <div class="control wide"><span>예제</span>
+          <div class="preset-row" id="sign-presets">
+            <button class="button" data-first="0x7fffffff" data-second="1" data-operation="add">0x7fffffff + 1</button>
+            <button class="button" data-first="0xffffffff80000000" data-second="1" data-operation="sub">−2³¹ − 1</button>
+            <button class="button" data-first="1" data-second="31" data-operation="sll">1 &lt;&lt; 31</button>
+            <button class="button" data-first="-8" data-second="1" data-operation="srl">−8 &gt;&gt;u 1</button>
+            <button class="button" data-first="0x123456780000000a" data-second="5" data-operation="add">위쪽 쓰레기 무시</button>
+            <button class="button" data-first="0xffffffffffffffff" data-second="0xfffffffffffffffe" data-operation="add">(−1) + (−2)</button>
+          </div>
+        </div>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">두 결과가 같은가</span><span class="value" id="sign-readout-same">—</span></div>
+        <div class="stat"><span class="key">입력이 정규형(부호 확장형)인가</span><span class="value" id="sign-readout-canonical">—</span></div>
+        <div class="stat"><span class="key">32비트 부호 있는 오버플로</span><span class="value" id="sign-readout-overflow">—</span></div>
+      </div>
+      <div class="sim-note">예제 <b>0x7fffffff + 1</b>에서 <code>add</code>는 0x00000000_80000000(양수 2³¹)을, <code>addw</code>는 0xFFFFFFFF_80000000(−2³¹)을 낸다. 64비트 결과는 더 이상 “부호 확장된 32비트 값”이 아니다(빨간 테두리). 규격은 RV64I에서 <b>add와 addw의 결과를 비교하면 32비트 부호 있는 덧셈의 오버플로를 검사할 수 있다</b>고 말한다. 또 <b>위쪽 쓰레기 무시</b>를 눌러 W 명령이 입력의 위쪽 32비트를 정말로 보지 않는지 확인하자.</div>
+    </div>
+
+    <div class="callout tip"><strong>sext.w와 zext.w</strong><p><code>addiw rd, rs, 0</code>은 아래 32비트를 부호 확장하는 <code>sext.w</code> 의사 명령이다. 반대로 0 확장(<code>zext.w</code>)은 베이스 ISA만으로는 <code>slli rd, rs, 32</code> + <code>srli rd, rd, 32</code> 두 명령이 필요하다. Zba 확장의 <code>add.uw</code>가 있으면 한 명령(<code>zext.w</code>)으로 줄어든다(<a href="bit-manipulation.html">14장</a>). 배열 인덱스로 쓰는 <code>unsigned int</code>를 주소에 더할 때 자주 나온다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="shifts">
+    <h2>시프트: shamt가 6비트로</h2>
+    <p>64비트 값을 0–63칸 시프트하려면 시프트 양(shamt)이 6비트 필요하다. RV32I의 <code>slli</code>는 I형의 즉시값 12비트 중 아래 5비트를 shamt로, 위 7비트를 funct7처럼 쓴다. RV64I는 여기서 <b>funct7의 맨 아래 비트(inst[25])를 shamt[5]로 빌려 온다</b>. 그래서 RV64의 즉시값 시프트는 6비트 funct6 + 6비트 shamt 꼴이 된다. 산술 시프트를 고르는 bit 30은 그대로다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 330" role="img" aria-label="RV32I slli, RV64I slli, RV64I slliw의 비트 배치 비교">
+        <!-- inst[25] 강조 띠 -->
+        <rect x="204" y="22" width="24" height="296" rx="4" class="f-gold-soft" opacity="0.55"/>
+        <text x="216" y="16" text-anchor="middle" class="t-gold" style="font-size:12px">inst[25]</text>
+        <!-- 행 1: RV32I SLLI -->
+        <text x="60" y="44" class="t t-bold">RV32I slli</text>
+        <g transform="translate(0,52)">
+          <rect x="60" width="168" height="44" rx="5" class="f-violet-soft"/><text x="144" y="17" text-anchor="middle" class="t-faint">funct7</text><text x="144" y="35" text-anchor="middle" class="t-mono">0000000</text>
+          <rect x="228" width="120" height="44" rx="5" class="f-gold-soft"/><text x="288" y="17" text-anchor="middle" class="t-faint">shamt[4:0]</text><text x="288" y="35" text-anchor="middle" class="t-mono">5비트</text>
+          <rect x="348" width="120" height="44" rx="5" class="f-teal-soft"/><text x="408" y="28" text-anchor="middle" class="t-mono">rs1</text>
+          <rect x="468" width="72" height="44" rx="5" class="f-violet-soft"/><text x="504" y="17" text-anchor="middle" class="t-faint">funct3</text><text x="504" y="35" text-anchor="middle" class="t-mono">001</text>
+          <rect x="540" width="120" height="44" rx="5" class="f-teal-soft"/><text x="600" y="28" text-anchor="middle" class="t-mono">rd</text>
+          <rect x="660" width="168" height="44" rx="5" class="f-accent-soft"/><text x="744" y="17" text-anchor="middle" class="t-faint">OP-IMM</text><text x="744" y="35" text-anchor="middle" class="t-mono">0010011</text>
+        </g>
+        <text x="60" y="114" class="t-dim">bit 25는 funct7의 일부라 0이어야 한다. shamt는 0–31.</text>
+        <!-- 행 2: RV64I SLLI -->
+        <text x="60" y="148" class="t t-bold">RV64I slli</text>
+        <g transform="translate(0,156)">
+          <rect x="60" width="144" height="44" rx="5" class="f-violet-soft"/><text x="132" y="17" text-anchor="middle" class="t-faint">funct6</text><text x="132" y="35" text-anchor="middle" class="t-mono">000000</text>
+          <rect x="204" width="144" height="44" rx="5" class="f-gold-soft"/><text x="276" y="17" text-anchor="middle" class="t-faint">shamt[5:0]</text><text x="276" y="35" text-anchor="middle" class="t-mono">6비트</text>
+          <rect x="348" width="120" height="44" rx="5" class="f-teal-soft"/><text x="408" y="28" text-anchor="middle" class="t-mono">rs1</text>
+          <rect x="468" width="72" height="44" rx="5" class="f-violet-soft"/><text x="504" y="17" text-anchor="middle" class="t-faint">funct3</text><text x="504" y="35" text-anchor="middle" class="t-mono">001</text>
+          <rect x="540" width="120" height="44" rx="5" class="f-teal-soft"/><text x="600" y="28" text-anchor="middle" class="t-mono">rd</text>
+          <rect x="660" width="168" height="44" rx="5" class="f-accent-soft"/><text x="744" y="17" text-anchor="middle" class="t-faint">OP-IMM</text><text x="744" y="35" text-anchor="middle" class="t-mono">0010011</text>
+        </g>
+        <text x="60" y="218" class="t-dim">bit 25가 shamt[5]가 된다. shamt는 0–63. srai는 funct6 = 010000.</text>
+        <!-- 행 3: RV64I SLLIW -->
+        <text x="60" y="252" class="t t-bold">RV64I slliw</text>
+        <g transform="translate(0,260)">
+          <rect x="60" width="168" height="44" rx="5" class="f-violet-soft"/><text x="144" y="17" text-anchor="middle" class="t-faint">funct7</text><text x="144" y="35" text-anchor="middle" class="t-mono">0000000</text>
+          <rect x="228" width="120" height="44" rx="5" class="f-gold-soft"/><text x="288" y="17" text-anchor="middle" class="t-faint">shamt[4:0]</text><text x="288" y="35" text-anchor="middle" class="t-mono">5비트</text>
+          <rect x="348" width="120" height="44" rx="5" class="f-teal-soft"/><text x="408" y="28" text-anchor="middle" class="t-mono">rs1</text>
+          <rect x="468" width="72" height="44" rx="5" class="f-violet-soft"/><text x="504" y="17" text-anchor="middle" class="t-faint">funct3</text><text x="504" y="35" text-anchor="middle" class="t-mono">001</text>
+          <rect x="540" width="120" height="44" rx="5" class="f-teal-soft"/><text x="600" y="28" text-anchor="middle" class="t-mono">rd</text>
+          <rect x="660" width="168" height="44" rx="5" class="f-gold-soft"/><text x="744" y="17" text-anchor="middle" class="t-faint">OP-IMM-32</text><text x="744" y="35" text-anchor="middle" class="t-mono">0011011</text>
+        </g>
+        <text x="60" y="322" class="t-dim">32비트 연산이라 shamt는 5비트. imm[5] ≠ 0 인 인코딩은 reserved.</text>
+      </svg></div>
+      <figcaption><b>그림 6-4.</b> 즉시값 시프트의 세 가지 배치. 금색 세로 띠가 inst[25]다. RV32I와 <code>slliw</code>에서는 funct7의 일부(0)이지만, RV64I의 <code>slli</code>·<code>srli</code>·<code>srai</code>에서는 shamt의 6번째 비트가 된다. 같은 기계어 <code>0x02051513</code>(bit 25=1)은 RV64I에서 <code>slli a0, a0, 32</code>이지만 RV32I에서는 정의된 명령이 아니다.</figcaption>
+    </figure>
+
+    <p>레지스터로 시프트 양을 주는 <code>sll</code>·<code>srl</code>·<code>sra</code>도 같은 원리다. RV64I에서는 <code>rs2</code>의 아래 6비트를 보고, 32비트 판인 <code>sllw</code>·<code>srlw</code>·<code>sraw</code>는 아래 5비트(<code>rs2[4:0]</code>)만 본다.</p>
+    <div class="callout history"><strong>illegal에서 reserved로</strong><p>예전 규격은 <code>slliw</code>·<code>srliw</code>·<code>sraiw</code>에서 imm[5] ≠ 0이면 잘못된 명령 예외를 일으키라고 했다. 지금 규격은 이 인코딩을 <b>reserved</b>로 바꿨고, 이는 하위 호환되는 변경이라고 밝힌다. 예외를 “반드시” 일으킬 필요가 없어진 대신, 나중에 표준 확장이 그 자리를 쓸 수 있게 된 것이다. 같은 이유로 RV32E/RV64E 장도 “x16–x31을 쓰는 인코딩은 reserved”라고 적는다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="upper-immediates">
+    <h2>lui·auipc와 64비트 상수 만들기</h2>
+    <p><code>lui</code>와 <code>auipc</code>는 RV64I에서도 같은 opcode를 쓴다. 다른 점은 결과의 폭이다. <code>lui</code>는 20비트 즉시값을 위쪽에 놓고 아래 12비트를 0으로 채운 <b>32비트 결과를 64비트로 부호 확장</b>한다. <code>auipc</code>도 같은 32비트 오프셋을 부호 확장한 뒤 pc에 더한다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 250" role="img" aria-label="RV64에서 lui 결과가 부호 확장되는 두 가지 예">
+        <defs><marker id="r6-lui-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent-2)"/></marker></defs>
+        <text x="300" y="24" class="t-faint">bit 63</text>
+        <text x="556" y="24" text-anchor="end" class="t-faint">32</text>
+        <text x="564" y="24" class="t-faint">31</text>
+        <text x="820" y="24" text-anchor="end" class="t-faint">0</text>
+        <!-- 예 1 -->
+        <text x="20" y="62" class="t-mono">lui a0, 0x7FFFF</text>
+        <text x="20" y="82" class="t-faint">bit 31 = 0</text>
+        <rect x="300" y="42" width="260" height="44" rx="6" class="f-surface"/>
+        <text x="430" y="70" text-anchor="middle" class="t-mono">0000 0000</text>
+        <rect x="560" y="42" width="260" height="44" rx="6" class="f-elev"/>
+        <text x="690" y="70" text-anchor="middle" class="t-mono">7FFF F000</text>
+        <!-- 예 2 -->
+        <text x="20" y="140" class="t-mono">lui a0, 0x80000</text>
+        <text x="20" y="160" class="t-faint">bit 31 = 1</text>
+        <rect x="300" y="120" width="260" height="44" rx="6" class="f-gold-soft"/>
+        <text x="430" y="148" text-anchor="middle" class="t-mono">FFFF FFFF</text>
+        <rect x="560" y="120" width="260" height="44" rx="6" class="f-elev"/>
+        <text x="690" y="148" text-anchor="middle" class="t-mono">8000 0000</text>
+        <path d="M580 118 C580 100 470 100 470 116" class="s-gold flow-dash" marker-end="url(#r6-lui-arrow)"/>
+        <!-- 범위 -->
+        <rect x="20" y="186" width="800" height="52" rx="10" class="f-accent-soft"/>
+        <text x="420" y="208" text-anchor="middle" class="t">lui+ld, auipc+jalr 같은 짝으로 닿을 수 있는 오프셋</text>
+        <text x="420" y="228" text-anchor="middle" class="t-mono">[ −2³¹ − 2¹¹ ,  2³¹ − 2¹¹ − 1 ]   ≈ ±2 GiB</text>
+      </svg></div>
+      <figcaption><b>그림 6-5.</b> RV64의 <code>lui</code>. 만들어진 32비트 값의 bit 31이 1이면 위쪽 32비트가 모두 1로 채워진다(금색). 그래서 <code>lui</code> 하나로는 0x00000000_80000000 같은 “bit 31만 켜진 양수”를 만들 수 없다. 아래 상자는 규격이 밝힌, 상위 즉시값과 12비트 오프셋을 짝지어 닿을 수 있는 범위다.</figcaption>
+    </figure>
+
+    <h3>li는 최대 몇 개의 명령이 될까</h3>
+    <p>RV32에서 아무 32비트 상수나 <code>lui</code> + <code>addi</code> 두 명령이면 만들 수 있었다(<a href="encoding.html">4장</a>). 64비트 상수는 그렇게 되지 않는다. 즉시값은 한 번에 최대 20비트(<code>lui</code>)와 12비트(<code>addi</code>)뿐이고, 레지스터 위쪽에 값을 직접 넣는 명령이 없기 때문이다. 컴파일러와 어셈블러는 다음과 같이 <b>재귀적으로</b> 상수를 만든다(LLVM의 RISCVMatInt를 단순화한 방식).</p>
+    <ol>
+      <li>값이 부호 있는 32비트 범위에 들면 <code>lui</code> + <code>addiw</code>(또는 작은 값이면 <code>addi</code> 하나)로 끝낸다. <code>addiw</code>를 쓰는 까닭은 0x7FFFF800–0x7FFFFFFF처럼 <code>lui</code>가 0x80000으로 반올림되어 음수가 된 경우에도 32비트 덧셈이 넘쳐 다시 올바른 양수로 돌아오기 때문이다.</li>
+      <li>그렇지 않으면 아래 12비트를 부호 있는 값 <i>lo</i>로 떼어 낸다. 남은 값(<i>value − lo</i>)은 아래 12비트가 0이므로 뒤쪽 0의 개수만큼 오른쪽으로 민다.</li>
+      <li>민 값을 같은 방법으로 만든 뒤(재귀), <code>slli</code>로 되돌리고 <code>addi lo</code>를 더한다.</li>
+    </ol>
+    <p>한 번 재귀할 때마다 많아야 두 명령(<code>slli</code>, <code>addi</code>)이 붙고, 최악의 경우 <b>8개 명령</b>이 된다. 이 책의 구현을 무작위 64비트 값 20만 개로 시험해 보면 모두 8개 이하였다.</p>
+    <div class="codebox" data-title="li a0, 0x123456789abcdef0 의 전개 (8개 명령)" id="constant-example-code"></div>
+
+    <div class="sim" id="constant-builder-sim">
+      <div class="sim-head"><span class="sim-tag">SIMULATOR</span><h3>64비트 상수 빌더</h3></div>
+      <div class="constant-layout">
+        <ol class="sequence-list" id="constant-sequence"></ol>
+        <div class="sim-view"><canvas id="constant-canvas" aria-label="a0 레지스터 64비트가 명령마다 바뀌는 모습"></canvas></div>
+      </div>
+      <div class="step-description" id="constant-description"></div>
+      <div class="sim-controls">
+        <label class="control"><span>만들 상수 (64비트, 16진수 또는 10진수)</span><input type="text" id="constant-input" value="0x123456789abcdef0" spellcheck="false" autocomplete="off" size="24"></label>
+        <div class="control"><span>실행</span>
+          <div class="button-row">
+            <button class="button primary" id="constant-step-button">한 명령</button>
+            <button class="button" id="constant-play-button">자동 재생</button>
+            <button class="button" id="constant-reset-button">처음으로</button>
+            <button class="button" id="constant-random-button">무작위 상수</button>
+          </div>
+        </div>
+        <div class="control wide"><span>예제</span>
+          <div class="preset-row" id="constant-presets">
+            <button class="button" data-value="0x12345678">0x12345678 (32비트)</button>
+            <button class="button" data-value="0x7ffff800">0x7ffff800</button>
+            <button class="button" data-value="0x80000000">0x80000000</button>
+            <button class="button" data-value="0xffffffff">0xffffffff</button>
+            <button class="button" data-value="0x8000000000000000">0x8000…0000</button>
+            <button class="button" data-value="0xdeadbeefcafebabe">0xdeadbeefcafebabe</button>
+          </div>
+        </div>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">명령 수</span><span class="value" id="constant-readout-count">—</span></div>
+        <div class="stat"><span class="key">현재 a0</span><span class="value" id="constant-readout-current">—</span></div>
+        <div class="stat"><span class="key">목표와 일치</span><span class="value" id="constant-readout-match">—</span></div>
+      </div>
+      <div class="sim-note"><b>0x80000000</b>을 넣어 보자. 32비트 RV32라면 <code>lui</code> 한 개면 되지만, RV64에서는 <code>lui 0x80000</code>이 음수(0xFFFFFFFF_80000000)가 되므로 <code>addi 1</code> + <code>slli 31</code>로 만든다. <b>0x7ffff800</b>에서는 <code>addiw</code>가 32비트에서 넘쳐 양수로 돌아오는 모습을 보자. 금색으로 깜빡이는 칸이 그 명령이 바꾼 비트다.</div>
+    </div>
+    <div class="callout warn"><strong>실제 컴파일러는 더 영리하다</strong><p>이 장의 방식은 이해하기 쉬운 기본형이다. LLVM과 GCC는 여기에 “1을 넣고 왼쪽으로 민 뒤 <code>srli</code>로 앞쪽 0을 만드는” 요령이나, Zba·Zbb·Zbs 확장 명령을 섞어 더 짧은 열을 찾는다. 예를 들어 0x7FFFFFFF_FFFFFFFF는 <code>addi −1</code> + <code>srli 1</code> 두 명령이면 된다(이 시뮬레이터는 3개). 또 8개 명령짜리 상수는 아예 메모리 상수 풀에서 <code>ld</code>로 읽어 오는 편이 나을 때도 있다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="rv32e">
+    <h2>RV32E와 RV64E: 레지스터를 16개로</h2>
+    <p>반대 방향의 변형도 있다. <span class="term">RV32E</span><span class="english">(E = embedded)</span>와 RV64E는 각각 RV32I·RV64I에서 <b>정수 레지스터를 x0–x15의 16개로 줄인 것 말고는 바뀐 것이 없다</b>. 명령어 인코딩도 같고, rd·rs1·rs2 필드도 여전히 5비트다. 다만 x16–x31을 가리키는 인코딩은 모두 <b>reserved</b>가 된다. v20260120 규격에서 RV32E와 RV64E는 버전 2.0으로 비준된 베이스 ISA다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 400" role="img" aria-label="RV32I의 레지스터 32개와 RV32E의 레지스터 16개, 그리고 코어 면적 비교">
+        <text x="210" y="24" text-anchor="middle" class="t t-bold">RV32I · 레지스터 32개</text>
+        <text x="650" y="24" text-anchor="middle" class="t t-bold">RV32E · 레지스터 16개</text>
+        <g id="r6-register-files" font-size="12">
+          <!-- RV32I: 4열 × 8행 -->
+          <g transform="translate(20,40)">
+            <rect width="88" height="26" rx="5" class="f-surface"/><text x="44" y="17" text-anchor="middle" class="t-mono" style="font-size:12px">x0 zero</text>
+            <rect x="96" width="88" height="26" rx="5" class="f-accent-soft"/><text x="140" y="17" text-anchor="middle" class="t-mono" style="font-size:12px">x1 ra</text>
+            <rect x="192" width="88" height="26" rx="5" class="f-accent-soft"/><text x="236" y="17" text-anchor="middle" class="t-mono" style="font-size:12px">x2 sp</text>
+            <rect x="288" width="88" height="26" rx="5" class="f-accent-soft"/><text x="332" y="17" text-anchor="middle" class="t-mono" style="font-size:12px">x3 gp</text>
+            <g transform="translate(0,32)"><rect width="88" height="26" rx="5" class="f-accent-soft"/><text x="44" y="17" text-anchor="middle" class="t-mono" style="font-size:12px">x4 tp</text><rect x="96" width="88" height="26" rx="5" class="f-accent-soft"/><text x="140" y="17" text-anchor="middle" class="t-mono" style="font-size:12px">x5 t0</text><rect x="192" width="88" height="26" rx="5" class="f-accent-soft"/><text x="236" y="17" text-anchor="middle" class="t-mono" style="font-size:12px">x6 t1</text><rect x="288" width="88" height="26" rx="5" class="f-accent-soft"/><text x="332" y="17" text-anchor="middle" class="t-mono" style="font-size:12px">x7 t2</text></g>
+            <g transform="translate(0,64)"><rect width="88" height="26" rx="5" class="f-accent-soft"/><text x="44" y="17" text-anchor="middle" class="t-mono" style="font-size:12px">x8 s0</text><rect x="96" width="88" height="26" rx="5" class="f-accent-soft"/><text x="140" y="17" text-anchor="middle" class="t-mono" style="font-size:12px">x9 s1</text><rect x="192" width="88" height="26" rx="5" class="f-accent-soft"/><text x="236" y="17" text-anchor="middle" class="t-mono" style="font-size:12px">x10 a0</text><rect x="288" width="88" height="26" rx="5" class="f-accent-soft"/><text x="332" y="17" text-anchor="middle" class="t-mono" style="font-size:12px">x11 a1</text></g>
+            <g transform="translate(0,96)"><rect width="88" height="26" rx="5" class="f-accent-soft"/><text x="44" y="17" text-anchor="middle" class="t-mono" style="font-size:12px">x12 a2</text><rect x="96" width="88" height="26" rx="5" class="f-accent-soft"/><text x="140" y="17" text-anchor="middle" class="t-mono" style="font-size:12px">x13 a3</text><rect x="192" width="88" height="26" rx="5" class="f-accent-soft"/><text x="236" y="17" text-anchor="middle" class="t-mono" style="font-size:12px">x14 a4</text><rect x="288" width="88" height="26" rx="5" class="f-accent-soft"/><text x="332" y="17" text-anchor="middle" class="t-mono" style="font-size:12px">x15 a5</text></g>
+            <g transform="translate(0,128)"><rect width="88" height="26" rx="5" class="f-bad-soft"/><text x="44" y="17" text-anchor="middle" class="t-mono" style="font-size:12px">x16 a6</text><rect x="96" width="88" height="26" rx="5" class="f-bad-soft"/><text x="140" y="17" text-anchor="middle" class="t-mono" style="font-size:12px">x17 a7</text><rect x="192" width="88" height="26" rx="5" class="f-bad-soft"/><text x="236" y="17" text-anchor="middle" class="t-mono" style="font-size:12px">x18 s2</text><rect x="288" width="88" height="26" rx="5" class="f-bad-soft"/><text x="332" y="17" text-anchor="middle" class="t-mono" style="font-size:12px">x19 s3</text></g>
+            <g transform="translate(0,160)"><rect width="88" height="26" rx="5" class="f-bad-soft"/><text x="44" y="17" text-anchor="middle" class="t-mono" style="font-size:12px">x20 s4</text><rect x="96" width="88" height="26" rx="5" class="f-bad-soft"/><text x="140" y="17" text-anchor="middle" class="t-mono" style="font-size:12px">x21 s5</text><rect x="192" width="88" height="26" rx="5" class="f-bad-soft"/><text x="236" y="17" text-anchor="middle" class="t-mono" style="font-size:12px">x22 s6</text><rect x="288" width="88" height="26" rx="5" class="f-bad-soft"/><text x="332" y="17" text-anchor="middle" class="t-mono" style="font-size:12px">x23 s7</text></g>
+            <g transform="translate(0,192)"><rect width="88" height="26" rx="5" class="f-bad-soft"/><text x="44" y="17" text-anchor="middle" class="t-mono" style="font-size:12px">x24 s8</text><rect x="96" width="88" height="26" rx="5" class="f-bad-soft"/><text x="140" y="17" text-anchor="middle" class="t-mono" style="font-size:12px">x25 s9</text><rect x="192" width="88" height="26" rx="5" class="f-bad-soft"/><text x="236" y="17" text-anchor="middle" class="t-mono" style="font-size:12px">x26 s10</text><rect x="288" width="88" height="26" rx="5" class="f-bad-soft"/><text x="332" y="17" text-anchor="middle" class="t-mono" style="font-size:12px">x27 s11</text></g>
+            <g transform="translate(0,224)"><rect width="88" height="26" rx="5" class="f-bad-soft"/><text x="44" y="17" text-anchor="middle" class="t-mono" style="font-size:12px">x28 t3</text><rect x="96" width="88" height="26" rx="5" class="f-bad-soft"/><text x="140" y="17" text-anchor="middle" class="t-mono" style="font-size:12px">x29 t4</text><rect x="192" width="88" height="26" rx="5" class="f-bad-soft"/><text x="236" y="17" text-anchor="middle" class="t-mono" style="font-size:12px">x30 t5</text><rect x="288" width="88" height="26" rx="5" class="f-bad-soft"/><text x="332" y="17" text-anchor="middle" class="t-mono" style="font-size:12px">x31 t6</text></g>
+          </g>
+          <!-- RV32E -->
+          <g transform="translate(460,40)">
+            <rect width="88" height="26" rx="5" class="f-surface"/><text x="44" y="17" text-anchor="middle" class="t-mono" style="font-size:12px">x0 zero</text>
+            <rect x="96" width="88" height="26" rx="5" class="f-accent-soft"/><text x="140" y="17" text-anchor="middle" class="t-mono" style="font-size:12px">x1 ra</text>
+            <rect x="192" width="88" height="26" rx="5" class="f-accent-soft"/><text x="236" y="17" text-anchor="middle" class="t-mono" style="font-size:12px">x2 sp</text>
+            <rect x="288" width="88" height="26" rx="5" class="f-accent-soft"/><text x="332" y="17" text-anchor="middle" class="t-mono" style="font-size:12px">x3 gp</text>
+            <g transform="translate(0,32)"><rect width="88" height="26" rx="5" class="f-accent-soft"/><text x="44" y="17" text-anchor="middle" class="t-mono" style="font-size:12px">x4 tp</text><rect x="96" width="88" height="26" rx="5" class="f-accent-soft"/><text x="140" y="17" text-anchor="middle" class="t-mono" style="font-size:12px">x5 t0</text><rect x="192" width="88" height="26" rx="5" class="f-accent-soft"/><text x="236" y="17" text-anchor="middle" class="t-mono" style="font-size:12px">x6 t1</text><rect x="288" width="88" height="26" rx="5" class="f-accent-soft"/><text x="332" y="17" text-anchor="middle" class="t-mono" style="font-size:12px">x7 t2</text></g>
+            <g transform="translate(0,64)"><rect width="88" height="26" rx="5" class="f-accent-soft"/><text x="44" y="17" text-anchor="middle" class="t-mono" style="font-size:12px">x8 s0</text><rect x="96" width="88" height="26" rx="5" class="f-accent-soft"/><text x="140" y="17" text-anchor="middle" class="t-mono" style="font-size:12px">x9 s1</text><rect x="192" width="88" height="26" rx="5" class="f-accent-soft"/><text x="236" y="17" text-anchor="middle" class="t-mono" style="font-size:12px">x10 a0</text><rect x="288" width="88" height="26" rx="5" class="f-accent-soft"/><text x="332" y="17" text-anchor="middle" class="t-mono" style="font-size:12px">x11 a1</text></g>
+            <g transform="translate(0,96)"><rect width="88" height="26" rx="5" class="f-accent-soft"/><text x="44" y="17" text-anchor="middle" class="t-mono" style="font-size:12px">x12 a2</text><rect x="96" width="88" height="26" rx="5" class="f-accent-soft"/><text x="140" y="17" text-anchor="middle" class="t-mono" style="font-size:12px">x13 a3</text><rect x="192" width="88" height="26" rx="5" class="f-accent-soft"/><text x="236" y="17" text-anchor="middle" class="t-mono" style="font-size:12px">x14 a4</text><rect x="288" width="88" height="26" rx="5" class="f-accent-soft"/><text x="332" y="17" text-anchor="middle" class="t-mono" style="font-size:12px">x15 a5</text></g>
+            <rect y="128" width="376" height="122" rx="8" fill="none" stroke="var(--text-faint)" stroke-dasharray="6 5"/>
+            <text x="188" y="178" text-anchor="middle" class="t-dim">x16–x31 없음</text>
+            <text x="188" y="200" text-anchor="middle" class="t-faint">이 레지스터를 가리키는 인코딩은 reserved</text>
+          </g>
+        </g>
+        <!-- 면적 막대 -->
+        <text x="20" y="320" class="t-dim">RV32I 코어</text>
+        <rect x="120" y="304" width="525" height="24" rx="5" class="f-accent-soft"/>
+        <text x="382" y="321" text-anchor="middle" class="t-accent" style="font-size:12px">나머지 코어 (메모리 제외)</text>
+        <rect x="645" y="304" width="175" height="24" rx="5" class="f-bad-soft"/>
+        <text x="732" y="321" text-anchor="middle" class="t-bad" style="font-size:12px">x16–x31 ≈ 1/4</text>
+        <text x="20" y="362" class="t-dim">RV32E 코어</text>
+        <rect x="120" y="346" width="525" height="24" rx="5" class="f-accent-soft"/>
+        <text x="382" y="363" text-anchor="middle" class="t-accent" style="font-size:12px">나머지 코어 (메모리 제외)</text>
+        <rect x="645" y="346" width="175" height="24" rx="5" fill="none" stroke="var(--ok)" stroke-dasharray="5 4"/>
+        <text x="732" y="363" text-anchor="middle" class="t-ok" style="font-size:12px">약 25% 절약</text>
+        <text x="20" y="392" class="t-faint">막대 비율은 규격 비고의 “약 4분의 1”을 그대로 옮긴 개념도다.</text>
+      </svg></div>
+      <figcaption><b>그림 6-6.</b> RV32I와 RV32E의 레지스터 파일. RV32E에서는 아래 16개(빨강)가 사라진다. 규격 비고에 따르면 작은 RV32I 코어에서 위쪽 16개 레지스터가 메모리를 뺀 코어 면적의 약 4분의 1을 차지하므로, 이를 없애면 코어 면적이 약 25% 줄고 전력도 그만큼 준다.</figcaption>
+    </figure>
+
+    <div class="callout spec"><strong>규격 원문에서</strong>
+      <blockquote>“We have found that in the small RV32I core implementations, the upper 16 registers consume around one quarter of the total area of the core excluding memories, thus their removal saves around 25% core area with a corresponding core power reduction.”</blockquote>
+      <p><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32e.html" target="_blank" rel="noopener">Volume I, RV32E and RV64E · Programmers’ Model</a> — RV64E는 큰 SoC 안의 마이크로컨트롤러나, 문맥 상태를 줄이고 싶은 다중 스레드 64비트 프로세서를 위해서도 관심을 받는다고 덧붙인다.</p></div>
+
+    <h3>ILP32E 호출 규약</h3>
+    <p>레지스터가 절반이니 함수 호출 약속도 달라진다. psABI의 <b>ILP32E</b> 규약은 일반 정수 호출 규약과 같되 다음이 다르다(<a href="abi.html">7장</a>).</p>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>항목</th><th>ILP32 (RV32I)</th><th>ILP32E (RV32E)</th></tr></thead>
+      <tbody>
+        <tr><td>인자 레지스터</td><td><code>a0</code>–<code>a7</code> (8개)</td><td><code>a0</code>–<code>a5</code> (6개)</td></tr>
+        <tr><td>피호출자 저장 레지스터</td><td><code>s0</code>–<code>s11</code> (12개)</td><td><code>s0</code>–<code>s1</code> (2개)</td></tr>
+        <tr><td>임시 레지스터</td><td><code>t0</code>–<code>t6</code> (7개)</td><td><code>t0</code>–<code>t2</code> (3개)</td></tr>
+        <tr><td>스택 포인터 정렬</td><td>16바이트</td><td>4바이트(32비트 경계)면 충분</td></tr>
+        <tr><td>D 확장과 함께</td><td>가능 (ILP32D)</td><td>쓸 수 없다</td></tr>
+      </tbody>
+    </table></div>
+    <div class="callout warn"><strong>시스템 호출 번호 레지스터 a7이 없다</strong><p>리눅스나 이 책의 에뮬레이터는 <code>a7</code>(x17)에 시스템 호출 번호를 넣는다. RV32E에는 x17이 없으므로 그런 약속은 그대로 쓸 수 없고, RV32E용 실행 환경은 x0–x15 안의 다른 레지스터를 쓰는 별도 약속을 정해야 한다. 또 psABI v1.0 문서는 ILP32E가 GCC의 현재 구현을 기록한 것이며 바뀔 수 있다고 적어 두었다.</p></div>
+
+    <div class="sim" id="rv32e-sim">
+      <div class="sim-head"><span class="sim-tag">EXPLORER</span><h3>RV32E 호환성 검사기</h3></div>
+      <div class="sim-pad">
+        <div class="rv32e-layout">
+          <div>
+            <p class="mini-heading">어셈블리 (riscv.js로 어셈블한 뒤 레지스터 필드를 검사한다)</p>
+            <textarea id="rv32e-source" spellcheck="false" aria-label="검사할 어셈블리 코드"></textarea>
+            <div class="check-list" id="rv32e-check-list"></div>
+          </div>
+          <div>
+            <p class="mini-heading">정수 레지스터 파일</p>
+            <div class="register-file-grid" id="rv32e-register-grid"></div>
+            <p class="mini-heading" style="margin-top:14px">코어 면적 (메모리 제외, 규격 비고의 어림값)</p>
+            <div class="area-bar" id="rv32e-area-bar"><span class="core-rest" style="flex-basis:75%">나머지 코어 ≈ 75%</span><span class="upper-registers" id="rv32e-area-upper" style="flex-basis:25%">x16–x31 ≈ 25%</span></div>
+            <p class="mini-heading">호출 규약</p>
+            <div class="operand-line" id="rv32e-abi-line"></div>
+          </div>
+        </div>
+      </div>
+      <div class="sim-controls">
+        <div class="control"><span>베이스 ISA</span>
+          <div class="segmented" id="rv32e-mode"><button data-value="i">RV32I (32개)</button><button data-value="e" class="on">RV32E (16개)</button></div>
+        </div>
+        <div class="control"><span>예제</span>
+          <div class="segmented" id="rv32e-example"><button data-value="mixed" class="on">x16 이상 섞임</button><button data-value="clean">RV32E용</button></div>
+        </div>
+        <div class="control"><span>검사</span><div class="button-row"><button class="button primary" id="rv32e-check-button">다시 검사</button></div></div>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">명령 수</span><span class="value" id="rv32e-readout-count">—</span></div>
+        <div class="stat"><span class="key">x16–x31 사용</span><span class="value" id="rv32e-readout-upper">—</span></div>
+        <div class="stat"><span class="key">판정</span><span class="value" id="rv32e-readout-verdict">—</span></div>
+      </div>
+      <div class="sim-note">“x16 이상 섞임” 예제에서 빨갛게 표시된 명령을 RV32E용으로 고쳐 보자. <code>a6</code>은 x16, <code>s2</code>는 x18, <code>t3</code>은 x28이다. 기계어의 rd·rs1·rs2 필드가 16 이상이면 그 인코딩은 RV32E에서 reserved다. 위쪽 단추로 RV32I로 바꾸면 같은 코드가 모두 통과한다.</div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="rv128">
+    <h2>RV128I는 어디로 갔나</h2>
+    <p>RISC-V는 처음부터 주소 공간이 64비트로도 모자랄 날을 대비했다. 2014년의 사용자 ISA 2.0 문서에 128비트 주소 공간 변형 RV128이 처음 서술되었고, 2017년 2.2판과 2019년 비준판(20191213)에도 <b>RV128I 1.7 (Draft)</b> 장이 있었다. 레지스터를 128비트로 넓히고, *W처럼 64비트 값을 다루는 *D 명령을 두는 식의 스케치였다. 하지만 이 장은 끝내 동결·비준되지 않았다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 40 860 190" role="img" aria-label="RV128I가 규격 문서에 등장했다가 빠지기까지의 연표">
+        <line x1="40" y1="110" x2="820" y2="110" stroke="var(--border)" stroke-width="4" stroke-linecap="round"/>
+        <line x1="40" y1="110" x2="820" y2="110" class="s-gold flow-dash" stroke-width="2"/>
+        <g transform="translate(80,110)"><circle r="9" class="f-accent"/><text y="-48" text-anchor="middle" class="t-accent">2014</text><text y="-28" text-anchor="middle" class="t-dim">사용자 ISA 2.0</text><text y="-12" text-anchor="middle" class="t-faint">RV128 첫 서술</text></g>
+        <g transform="translate(250,110)"><circle r="9" class="f-gold"/><text y="34" text-anchor="middle" class="t-gold">2017 · v2.2</text><text y="54" text-anchor="middle" class="t-dim">RV128I 1.7</text><text y="70" text-anchor="middle" class="t-faint">동결 안 됨</text></g>
+        <g transform="translate(420,110)"><circle r="9" class="f-accent"/><text y="-48" text-anchor="middle" class="t-accent">2019 · 20191213</text><text y="-28" text-anchor="middle" class="t-dim">베이스 비준판</text><text y="-12" text-anchor="middle" class="t-faint">RV128I 1.7 Draft</text></g>
+        <g transform="translate(590,110)"><circle r="9" class="f-gold"/><text y="34" text-anchor="middle" class="t-gold">20240411</text><text y="54" text-anchor="middle" class="t-dim">비준 안 된 내용 정리</text><text y="70" text-anchor="middle" class="t-faint">RV128I 스케치 삭제</text></g>
+        <g transform="translate(770,110)"><circle r="11" class="f-gold pulse"/><text y="-48" text-anchor="middle" class="t-accent">v20260120</text><text y="-28" text-anchor="middle" class="t-dim">베이스 ISA 4개</text><text y="-12" text-anchor="middle" class="t-faint">RV32I·RV64I·RV32E·RV64E</text></g>
+        <text x="430" y="214" text-anchor="middle" class="t-faint">지금 규격에서 RV128I는 서론의 “언젠가 필요할 수 있다”는 한 문장으로만 남아 있다</text>
+      </svg></div>
+      <figcaption><b>그림 6-7.</b> RV128I의 행적. 문서 버전 20240411의 머리말은 바뀐 점으로 “비준되지 않은 내용의 삭제, RV128I 베이스 ISA 스케치 포함”을 든다. 그래서 v20260120 비특권 규격의 목차에는 RV32I(1장)·RV32E/RV64E(2장)·RV64I(3장)만 베이스 ISA로 남아 있다.</figcaption>
+    </figure>
+
+    <p>그렇다고 128비트의 문이 닫힌 것은 아니다. v20260120의 서론은 지금도 “RISC-V에는 현재 네 개의 베이스 ISA가 있다”고 말하면서, 다음과 같이 여지를 남긴다.</p>
+    <div class="callout spec"><strong>규격 원문에서</strong>
+      <blockquote>“A larger flat 128-bit address space might eventually be required and could be accommodated with a new RV128I base ISA within the existing RISC-V ISA framework.”</blockquote>
+      <p><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/intro.html" target="_blank" rel="noopener">Volume I, Introduction · RISC-V ISA Overview</a></p></div>
+    <p>흔적은 다른 곳에도 있다. 특권 규격의 <code>misa.MXL</code> 필드는 1이면 XLEN=32, 2이면 64를 뜻하고, 예전에 128을 뜻하던 <b>3은 지금 Reserved</b>로 비어 있다. 또 예전 판 opcode 지도에서 <code>custom-2</code>·<code>custom-3</code> 칸에는 “rv128”이라는 꼬리표가 붙어 있었지만(RV128이 쓸 수도 있다는 뜻), 지금 지도(그림 6-2)에는 없다.</p>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="compatibility">
+    <h2>RV64 하트에서 RV32 코드 돌리기</h2>
+    <p>앞에서 본 대로 RV32I는 RV64I의 부분집합이 아니다. <code>add</code> 하나도 두 베이스에서 결과의 폭이 다르다. 그래서 RV64 하트가 RV32 프로그램을 돌리려면 하드웨어가 “이 모드에서는 XLEN이 32다”라고 알아야 한다. 특권 규격은 이것을 <code>mstatus</code> CSR의 두 필드로 제공한다(<a href="privilege.html">17장</a>).</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 300" role="img" aria-label="mstatus의 UXL과 SXL 필드, 그리고 모드별 XLEN">
+        <defs><marker id="r6-mode-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker></defs>
+        <text x="20" y="24" class="t t-bold">mstatus (RV64) 위쪽 일부</text>
+        <text x="40" y="48" class="t-faint">63</text><text x="370" y="48" class="t-faint">35</text><text x="438" y="48" class="t-faint">34</text><text x="472" y="48" class="t-faint">33</text><text x="540" y="48" class="t-faint">32</text><text x="560" y="48" class="t-faint">31</text><text x="836" y="48" text-anchor="end" class="t-faint">0</text>
+        <rect x="40" y="56" width="50" height="42" rx="5" class="f-surface"/><text x="65" y="82" text-anchor="middle" class="t-mono">SD</text>
+        <rect x="90" y="56" width="280" height="42" rx="5" class="f-surface"/><text x="230" y="82" text-anchor="middle" class="t-dim">62:36 (MPV·GVA·MBE·SBE 등)</text>
+        <rect x="370" y="56" width="100" height="42" rx="5" class="f-violet-soft"/><text x="420" y="82" text-anchor="middle" class="t-mono t-bold">SXL[1:0]</text>
+        <rect x="470" y="56" width="86" height="42" rx="5" class="f-gold-soft blink-highlight"/><text x="513" y="82" text-anchor="middle" class="t-mono t-bold">UXL[1:0]</text>
+        <rect x="556" y="56" width="280" height="42" rx="5" class="f-surface"/><text x="696" y="82" text-anchor="middle" class="t-dim">31:0 (MIE·SIE·MPP·…)</text>
+
+        <!-- 모드 -->
+        <g transform="translate(40,140)">
+          <rect width="180" height="64" rx="10" class="f-accent-soft"/><text x="90" y="26" text-anchor="middle" class="t t-bold">M 모드</text><text x="90" y="48" text-anchor="middle" class="t-mono">MXLEN = 64</text>
+        </g>
+        <path d="M222 172 H268" class="s-accent" marker-end="url(#r6-mode-arrow)"/>
+        <g transform="translate(272,140)">
+          <rect width="180" height="64" rx="10" class="f-violet-soft"/><text x="90" y="26" text-anchor="middle" class="t t-bold">S 모드 (커널)</text><text x="90" y="48" text-anchor="middle" class="t-mono">SXL=2 → 64</text>
+        </g>
+        <path d="M454 172 H500" class="s-accent flow-dash" marker-end="url(#r6-mode-arrow)"/>
+        <g transform="translate(504,140)">
+          <rect width="180" height="64" rx="10" class="f-gold-soft"/><text x="90" y="26" text-anchor="middle" class="t t-bold">U 모드 (옛 앱)</text><text x="90" y="48" text-anchor="middle" class="t-mono">UXL=1 → 32</text>
+        </g>
+        <!-- MXL 인코딩 표 -->
+        <g transform="translate(712,128)">
+          <rect width="128" height="96" rx="8" class="f-elev"/>
+          <text x="64" y="20" text-anchor="middle" class="t-faint">값 → XLEN</text>
+          <text x="20" y="44" class="t-mono">1 → 32</text>
+          <text x="20" y="64" class="t-mono">2 → 64</text>
+          <text x="20" y="84" class="t-mono">3 → 예약</text>
+        </g>
+        <text x="40" y="244" class="t-dim">UXL·SXL은 misa.MXL과 같은 인코딩을 쓰는 WARL 필드다. 구현은 이 필드를 읽기 전용으로 만들어</text>
+        <text x="40" y="264" class="t-dim">“항상 64”로 고정해도 된다 — 즉 RV32 사용자 프로그램 지원은 선택 사항이다.</text>
+        <text x="40" y="288" class="t-faint">MXLEN=32인 하트에는 이 필드가 없다(SXLEN = UXLEN = 32).</text>
+      </svg></div>
+      <figcaption><b>그림 6-8.</b> RV64 하트의 모드별 XLEN. <code>mstatus</code>의 SXL(bit 35:34)과 UXL(bit 33:32)이 S 모드와 U 모드의 XLEN을 정한다. 예를 들어 64비트 커널(SXL=2) 위에서 옛 32비트 앱을 돌리려면 UXL=1로 둔다. 다만 규격은 UXLEN이 SXLEN보다 커지는 값은 허용하지 않는다.</figcaption>
+    </figure>
+
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>상황</th><th>규격의 규칙 (특권 규격 · Base ISA Control in mstatus)</th></tr></thead>
+      <tbody>
+        <tr><td>MXLEN = 32</td><td>SXL·UXL 필드가 없다. SXLEN = UXLEN = 32.</td></tr>
+        <tr><td>MXLEN = 64, S 모드 없음</td><td>SXL은 읽기 전용 0.</td></tr>
+        <tr><td>MXLEN = 64, S 모드 있음</td><td>SXL은 SXLEN을 담는 WARL 필드. SXLEN = MXLEN으로 고정해도 된다.</td></tr>
+        <tr><td>MXLEN = 64, U 모드 있음</td><td>UXL은 UXLEN을 담는 WARL 필드. UXLEN = MXLEN 또는 SXLEN으로 고정해도 되고, UXLEN &gt; SXLEN 이 되는 값은 쓸 수 없다.</td></tr>
+      </tbody>
+    </table></div>
+    <div class="callout deep"><strong>왜 ADD가 아니라 ADDW인가</strong><p>규격 서론에는 “RV32I의 ADD와 RV64I의 ADDW를 같은 인코딩으로 했으면 어땠을까”라는 질문도 나온다. 그렇게 하면 32비트 덧셈이 두 베이스에서 같은 기계어가 되어 더 일관되었을 것이다. 초기 RISC-V에는 실제로 그런 설계가 있었지만 2011년 1월에 지금 방식으로 바뀌었다. 규격은 돌이켜 보면 근거가 충분하지 않았을 수 있다고 인정하면서도, 위에서 본 이유(어차피 모드 전환이 필요하고, 호출 규약과 시스템 호출이 달라 32비트 라이브러리를 64비트 코드에 섞어 쓰기는 비현실적)로 실질적인 손해는 적다고 정리한다.</p></div>
+  </section>
+
+  <section class="keypoints" id="summary">
+    <h2>핵심 정리</h2>
+    <ol>
+      <li><b>RV64I</b>는 x1–x31, pc, 사용자 주소 공간을 64비트로 넓힌다. 명령어 길이와 형식은 그대로이며, <code>add</code> 같은 기존 명령은 64비트 연산이 된다.</li>
+      <li>새 명령은 12개다: <code>ld</code>·<code>sd</code>·<code>lwu</code>와 *W 명령 9개(<code>addiw slliw srliw sraiw addw subw sllw srlw sraw</code>). *W는 입력의 위쪽 32비트를 무시하고 32비트 결과를 부호 확장한다.</li>
+      <li>32비트 값은 <b>부호 없는 값까지 부호 확장된 꼴</b>로 보관한다. 그래서 부호 변환이 공짜이고, 64비트 비교·분기·논리 연산이 32비트 값에도 그대로 맞는다.</li>
+      <li>즉시값 시프트의 shamt는 6비트가 되어 inst[25]가 shamt[5]로 쓰인다. <code>slliw</code>·<code>srliw</code>·<code>sraiw</code>에서 imm[5] ≠ 0은 reserved다.</li>
+      <li><code>lui</code>·<code>auipc</code>는 32비트 결과를 부호 확장한다. 64비트 상수 <code>li</code>는 재귀적 전개로 최대 8개 명령이 된다.</li>
+      <li><b>RV32E/RV64E</b>는 레지스터를 16개로 줄인 비준 베이스 ISA(2.0)다. 작은 코어에서 면적을 약 25% 줄이며, x16–x31 인코딩은 reserved다.</li>
+      <li><b>RV128I</b> 스케치는 20240411판에서 삭제되었고, v20260120에는 서론의 한 문장과 <code>misa.MXL</code>의 예약값 3만 남아 있다. RV64 하트는 <code>mstatus.UXL/SXL</code>로 낮은 모드의 XLEN을 32로 바꿀 수 있다(선택 사항).</li>
+    </ol>
+  </section>
+
+  <section id="quiz">
+    <h2>확인 퀴즈</h2>
+    <div class="quiz">
+      <div class="quiz-question"><p>RV64I에서 a1 = 0x00000000_7FFFFFFF, a2 = 1일 때 <code>addw a0, a1, a2</code>의 결과는?</p><div class="options">
+        <button class="option">0x00000000_80000000</button>
+        <button class="option" data-correct>0xFFFFFFFF_80000000</button>
+        <button class="option">0x00000001_00000000</button>
+        <button class="option">오버플로 예외가 발생한다</button>
+      </div><div class="quiz-explanation">32비트 결과 0x80000000의 bit 31이 1이므로 위쪽 32비트가 모두 1로 부호 확장된다. RISC-V는 오버플로로 예외를 내지 않는다. 같은 입력의 <code>add</code>는 0x00000000_80000000이므로 두 결과를 비교하면 32비트 오버플로를 알 수 있다.</div></div>
+      <div class="quiz-question"><p>RV64에서 32비트 <b>부호 없는</b> 값도 부호 확장해 보관하는 가장 큰 이점은?</p><div class="options">
+        <button class="option">메모리를 덜 쓴다</button>
+        <button class="option" data-correct>부호 변환이 필요 없고, 64비트 sltu·부호 없는 분기가 그대로 맞는 결과를 낸다</button>
+        <button class="option">곱셈이 빨라진다</button>
+        <button class="option">lwu 명령이 필요 없어진다</button>
+      </div><div class="quiz-explanation">부호 확장은 부호 없는 32비트 값의 크기 순서를 64비트에서도 보존한다(그림 6-3). 그래서 *W 판이 필요한 것은 덧셈·뺄셈·시프트뿐이다.</div></div>
+      <div class="quiz-question"><p>RV64I의 <code>slli</code>에서 inst[25]의 역할은?</p><div class="options">
+        <button class="option">funct7의 일부로 항상 0</button>
+        <button class="option" data-correct>shamt[5] — 32 이상 시프트할 때 1</button>
+        <button class="option">산술/논리 시프트 선택 비트</button>
+        <button class="option">rs1의 최상위 비트</button>
+      </div><div class="quiz-explanation">RV64I는 shamt가 6비트라 funct7의 맨 아래 비트를 빌려 쓴다. 산술 시프트 선택은 bit 30이다.</div></div>
+      <div class="quiz-question"><p>RV64I에서 <code>lui a0, 0x80000</code>을 실행한 뒤 a0의 값은?</p><div class="options">
+        <button class="option">0x00000000_80000000</button>
+        <button class="option">0x80000000_00000000</button>
+        <button class="option" data-correct>0xFFFFFFFF_80000000</button>
+        <button class="option">0x00000000_00080000</button>
+      </div><div class="quiz-explanation"><code>lui</code>는 32비트 결과 0x80000000을 64비트로 부호 확장한다. 그래서 양수 0x80000000을 만들려면 다른 방법(예: <code>addi 1</code> + <code>slli 31</code>)이 필요하다.</div></div>
+      <div class="quiz-question"><p>RV32E 하트에서 <code>add x16, x1, x2</code>의 인코딩은 규격상 어떤 상태인가?</p><div class="options">
+        <button class="option">x0에 쓰는 것으로 처리된다</button>
+        <button class="option">사용자 정의(custom) 인코딩이다</button>
+        <button class="option" data-correct>reserved 인코딩이다</button>
+        <button class="option">x0–x15 중 하나로 접어서 실행된다</button>
+      </div><div class="quiz-explanation">RV32E/RV64E는 x16–x31을 가리키는 모든 인코딩을 reserved로 둔다. 예전 초안은 이를 custom으로 열어 두었지만, 지금 판은 나중에 custom이나 새 표준에 배정할 수 있도록 더 보수적으로 reserved로 정했다.</div></div>
+      <div class="quiz-question"><p>v20260120 규격에서 RV128I의 상태로 옳은 것은?</p><div class="options">
+        <button class="option">버전 1.7로 비준되었다</button>
+        <button class="option">동결(Frozen) 상태로 비준을 기다린다</button>
+        <button class="option" data-correct>장 자체가 빠졌고, 서론에서 미래의 가능성으로만 언급된다</button>
+        <button class="option">RV64I 장의 부록으로 옮겨졌다</button>
+      </div><div class="quiz-explanation">20240411판에서 비준되지 않은 RV128I 스케치가 삭제되었다. 지금은 “새 RV128I 베이스 ISA로 수용할 수 있을 것”이라는 서론의 문장만 남아 있고, <code>misa.MXL</code>의 값 3도 Reserved다.</div></div>
+      <div class="quiz-question"><p>64비트 리눅스 커널(S 모드) 위에서 32비트 RISC-V 사용자 프로그램을 돌리려면 무엇을 바꿔야 하나?</p><div class="options">
+        <button class="option">misa.MXL을 1로 쓴다</button>
+        <button class="option" data-correct>mstatus(sstatus)의 UXL을 1(XLEN=32)로 둔다 — 하드웨어가 그 값을 지원할 때</button>
+        <button class="option">아무것도 필요 없다. RV32I는 RV64I의 부분집합이다</button>
+        <button class="option">모든 명령을 *W 판으로 바꿔 다시 어셈블한다</button>
+      </div><div class="quiz-explanation">UXL은 WARL 필드라서 구현이 64로 고정해 둘 수도 있다. 그 경우 RV32 사용자 프로그램은 돌릴 수 없다. <code>misa.MXL</code>은 읽기 전용이다.</div></div>
+      <div class="quiz-question"><p>이 장의 재귀적 <code>li</code> 전개에서 임의의 64비트 상수에 필요한 명령 수의 최댓값은?</p><div class="options">
+        <button class="option">2</button>
+        <button class="option">4</button>
+        <button class="option">6</button>
+        <button class="option" data-correct>8</button>
+      </div><div class="quiz-explanation"><code>lui</code>+<code>addiw</code> 두 개에서 시작해 재귀할 때마다 <code>slli</code>+<code>addi</code>가 붙는다. 0x123456789abcdef0 같은 값은 8개 명령이 된다.</div></div>
+    </div>
+  </section>
+
+  <section id="references">
+    <h2>더 읽을거리</h2>
+    <ul class="references">
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/rv64.html" target="_blank" rel="noopener">The RISC-V Instruction Set Manual, Volume I — RV64I Base Integer Instruction Set, Version 2.1</a> (v20260120)</li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32e.html" target="_blank" rel="noopener">Volume I — RV32E and RV64E Base Integer Instruction Sets, Version 2.0</a></li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/intro.html" target="_blank" rel="noopener">Volume I — Introduction (베이스 ISA 네 개, RV128I 언급, ADD/ADDW 설계 이유)</a></li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/colophon.html" target="_blank" rel="noopener">Volume I — Preface (RV128I 스케치 삭제 기록)</a></li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/rv-32-64g.html" target="_blank" rel="noopener">Volume I — RV32/64G Instruction Set Listings (opcode 지도)</a></li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/priv/machine.html" target="_blank" rel="noopener">Volume II — Machine-Level ISA: misa.MXL, mstatus SXL/UXL</a></li>
+      <li><a href="https://docs.riscv.org/reference/abi/v1.0/riscv-cc-procedure-calling-convention.html" target="_blank" rel="noopener">RISC-V psABI v1.0 — Procedure Calling Convention (ILP32E)</a></li>
+      <li>LLVM 프로젝트 <code>RISCVMatInt.cpp</code> — 이 장의 64비트 상수 전개가 본뜬 상수 생성 알고리즘</li>
+    </ul>
+  </section>
+</main>
+
+<script>
+/* ---------------------------------------------------------------------------
+   공통: 64비트 값을 BigInt 로 다루는 작은 도우미.
+   riscv.js 는 32비트 전용이라 이 장의 64비트 계산은 모두 여기서 한다.
+--------------------------------------------------------------------------- */
+window.SixtyFourBit = (function () {
+  "use strict";
+  const REGISTER_WIDTH = 64;
+  const WORD_WIDTH = 32;
+  const BIGINT_REGISTER_WIDTH = BigInt(REGISTER_WIDTH);
+  const UNSIGNED_MAXIMUM = (1n << BIGINT_REGISTER_WIDTH) - 1n;
+  const SIGNED_MINIMUM = -(1n << (BIGINT_REGISTER_WIDTH - 1n));
+  const HEX_DIGITS_PER_HALF = 8;
+
+  const toUnsigned = (value) => BigInt.asUintN(REGISTER_WIDTH, value);
+  const toSigned = (value) => BigInt.asIntN(REGISTER_WIDTH, value);
+  // 32비트 결과를 64비트로 부호 확장한 뒤 부호 없는 64비트 모양으로 돌려준다
+  const signExtendWord = (value) => toUnsigned(BigInt.asIntN(WORD_WIDTH, value));
+
+  /** "0x…", "0b…", 10진수(음수 포함)를 받아 부호 없는 64비트 BigInt 로. 범위를 넘으면 null */
+  function parse(text) {
+    const cleaned = String(text).trim().replace(/[_\s]/g, "").toLowerCase();
+    if (!/^-?(0x[0-9a-f]+|0b[01]+|[0-9]+)$/.test(cleaned)) return null;
+    const isNegative = cleaned.startsWith("-");
+    const body = isNegative ? cleaned.slice(1) : cleaned;
+    let magnitude;
+    try { magnitude = BigInt(body); } catch (error) { return null; }
+    const value = isNegative ? -magnitude : magnitude;
+    if (value > UNSIGNED_MAXIMUM || value < SIGNED_MINIMUM) return null;
+    return toUnsigned(value);
+  }
+
+  /** 0xFFFFFFFF_80000000 처럼 위·아래 절반을 밑줄로 나눈 16진수 */
+  function formatHex(value) {
+    const digits = toUnsigned(value).toString(16).toUpperCase().padStart(HEX_DIGITS_PER_HALF * 2, "0");
+    return "0x" + digits.slice(0, HEX_DIGITS_PER_HALF) + "_" + digits.slice(HEX_DIGITS_PER_HALF);
+  }
+
+  const bitAt = (value, position) => Number((toUnsigned(value) >> BigInt(position)) & 1n);
+
+  return { REGISTER_WIDTH, WORD_WIDTH, toUnsigned, toSigned, signExtendWord, parse, formatHex, bitAt };
+})();
+
+/* ---------------------------------------------------------------------------
+   add vs addw 부호 확장 탐색기 (시뮬레이터)
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const bits = window.SixtyFourBit;
+  const SIX_BIT_SHIFT_MASK = 63n;
+  const FIVE_BIT_SHIFT_MASK = 31n;
+  const WORD_MASK = 0xffffffffn;
+  const HALF_WIDTH = 32;
+
+  // 64비트 판과 W 판의 정의. W 판은 입력의 아래 32비트만 보고 결과를 부호 확장한다.
+  const OPERATIONS = {
+    add: {
+      symbol: "+",
+      full: (first, second) => bits.toUnsigned(first + second),
+      word: (first, second) => bits.signExtendWord((first & WORD_MASK) + (second & WORD_MASK)),
+    },
+    sub: {
+      symbol: "−",
+      full: (first, second) => bits.toUnsigned(first - second),
+      word: (first, second) => bits.signExtendWord((first & WORD_MASK) - (second & WORD_MASK)),
+    },
+    sll: {
+      symbol: "<<",
+      full: (first, second) => bits.toUnsigned(first << (second & SIX_BIT_SHIFT_MASK)),
+      word: (first, second) => bits.signExtendWord((first & WORD_MASK) << (second & FIVE_BIT_SHIFT_MASK)),
+    },
+    srl: {
+      symbol: ">>u",
+      full: (first, second) => bits.toUnsigned(first >> (second & SIX_BIT_SHIFT_MASK)),
+      word: (first, second) => bits.signExtendWord((first & WORD_MASK) >> (second & FIVE_BIT_SHIFT_MASK)),
+    },
+    sra: {
+      symbol: ">>s",
+      full: (first, second) => bits.toUnsigned(bits.toSigned(first) >> (second & SIX_BIT_SHIFT_MASK)),
+      word: (first, second) => bits.signExtendWord(BigInt.asIntN(HALF_WIDTH, first & WORD_MASK) >> (second & FIVE_BIT_SHIFT_MASK)),
+    },
+  };
+
+  const firstInput = document.getElementById("sign-first-input");
+  const secondInput = document.getElementById("sign-second-input");
+  const description = document.getElementById("sign-description");
+  let currentOperation = "add";
+
+  function buildStrip(container) {
+    const cells = [];
+    for (let index = 0; index < HALF_WIDTH; index += 1) {
+      const cell = document.createElement("span");
+      container.appendChild(cell);
+      cells.push(cell);
+    }
+    return cells;
+  }
+  const strips = {
+    normalUpper: buildStrip(document.getElementById("sign-normal-upper")),
+    normalLower: buildStrip(document.getElementById("sign-normal-lower")),
+    wordUpper: buildStrip(document.getElementById("sign-word-upper")),
+    wordLower: buildStrip(document.getElementById("sign-word-lower")),
+  };
+
+  /** 32칸짜리 띠에 value 의 [highBit … highBit-31] 비트를 칠한다 */
+  function paintStrip(cells, value, highBit, options) {
+    cells.forEach((cell, index) => {
+      const position = highBit - index;
+      const bit = bits.bitAt(value, position);
+      cell.textContent = String(bit);
+      cell.classList.toggle("one", bit === 1);
+      cell.classList.toggle("extended", Boolean(options.isExtended));
+      const isDifferent = options.compareWith !== undefined && bits.bitAt(options.compareWith, position) !== bit;
+      cell.classList.toggle("differs", isDifferent);
+    });
+  }
+
+  function describeValue(value) {
+    return "부호 있음 " + bits.toSigned(value).toString() + " · 부호 없음 " + value.toString();
+  }
+
+  function render() {
+    const first = bits.parse(firstInput.value);
+    const second = bits.parse(secondInput.value);
+    firstInput.style.borderColor = first === null ? "var(--bad)" : "";
+    secondInput.style.borderColor = second === null ? "var(--bad)" : "";
+    if (first === null || second === null) {
+      description.innerHTML = "⚠️ 입력을 읽을 수 없다. <code>0x</code>로 시작하는 16진수(최대 16자리)나 10진수를 넣자.";
+      return;
+    }
+    const operation = OPERATIONS[currentOperation];
+    const fullResult = operation.full(first, second);
+    const wordResult = operation.word(first, second);
+    const wordName = currentOperation + "w";
+
+    document.getElementById("sign-normal-title").textContent = currentOperation + " (64비트)";
+    document.getElementById("sign-word-title").textContent = wordName + " (32비트 → 부호 확장)";
+    document.getElementById("sign-normal-hex").textContent = bits.formatHex(fullResult);
+    document.getElementById("sign-word-hex").textContent = bits.formatHex(wordResult);
+    document.getElementById("sign-normal-decimal").textContent = describeValue(fullResult);
+    document.getElementById("sign-word-decimal").textContent = describeValue(wordResult);
+    paintStrip(strips.normalUpper, fullResult, 63, { compareWith: wordResult });
+    paintStrip(strips.normalLower, fullResult, 31, { compareWith: wordResult });
+    paintStrip(strips.wordUpper, wordResult, 63, { isExtended: true });
+    paintStrip(strips.wordLower, wordResult, 31, {});
+
+    document.getElementById("sign-operands").innerHTML =
+      "rs1 = <b>" + bits.formatHex(first) + "</b> · rs2 = <b>" + bits.formatHex(second) + "</b> · 연산 rs1 " + operation.symbol + " rs2";
+
+    const isSame = fullResult === wordResult;
+    const isFirstCanonical = bits.signExtendWord(first) === first;
+    const isSecondCanonical = bits.signExtendWord(second) === second;
+    const isCanonical = isFirstCanonical && isSecondCanonical;
+    document.getElementById("sign-readout-same").textContent = isSame ? "같다" : "다르다";
+    document.getElementById("sign-readout-canonical").textContent = isCanonical ? "예" : "아니오";
+    const overflowReadout = document.getElementById("sign-readout-overflow");
+    const isArithmetic = currentOperation === "add" || currentOperation === "sub";
+    if (!isArithmetic) overflowReadout.textContent = "해당 없음";
+    else if (!isCanonical) overflowReadout.textContent = "판정 불가";
+    else overflowReadout.textContent = isSame ? "없음" : "발생!";
+
+    // 왜 두 결과가 다른지 한두 문장으로 풀어 준다
+    let text;
+    if (!isCanonical) {
+      text = "입력 중 하나가 부호 확장된 32비트 꼴이 아니다(위쪽 32비트가 bit 31의 복사본이 아님). <code>" + wordName + "</code>은 위쪽을 아예 보지 않으므로 아래 32비트만으로 계산한다.";
+    } else if (isSame) {
+      text = "두 결과가 같다. 32비트 결과가 그대로 부호 확장된 꼴이라 64비트 판을 써도 정규형이 유지된다.";
+    } else if (isArithmetic) {
+      text = "결과가 다르다. 32비트 범위를 넘쳤기 때문이다. 64비트 <code>" + currentOperation + "</code>의 결과는 더 이상 “부호 확장된 32비트 값”이 아니므로(빨간 테두리), C의 <code>int</code> 연산이라면 <code>" + wordName + "</code>을 써야 한다. 둘이 다르다는 사실 자체가 오버플로 신호다.";
+    } else {
+      text = "결과가 다르다. 64비트 시프트는 위쪽 32비트와 비트를 주고받지만, <code>" + wordName + "</code>은 아래 32비트 안에서만 시프트한 뒤 bit 31을 위로 복사한다. 시프트 양도 <code>" + wordName + "</code>은 rs2[4:0]만, 64비트 판은 rs2[5:0]을 본다.";
+    }
+    description.innerHTML = text;
+  }
+
+  const operationControl = book.segmented("sign-operation", (value) => { currentOperation = value; render(); });
+  firstInput.addEventListener("input", render);
+  secondInput.addEventListener("input", render);
+  document.querySelectorAll("#sign-presets button").forEach((button) => {
+    button.addEventListener("click", () => {
+      firstInput.value = button.dataset.first;
+      secondInput.value = button.dataset.second;
+      operationControl.set(button.dataset.operation);
+    });
+  });
+  render();
+})();
+
+/* ---------------------------------------------------------------------------
+   64비트 상수 빌더: li 전개를 만들고, 한 명령씩 a0 이 쌓여 가는 모습을 그린다.
+   알고리즘은 LLVM RISCVMatInt 를 단순화한 재귀 방식이다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const bits = window.SixtyFourBit;
+  const UPPER_IMMEDIATE_MASK = 0xfffffn;
+  // lui 값을 반올림하기 위한 0x800: 아래 12비트가 음수로 부호 확장되는 만큼 위쪽에 1을 미리 더한다
+  const LOWER_IMMEDIATE_ROUNDING = 0x800n;
+  const LOWER_IMMEDIATE_WIDTH = 12;
+  const UPPER_SHIFT = 12n;
+  const PLAY_INTERVAL_MILLISECONDS = 1100;
+  const FLASH_SECONDS = 0.9;
+  const RANDOM_CHUNK_COUNT = 4;
+  const RANDOM_CHUNK_SIZE = 65536;
+  const BITS_PER_ROW = 32;
+
+  const signExtend12 = (value) => BigInt.asIntN(LOWER_IMMEDIATE_WIDTH, value);
+  const fitsSigned32 = (value) => value === BigInt.asIntN(32, value);
+  const fitsSigned12 = (value) => value === signExtend12(value);
+  function countTrailingZeros(value) {
+    let count = 0n;
+    let remaining = BigInt.asUintN(64, value);
+    while (remaining !== 0n && (remaining & 1n) === 0n) {
+      remaining >>= 1n;
+      count += 1n;
+    }
+    return count;
+  }
+
+  /** 부호 있는 64비트 값을 만드는 명령 열을 돌려준다. 각 항목: { name, immediate, isFromZero } */
+  function expandConstant(signedValue) {
+    if (fitsSigned32(signedValue)) {
+      const upper = ((signedValue + LOWER_IMMEDIATE_ROUNDING) >> UPPER_SHIFT) & UPPER_IMMEDIATE_MASK;
+      const lower = signExtend12(signedValue);
+      const sequence = [];
+      if (upper !== 0n) sequence.push({ name: "lui", immediate: upper });
+      // lui 뒤에는 32비트에서 넘쳐도 바르게 돌아오도록 addiw 를, 단독일 때는 addi(= li 작은 값)를 쓴다
+      if (lower !== 0n || upper === 0n) {
+        const isFromZero = upper === 0n;
+        sequence.push({ name: isFromZero ? "addi" : "addiw", immediate: lower, isFromZero });
+      }
+      return sequence;
+    }
+    const lower = signExtend12(signedValue);
+    let remainder = bits.toSigned(signedValue - lower);
+    let shiftAmount = countTrailingZeros(remainder);
+    remainder = remainder >> shiftAmount;
+    // 남은 값이 12비트에 안 들어가면, 12칸 덜 밀어 lui 가 아래 12비트 0을 채우게 하는 편이 짧다
+    if (shiftAmount > UPPER_SHIFT && !fitsSigned12(remainder) && fitsSigned32(bits.toSigned(remainder << UPPER_SHIFT))) {
+      shiftAmount -= UPPER_SHIFT;
+      remainder = bits.toSigned(remainder << UPPER_SHIFT);
+    }
+    const sequence = expandConstant(remainder);
+    sequence.push({ name: "slli", immediate: shiftAmount });
+    if (lower !== 0n) sequence.push({ name: "addi", immediate: lower, isFromZero: false });
+    return sequence;
+  }
+
+  /** 명령 하나를 64비트 레지스터 값에 적용한다 (RV64I 의미) */
+  function applyStep(register, step) {
+    if (step.name === "lui") return bits.signExtendWord(step.immediate << UPPER_SHIFT);
+    if (step.name === "addiw") return bits.signExtendWord(register + step.immediate);
+    if (step.name === "slli") return bits.toUnsigned(register << step.immediate);
+    const base = step.isFromZero ? 0n : register;
+    return bits.toUnsigned(base + step.immediate);
+  }
+
+  function stepText(step) {
+    if (step.name === "lui") return "lui   a0, 0x" + step.immediate.toString(16);
+    if (step.name === "slli") return "slli  a0, a0, " + step.immediate;
+    if (step.isFromZero) return "addi  a0, zero, " + step.immediate;
+    return (step.name + "  ").slice(0, 5) + " a0, a0, " + step.immediate;
+  }
+
+  function stepExplanation(step) {
+    if (step.name === "lui") return "<code>lui</code>가 20비트 즉시값을 bit 31:12에 놓고, 32비트 결과를 64비트로 부호 확장한다.";
+    if (step.name === "addiw") return "<code>addiw</code>는 32비트로 더한 뒤 다시 부호 확장한다. <code>lui</code>가 반올림으로 음수가 되었어도 32비트 덧셈이 넘쳐 원하는 값으로 돌아온다.";
+    if (step.name === "slli") return "<code>slli</code>로 지금까지 만든 값을 " + step.immediate + "칸 왼쪽으로 민다. 아래쪽에 0이 채워진다.";
+    if (step.isFromZero) return "작은 값이라 <code>addi a0, zero, imm</code> 하나로 시작한다(이것이 <code>li</code>의 가장 짧은 꼴).";
+    return "<code>addi</code>로 아래 12비트 조각(부호 있는 " + step.immediate + ")을 더한다. 음수면 위쪽에서 1을 빌려 가므로, 앞 단계가 그만큼 큰 값을 만들어 두었다.";
+  }
+
+  const input = document.getElementById("constant-input");
+  const sequenceList = document.getElementById("constant-sequence");
+  const description = document.getElementById("constant-description");
+  const playButton = document.getElementById("constant-play-button");
+  const canvasElement = document.getElementById("constant-canvas");
+  document.getElementById("constant-example-code").innerHTML = window.Riscv.highlightAssembly(
+    expandConstant(0x123456789abcdef0n).map((step) => "        " + stepText(step)).join("\n"));
+
+  const state = {
+    target: 0n,
+    sequence: [],
+    executedCount: 0,
+    register: 0n,
+    previousRegister: 0n,
+    flashRemaining: 0,
+    hasError: false,
+  };
+  let playTimer = null;
+
+  function load() {
+    const parsed = bits.parse(input.value);
+    stopPlaying();
+    state.hasError = parsed === null;
+    input.style.borderColor = state.hasError ? "var(--bad)" : "";
+    if (state.hasError) {
+      description.innerHTML = "⚠️ 64비트 범위의 16진수(0x…) 또는 10진수를 넣자.";
+      return;
+    }
+    state.target = parsed;
+    state.sequence = expandConstant(bits.toSigned(parsed));
+    state.executedCount = 0;
+    state.register = 0n;
+    state.previousRegister = 0n;
+    state.flashRemaining = 0;
+    sequenceList.innerHTML = state.sequence.map((step) => "<li>" + stepText(step) + "</li>").join("");
+    description.innerHTML = "목표 <code>" + bits.formatHex(parsed) + "</code>를 만드는 데 명령 <b>" + state.sequence.length + "개</b>가 필요하다. <b>한 명령</b>을 눌러 a0을 쌓아 보자.";
+    render();
+  }
+
+  function stepOnce() {
+    if (state.hasError || state.executedCount >= state.sequence.length) { stopPlaying(); return; }
+    const step = state.sequence[state.executedCount];
+    state.previousRegister = state.register;
+    state.register = applyStep(state.register, step);
+    state.executedCount += 1;
+    state.flashRemaining = FLASH_SECONDS;
+    let text = "<b>" + state.executedCount + "/" + state.sequence.length + "</b> <code>" + stepText(step) + "</code> — " + stepExplanation(step);
+    if (state.executedCount === state.sequence.length) text += state.register === state.target ? " <b>완성!</b>" : " (불일치)";
+    description.innerHTML = text;
+    render();
+    if (state.executedCount >= state.sequence.length) stopPlaying();
+  }
+
+  function stopPlaying() {
+    if (playTimer) clearInterval(playTimer);
+    playTimer = null;
+    playButton.textContent = "자동 재생";
+  }
+  function startPlaying() {
+    if (state.executedCount >= state.sequence.length) load();
+    stopPlaying();
+    playTimer = setInterval(stepOnce, PLAY_INTERVAL_MILLISECONDS);
+    playButton.textContent = "멈춤";
+  }
+
+  function render() {
+    [...sequenceList.children].forEach((item, index) => {
+      item.classList.toggle("done", index < state.executedCount - 1);
+      item.classList.toggle("current", index === state.executedCount - 1);
+    });
+    document.getElementById("constant-readout-count").textContent = state.hasError ? "—" : String(state.sequence.length);
+    document.getElementById("constant-readout-current").textContent = bits.formatHex(state.register);
+    const isDone = state.executedCount === state.sequence.length;
+    let matchText = "진행 중";
+    if (isDone) matchText = state.register === state.target ? "일치 ✓" : "불일치";
+    document.getElementById("constant-readout-match").textContent = matchText;
+    canvas.redraw();
+  }
+
+  // 캔버스: a0 의 64비트를 위·아래 두 줄(63–32, 31–0)로 그린다. 방금 바뀐 비트는 금색으로 깜빡인다.
+  const canvas = book.createCanvas(canvasElement, (context, width, height, colors) => {
+    const margin = 14;
+    const labelWidth = 36;
+    const cellGap = 1;
+    const cellWidth = (width - margin * 2 - labelWidth) / BITS_PER_ROW;
+    const cellHeight = Math.min(26, Math.max(16, cellWidth * 1.6));
+    const isWide = cellWidth >= 13;
+    const flashStrength = state.flashRemaining / FLASH_SECONDS;
+
+    book.drawText(context, "a0", margin, 22, { size: 14, bold: true, color: colors.accent });
+    book.drawText(context, bits.formatHex(state.register), margin + 28, 22, { size: isWide ? 17 : 14, bold: true, color: colors.text, mono: true });
+    book.drawText(context, "목표 " + bits.formatHex(state.target), margin, 46, { size: 12, color: colors.dim, mono: true });
+
+    const rowTops = [66, 66 + cellHeight + 22];
+    const rowLabels = [["63", "32"], ["31", "0"]];
+    rowTops.forEach((rowTop, rowIndex) => {
+      const highBit = rowIndex === 0 ? 63 : 31;
+      book.drawText(context, rowLabels[rowIndex][0], margin, rowTop + cellHeight / 2, { size: 11, color: colors.faint, mono: true });
+      book.drawText(context, rowLabels[rowIndex][1], width - margin, rowTop + cellHeight + 14, { size: 10, color: colors.faint, mono: true, align: "right" });
+      for (let column = 0; column < BITS_PER_ROW; column += 1) {
+        const position = highBit - column;
+        const bit = bits.bitAt(state.register, position);
+        const previousBit = bits.bitAt(state.previousRegister, position);
+        const x = margin + labelWidth + column * cellWidth;
+        book.roundedRectangle(context, x, rowTop, cellWidth - cellGap, cellHeight, 3);
+        context.fillStyle = bit ? colors.accent : colors.surface;
+        context.fill();
+        // 방금 바뀐 비트 위에 금색을 덮었다가 서서히 걷어 낸다
+        if (bit !== previousBit && flashStrength > 0) {
+          context.save();
+          context.globalAlpha = flashStrength;
+          context.fillStyle = colors.gold;
+          context.fill();
+          context.restore();
+        }
+        if (isWide) {
+          book.drawText(context, String(bit), x + (cellWidth - cellGap) / 2, rowTop + cellHeight / 2 + 1, { size: 11, color: bit ? colors.onAccent : colors.faint, align: "center", mono: true });
+        }
+        // 4비트(16진수 한 자리)마다 아래에 작은 눈금
+        if (position % 4 === 0) {
+          context.fillStyle = colors.border;
+          context.fillRect(x + cellWidth - cellGap - 1, rowTop + cellHeight + 2, 2, 5);
+        }
+      }
+    });
+    const footerY = rowTops[1] + cellHeight + 30;
+    if (state.executedCount > 0 && !state.hasError) {
+      const step = state.sequence[state.executedCount - 1];
+      book.drawText(context, "방금: " + stepText(step).replace(/\s+/g, " "), margin, footerY, { size: 13, color: colors.gold, bold: true, mono: true });
+    } else {
+      book.drawText(context, "a0 = 0 에서 출발", margin, footerY, { size: 13, color: colors.dim });
+    }
+  }, { aspectRatio: 0.3, minimumHeight: 180, maximumHeight: 205 });
+
+  book.animationLoop(canvasElement, (deltaSeconds) => {
+    if (state.flashRemaining <= 0) return;
+    state.flashRemaining = Math.max(0, state.flashRemaining - deltaSeconds);
+    canvas.redraw();
+  });
+
+  document.getElementById("constant-step-button").addEventListener("click", () => { stopPlaying(); stepOnce(); });
+  playButton.addEventListener("click", () => { if (playTimer) stopPlaying(); else startPlaying(); });
+  document.getElementById("constant-reset-button").addEventListener("click", load);
+  document.getElementById("constant-random-button").addEventListener("click", () => {
+    let value = 0n;
+    for (let index = 0; index < RANDOM_CHUNK_COUNT; index += 1) value = (value << 16n) | BigInt(Math.floor(Math.random() * RANDOM_CHUNK_SIZE));
+    input.value = "0x" + value.toString(16);
+    load();
+  });
+  document.querySelectorAll("#constant-presets button").forEach((button) => {
+    button.addEventListener("click", () => { input.value = button.dataset.value; load(); });
+  });
+  input.addEventListener("change", load);
+  input.addEventListener("keydown", (event) => { if (event.key === "Enter") load(); });
+  load();
+})();
+
+/* ---------------------------------------------------------------------------
+   RV32E 호환성 검사기: riscv.js 로 어셈블한 기계어에서 rd/rs1/rs2 필드를 읽어
+   16 이상(x16–x31)을 쓰는 명령을 찾아낸다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const Riscv = window.Riscv;
+  const REGISTER_COUNT = 32;
+  const EMBEDDED_REGISTER_COUNT = 16;
+  const EXAMPLES = {
+    mixed: [
+      "# a0..a5 를 더해 a6 에 둔다",
+      "        li   a0, 10",
+      "        li   a5, 3",
+      "        add  a6, a0, a5      # a6 = x16",
+      "        mv   s2, a6          # s2 = x18",
+      "        sw   s2, 0(sp)",
+      "        addi t0, t0, 1",
+      "        add  t3, t0, a0      # t3 = x28",
+      "        beq  t3, zero, done",
+      "done:   ret",
+    ].join("\n"),
+    clean: [
+      "# 같은 일을 x0..x15 만으로",
+      "        li   a0, 10",
+      "        li   a5, 3",
+      "        add  a4, a0, a5",
+      "        mv   s1, a4",
+      "        sw   s1, 0(sp)",
+      "        addi t0, t0, 1",
+      "        add  t2, t0, a0",
+      "        beq  t2, zero, done",
+      "done:   ret",
+    ].join("\n"),
+  };
+  // 형식마다 실제로 쓰는 레지스터 필드. 쓰지 않는 필드의 비트는 즉시값이므로 검사하면 안 된다.
+  const REGISTER_FIELDS_BY_FORMAT = {
+    R: ["rd", "rs1", "rs2"],
+    I: ["rd", "rs1"],
+    "I-shift": ["rd", "rs1"],
+    "I-csr": ["rd", "rs1"],
+    S: ["rs1", "rs2"],
+    B: ["rs1", "rs2"],
+    U: ["rd"],
+    J: ["rd"],
+  };
+
+  const source = document.getElementById("rv32e-source");
+  const checkList = document.getElementById("rv32e-check-list");
+  const registerGrid = document.getElementById("rv32e-register-grid");
+  const upperArea = document.getElementById("rv32e-area-upper");
+  const abiLine = document.getElementById("rv32e-abi-line");
+  let isEmbedded = true;
+
+  const escapeHtml = (text) => text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const registerLabel = (number) => "x" + number + "(" + Riscv.ABI_NAMES[number] + ")";
+
+  function usedRegisters(word) {
+    const decoded = Riscv.decode(word);
+    if (!decoded.name) return [];
+    const fieldNames = REGISTER_FIELDS_BY_FORMAT[decoded.format] || [];
+    const isCsrImmediateForm = decoded.format === "I-csr" && decoded.name.endsWith("i");
+    // csrrwi 같은 명령의 rs1 칸은 레지스터가 아니라 5비트 즉시값이다
+    return fieldNames.filter((field) => !(isCsrImmediateForm && field === "rs1")).map((field) => decoded[field]);
+  }
+
+  function check() {
+    const program = Riscv.assemble(source.value);
+    const usage = new Array(REGISTER_COUNT).fill(0);
+    const conflicts = new Array(REGISTER_COUNT).fill(false);
+    let upperUseCount = 0;
+    const rows = [];
+    program.errors.forEach((error) => rows.push('<div class="row bad">' + error.line + "행: " + escapeHtml(error.message) + "</div>"));
+    program.words.forEach((entry) => {
+      const registers = usedRegisters(entry.word);
+      const offending = registers.filter((number) => number >= EMBEDDED_REGISTER_COUNT);
+      registers.forEach((number) => { usage[number] += 1; });
+      offending.forEach((number) => { conflicts[number] = true; });
+      upperUseCount += offending.length;
+      const isBad = isEmbedded && offending.length > 0;
+      let note = "";
+      if (offending.length > 0) {
+        note = isEmbedded ? "  ← " + offending.map(registerLabel).join(", ") + " : RV32E에서 reserved" : "  (x16 이상 사용)";
+      }
+      rows.push('<div class="row ' + (isBad ? "bad" : "ok") + '">' + entry.address.toString(16).padStart(4, "0") + "  " + entry.word.toString(16).padStart(8, "0") + "  " + escapeHtml(entry.text) + escapeHtml(note) + "</div>");
+    });
+    checkList.innerHTML = rows.join("") || '<div class="row ok">(명령 없음)</div>';
+
+    registerGrid.innerHTML = usage.map((count, number) => {
+      const classNames = ["cell"];
+      const isRemoved = isEmbedded && number >= EMBEDDED_REGISTER_COUNT;
+      if (isRemoved) classNames.push("removed");
+      if (isRemoved && conflicts[number]) classNames.push("conflict");
+      else if (count > 0) classNames.push("used");
+      return '<div class="' + classNames.join(" ") + '"><div class="cell-name"><span>x' + number + '</span></div><div class="cell-value">' + Riscv.ABI_NAMES[number] + "</div></div>";
+    }).join("");
+
+    // RV32E 에서는 x16–x31 몫이 사라진 자리를 "절약"으로 보여 준다
+    upperArea.classList.toggle("saved", isEmbedded);
+    upperArea.textContent = isEmbedded ? "절약 ≈ 25%" : "x16–x31 ≈ 25%";
+    abiLine.innerHTML = isEmbedded
+      ? "ILP32E · 인자 <b>a0–a5</b> · 저장 <b>s0–s1</b> · 임시 <b>t0–t2</b> · sp 4바이트 정렬"
+      : "ILP32 · 인자 <b>a0–a7</b> · 저장 <b>s0–s11</b> · 임시 <b>t0–t6</b> · sp 16바이트 정렬";
+
+    const hasErrors = program.errors.length > 0;
+    document.getElementById("rv32e-readout-count").textContent = String(program.words.length);
+    document.getElementById("rv32e-readout-upper").textContent = upperUseCount + "곳";
+    let verdict = "통과";
+    if (hasErrors) verdict = "어셈블 오류";
+    else if (isEmbedded && upperUseCount > 0) verdict = "RV32E 불가";
+    document.getElementById("rv32e-readout-verdict").textContent = verdict;
+  }
+
+  book.segmented("rv32e-mode", (value) => { isEmbedded = value === "e"; check(); });
+  book.segmented("rv32e-example", (value) => { source.value = EXAMPLES[value]; check(); });
+  document.getElementById("rv32e-check-button").addEventListener("click", check);
+  source.addEventListener("input", check);
+})();
+</script>
+</body>
+</html>

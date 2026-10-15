@@ -1,0 +1,1374 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>07 호출 규약과 ABI · RISC-V Book</title>
+<meta name="description" content="RISC-V psABI가 정한 함수 호출 약속: 레지스터 사용 규칙, 호출자·피호출자 저장, 16바이트로 정렬된 스택 프레임, 인자와 반환값 전달, ilp32·lp64d 같은 데이터 모델, %hi·%lo·%pcrel 재배치, 링커 완화, PIC·GOT·PLT와 TLS를 그림과 시뮬레이터로 익힌다.">
+<link rel="icon" href="../assets/img/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/style.css">
+<script src="../assets/js/book.js"></script>
+<script src="../assets/js/riscv.js"></script>
+<style>
+  /* 재귀 함수와 스택 프레임 */
+  .frame-emulator { display: grid; grid-template-columns: minmax(0, 1fr); }
+  @media (min-width: 780px) { .frame-emulator { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
+  .program-listing { font-family: var(--mono); font-size: 12.5px; line-height: 1.45; padding: 10px 0; border-right: 1px solid var(--border); background: var(--canvas-bg); overflow-x: auto; max-height: 560px; overflow-y: auto; }
+  @media (max-width: 779px) { .program-listing { border-right: 0; border-bottom: 1px solid var(--border); max-height: 300px; } }
+  .program-listing .row { display: grid; grid-template-columns: 34px 1fr; gap: 8px; padding: 1px 12px; white-space: nowrap; }
+  .program-listing .row .address { color: var(--text-faint); }
+  .program-listing .row .source { color: var(--text-faint); }
+  .program-listing .row.current { background: var(--accent-2-soft); box-shadow: inset 3px 0 0 var(--accent-2); }
+  .stack-panel { padding: 12px; min-width: 0; }
+  .stack-panel h4 { margin: 0 0 8px; font-size: 14px; color: var(--text-dim); }
+  .stack-table { display: grid; gap: 2px; font-family: var(--mono); font-size: 12.5px; }
+  .stack-row { display: grid; grid-template-columns: 58px 92px minmax(0, 1fr) 46px; gap: 6px; align-items: center; padding: 3px 6px; border-radius: 6px; border-left: 4px solid transparent; background: var(--bg-elev); min-width: 0; }
+  .stack-row .label { color: var(--text-dim); font-family: var(--font); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .stack-row .address { color: var(--text-faint); }
+  .stack-row .pointer { color: var(--accent-2); font-weight: 700; text-align: right; }
+  .stack-row.depth-1 { border-left-color: var(--accent); }
+  .stack-row.depth-2 { border-left-color: var(--teal); }
+  .stack-row.depth-3 { border-left-color: var(--violet); }
+  .stack-row.depth-4 { border-left-color: var(--ok); }
+  .stack-row.depth-0 { border-left-color: var(--accent-2); }
+  .stack-row.is-inactive { opacity: 0.4; }
+  .stack-row.changed { background: var(--accent-2-soft); }
+  .stack-row.at-sp { box-shadow: inset 0 0 0 2px var(--accent-2); }
+  .stack-base { font-size: 12px; color: var(--text-faint); padding: 2px 6px 6px; font-family: var(--mono); }
+  .register-strip { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; margin-top: 10px; }
+  /* 재배치 완화 */
+  .relaxation-columns { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); margin-top: 14px; }
+  .relaxation-box { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; background: var(--canvas-bg); min-width: 0; }
+  .relaxation-box h4 { margin: 0 0 6px; font-size: 14px; }
+  .relaxation-box .code-line { font-family: var(--mono); font-size: 13px; overflow-wrap: anywhere; }
+  .relaxation-box .code-line .word { color: var(--text-faint); margin-right: 8px; }
+  .relaxation-box .relocation { font-family: var(--mono); font-size: 11.5px; color: var(--violet); padding-left: 12px; }
+  .relaxation-box.is-error { border-color: var(--bad); background: var(--bad-soft); }
+  .relaxation-box.is-best { border-color: var(--ok); background: var(--ok-soft); }
+</style>
+</head>
+<body data-chapter="abi">
+<main class="chapter">
+  <header class="chapter-hero">
+    <div class="eyebrow">Chapter 07</div>
+    <h1>호출 규약과 ABI</h1>
+    <p class="lead">ISA는 명령어 하나하나의 뜻을 정할 뿐, <strong>함수끼리 어떻게 대화할지는 정하지 않는다</strong>. 인자는 어느 레지스터에 넣는지, 어떤 레지스터는 호출 뒤에도 값이 남아 있어야 하는지, 스택은 어떻게 쓰는지, <code>long</code>은 몇 바이트인지. 이런 약속이 <b>ABI</b>(Application Binary Interface)이고, RISC-V에서는 <b>psABI</b> 규격이 정한다. 이 장에서는 재귀 함수의 스택이 자라고 줄어드는 모습을 직접 보고, 컴파일러와 링커가 주소를 만들고 줄이는 방법까지 따라간다.</p>
+    <ul class="objectives">
+      <li>ISA와 ABI의 경계를 구분하고, ABI가 왜 따로 필요한지 설명한다.</li>
+      <li>a·t·s·ra·sp 레지스터의 호출자·피호출자 저장 책임을 안다.</li>
+      <li>프롤로그·에필로그와 16바이트로 정렬된 스택 프레임을 그릴 수 있다.</li>
+      <li>스칼라·2×XLEN 값·구조체·가변 인자·부동소수점 인자의 전달 규칙을 적용한다.</li>
+      <li>ilp32·ilp32f·ilp32d·ilp32e·lp64·lp64f·lp64d·lp64q 데이터 모델을 구별한다.</li>
+      <li><code>call</code>·<code>la</code>가 auipc 쌍과 %hi·%lo·%pcrel 재배치로 바뀌고, 링커 완화로 줄어드는 과정을 따라간다.</li>
+      <li>PIC의 GOT·PLT와 tp 기반 TLS를 개략적으로 이해한다.</li>
+    </ul>
+    <div class="spec-meta">
+      <a class="spec-link" href="https://docs.riscv.org/reference/abi/index.html" target="_blank" rel="noopener">RISC-V ABIs Specification v1.0</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/abi/v1.0/riscv-cc-procedure-calling-convention.html" target="_blank" rel="noopener">psABI · Procedure Calling Convention</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/abi/v1.0/riscv-elf-linker-relaxation.html" target="_blank" rel="noopener">psABI · Linker Relaxation</a>
+    </div>
+  </header>
+
+  <!-- ============================================================ -->
+  <section id="why-abi">
+    <h2>ISA만으로는 부족하다</h2>
+    <p>3장에서 본 것처럼 하드웨어에게 x10과 x18은 똑같다. <code>jal</code>은 복귀 주소를 아무 레지스터에나 남길 수 있고, 스택 포인터라는 하드웨어 레지스터도 없다. 그런데 GCC로 컴파일한 <code>main.o</code>가 LLVM으로 컴파일한 <code>libm.so</code>의 <code>sqrt</code>를 부르려면, 두 컴파일러가 같은 약속을 지켜야 한다. 그 약속의 묶음이 <span class="term">ABI</span><span class="english">(Application Binary Interface)</span>다. 특정 프로세서에 맞춘 ABI라서 <b>psABI</b>(processor-specific ABI)라고 부른다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 820 330" role="img" aria-label="두 오브젝트 파일이 ABI라는 약속을 통해 연결되고 그 아래에 ISA가 있는 그림">
+        <defs><marker id="why-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker></defs>
+        <rect x="20" y="20" width="230" height="110" rx="12" class="f-elev"/>
+        <text x="135" y="48" text-anchor="middle" class="t t-bold">main.o</text>
+        <text x="135" y="70" text-anchor="middle" class="t-dim">GCC로 컴파일</text>
+        <text x="135" y="98" text-anchor="middle" class="t-mono">call sqrt</text>
+        <rect x="570" y="20" width="230" height="110" rx="12" class="f-elev"/>
+        <text x="685" y="48" text-anchor="middle" class="t t-bold">libm.so</text>
+        <text x="685" y="70" text-anchor="middle" class="t-dim">LLVM으로 컴파일</text>
+        <text x="685" y="98" text-anchor="middle" class="t-mono">sqrt: … ret</text>
+        <path d="M252 75 H568" class="s-accent flow-dash" marker-end="url(#why-arrow)" marker-start="url(#why-arrow)"/>
+        <text x="410" y="64" text-anchor="middle" class="t-accent">서로의 내부를 모른 채 연결된다</text>
+        <rect x="20" y="152" width="780" height="98" rx="12" class="f-gold-soft"/>
+        <text x="410" y="176" text-anchor="middle" class="t-gold">psABI — 둘이 함께 지키는 약속</text>
+        <g style="font-size:13px">
+          <rect x="40" y="190" width="140" height="44" rx="8" class="f-elev"/><text x="110" y="217" text-anchor="middle" class="t">레지스터 역할</text>
+          <rect x="190" y="190" width="140" height="44" rx="8" class="f-elev"/><text x="260" y="217" text-anchor="middle" class="t">스택 프레임 · 정렬</text>
+          <rect x="340" y="190" width="140" height="44" rx="8" class="f-elev"/><text x="410" y="217" text-anchor="middle" class="t">인자·반환 전달</text>
+          <rect x="490" y="190" width="140" height="44" rx="8" class="f-elev"/><text x="560" y="217" text-anchor="middle" class="t">자료형 크기·정렬</text>
+          <rect x="640" y="190" width="140" height="44" rx="8" class="f-elev"/><text x="710" y="217" text-anchor="middle" class="t">ELF·재배치·DWARF</text>
+        </g>
+        <rect x="20" y="268" width="780" height="50" rx="12" class="f-accent"/>
+        <text x="410" y="290" text-anchor="middle" class="t-on-accent" style="font-size:15px">ISA — 명령어 하나하나의 뜻</text>
+        <text x="410" y="308" text-anchor="middle" class="t-on-accent" style="font-size:12px;font-weight:400">x10과 x18은 똑같은 레지스터, jal은 아무 레지스터에나 복귀 주소를 남긴다</text>
+      </svg></div>
+      <figcaption><b>그림 7-1.</b> ISA 위에 놓인 ABI. ISA가 “무엇을 할 수 있는가”를 정한다면, ABI는 “서로 어떻게 하기로 했는가”를 정한다. psABI는 호출 규약, ELF 형식, DWARF 디버그 정보의 세 부분으로 되어 있다.</figcaption>
+    </figure>
+
+    <p>RISC-V ABIs Specification 1.0은 2022년 11월에 비준되었다. 서문은 이 문서가 주요 오픈 소스 툴체인·운영체제 커뮤니티와 함께 이미 합의되고 구현된 내용을 기록한 것이며, 호환되지 않는 변경은 ABI를 깨뜨리므로 “꼭 필요한 경우가 아니면 하지 않는다”고 밝힌다. 시스템 호출 규약은 이 문서의 범위가 아니며 운영체제 커널 ABI나 SBI 같은 실행 환경 쪽에서 정한다.</p>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>ISA가 정하는 것</th><th>ABI가 정하는 것</th></tr></thead>
+      <tbody>
+        <tr><td><code>jal rd, offset</code>이 rd에 pc+4를 쓴다</td><td>함수 호출에는 rd = x1(ra)을 쓴다</td></tr>
+        <tr><td>x2는 평범한 범용 레지스터</td><td>x2(sp)는 스택 포인터이고 항상 16바이트로 정렬</td></tr>
+        <tr><td><code>lw</code>는 4바이트를 읽는다</td><td>C의 <code>int</code>는 4바이트, <code>long</code>은 RV32에서 4, RV64에서 8바이트</td></tr>
+        <tr><td><code>auipc</code>가 pc 기준 상위 주소를 만든다</td><td>링커가 채울 칸을 <code>R_RISCV_PCREL_HI20</code> 재배치로 표시한다</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="register-convention">
+    <h2>레지스터 사용 약속: 누가 저장하나</h2>
+    <p>함수를 부르면 피호출자가 레지스터를 마음대로 쓴다. 그러면 호출자가 넣어 둔 값은 어떻게 되나? psABI는 레지스터를 두 무리로 나눠 책임을 정한다. <b>호출 뒤 보존되는(preserved across calls)</b> 레지스터는 피호출자가 쓰기 전에 저장했다가 돌아가기 전에 되돌려 놓아야 한다(<span class="term">피호출자 저장</span><span class="english">(callee-saved)</span>). 보존되지 <b>않는</b> 레지스터는 피호출자가 마음대로 망가뜨려도 되므로, 호출 뒤에도 그 값이 필요하면 호출자가 미리 저장해야 한다(<span class="term">호출자 저장</span><span class="english">(caller-saved)</span>).</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 820 300" role="img" aria-label="호출 경계에서 보존되는 레지스터와 보존되지 않는 레지스터">
+        <defs><marker id="boundary-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent-2)"/></marker></defs>
+        <line x1="410" y1="20" x2="410" y2="285" stroke="var(--accent-2)" stroke-width="2" stroke-dasharray="6 5"/>
+        <text x="410" y="16" text-anchor="middle" class="t-gold">call ─── 호출 경계 ─── ret</text>
+        <g transform="translate(20,40)">
+          <rect width="370" height="240" rx="14" class="f-ok-soft"/>
+          <text x="185" y="28" text-anchor="middle" class="t t-bold">호출 뒤에도 그대로 (피호출자 책임)</text>
+          <rect x="20" y="48" width="100" height="38" rx="8" class="f-elev"/><text x="70" y="72" text-anchor="middle" class="t-mono t-bold">sp</text>
+          <rect x="130" y="48" width="220" height="38" rx="8" class="f-elev"/><text x="240" y="72" text-anchor="middle" class="t-mono t-bold">s0–s11</text>
+          <rect x="20" y="96" width="330" height="38" rx="8" class="f-elev"/><text x="185" y="120" text-anchor="middle" class="t-mono">fs0–fs11 (하드웨어 FP 규약일 때)</text>
+          <rect x="20" y="144" width="160" height="38" rx="8" class="f-surface"/><text x="100" y="168" text-anchor="middle" class="t-mono">gp · tp</text>
+          <text x="190" y="162" class="t-faint">아무도 바꾸지 않는</text><text x="190" y="178" class="t-faint">고정 레지스터</text>
+          <text x="185" y="216" text-anchor="middle" class="t-dim">쓰려면 프롤로그에서 저장, 에필로그에서 복원</text>
+        </g>
+        <g transform="translate(430,40)">
+          <rect width="370" height="240" rx="14" class="f-warn-soft"/>
+          <text x="185" y="28" text-anchor="middle" class="t t-bold">호출 뒤 바뀌어 있을 수 있음 (호출자 책임)</text>
+          <rect x="20" y="48" width="100" height="38" rx="8" class="f-elev"/><text x="70" y="72" text-anchor="middle" class="t-mono t-bold">ra</text>
+          <rect x="130" y="48" width="100" height="38" rx="8" class="f-elev"/><text x="180" y="72" text-anchor="middle" class="t-mono t-bold">t0–t6</text>
+          <rect x="240" y="48" width="110" height="38" rx="8" class="f-elev"/><text x="295" y="72" text-anchor="middle" class="t-mono t-bold">a0–a7</text>
+          <rect x="20" y="96" width="330" height="38" rx="8" class="f-elev"/><text x="185" y="120" text-anchor="middle" class="t-mono">ft0–ft11 · fa0–fa7</text>
+          <rect x="20" y="144" width="330" height="38" rx="8" class="f-elev"/><text x="185" y="168" text-anchor="middle" class="t-mono">v0–v31 · vl · vtype · vxrm · vxsat</text>
+          <text x="185" y="216" text-anchor="middle" class="t-dim">필요하면 호출 전에 저장, 호출 뒤 복원</text>
+        </g>
+      </svg></div>
+      <figcaption><b>그림 7-2.</b> 호출 경계를 넘을 때. 왼쪽은 피호출자가 반드시 원래 값으로 돌려놓는 레지스터, 오른쪽은 호출 뒤 값이 바뀌어 있어도 되는 레지스터다. 벡터 레지스터와 벡터 설정 CSR은 모두 보존되지 않는다. 부동소수점 s 레지스터도 ABI_FLEN보다 넓지 않은 값만 보존된다.</figcaption>
+    </figure>
+
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>이름</th><th>ABI 이름</th><th>뜻</th><th>호출 뒤 보존?</th></tr></thead>
+      <tbody>
+        <tr><td><code>x0</code></td><td>zero</td><td>Zero</td><td>— (불변)</td></tr>
+        <tr><td><code>x1</code></td><td>ra</td><td>Return address</td><td>아니오</td></tr>
+        <tr><td><code>x2</code></td><td>sp</td><td>Stack pointer</td><td>예</td></tr>
+        <tr><td><code>x3</code></td><td>gp</td><td>Global pointer</td><td>— (할당 대상 아님)</td></tr>
+        <tr><td><code>x4</code></td><td>tp</td><td>Thread pointer</td><td>— (할당 대상 아님)</td></tr>
+        <tr><td><code>x5–x7</code></td><td>t0–t2</td><td>Temporary</td><td>아니오</td></tr>
+        <tr><td><code>x8–x9</code></td><td>s0–s1</td><td>Callee-saved (s0는 프레임 포인터를 쓸 때 fp)</td><td>예</td></tr>
+        <tr><td><code>x10–x17</code></td><td>a0–a7</td><td>Argument (a0·a1은 반환값)</td><td>아니오</td></tr>
+        <tr><td><code>x18–x27</code></td><td>s2–s11</td><td>Callee-saved</td><td>예</td></tr>
+        <tr><td><code>x28–x31</code></td><td>t3–t6</td><td>Temporary</td><td>아니오</td></tr>
+      </tbody>
+    </table></div>
+    <p>왜 둘로 나눌까? 모든 레지스터를 호출자가 저장하면 호출할 때마다 살아 있는 값을 전부 저장해야 하고, 모두 피호출자가 저장하면 잎(leaf) 함수조차 쓰는 레지스터를 전부 저장해야 한다. 둘을 섞어 두면 컴파일러가 <b>호출을 건너 오래 살아야 하는 값은 s 레지스터에</b>, <b>짧게 쓰고 버릴 값은 t·a 레지스터에</b> 배치해 저장·복원 횟수를 줄일 수 있다. 아래 시뮬레이터에서 약속을 어기면 무슨 일이 생기는지 직접 보자.</p>
+
+    <div class="sim" id="who-saves-sim">
+      <div class="sim-head"><span class="sim-tag animation">ANIMATION</span><h3>이 레지스터는 누가 지키나</h3></div>
+      <div class="sim-view"><canvas id="who-saves-canvas" aria-label="호출자와 피호출자가 레지스터를 저장하고 복원하는 애니메이션"></canvas></div>
+      <div class="step-description" id="who-saves-description"></div>
+      <div class="sim-controls">
+        <div class="control"><span>레지스터</span><div class="segmented" id="who-saves-register"><button data-value="s1" class="on">s1</button><button data-value="t0">t0</button><button data-value="ra">ra</button><button data-value="sp">sp</button><button data-value="a0">a0</button><button data-value="gp">gp</button></div></div>
+        <div class="control"><span>약속</span><div class="segmented" id="who-saves-promise"><button data-value="kept" class="on">지킴</button><button data-value="broken">어김</button></div></div>
+        <div class="control"><span>재생</span><div class="button-row"><button class="button primary" id="who-saves-play">멈춤</button><button class="button" id="who-saves-restart">처음부터</button></div></div>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">분류</span><span class="value" id="who-saves-kind">—</span></div>
+        <div class="stat"><span class="key">저장 책임</span><span class="value" id="who-saves-owner">—</span></div>
+        <div class="stat"><span class="key">호출 뒤 값</span><span class="value" id="who-saves-result">—</span></div>
+      </div>
+      <div class="sim-note">s1을 고르고 “어김”을 누르면 피호출자가 저장 없이 s1을 덮어쓴다. 호출자는 아무 잘못이 없는데도 값을 잃는다. t0로 바꾸면 반대로 <b>호출자</b>가 저장해야 한다. ra에서 약속을 어기면 함수가 자기 자신에게로 돌아가는 무한 반복이 생긴다.</div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="call-return">
+    <h2>호출과 복귀: jal·jalr·ra</h2>
+    <p>함수 호출은 <code>jal ra, f</code>(또는 먼 거리라면 <code>auipc</code>+<code>jalr</code>)다. <code>jal</code>은 다음 명령의 주소(pc+4)를 ra에 남기고 f로 뛴다. 복귀는 <code>ret</code>, 곧 <code>jalr x0, 0(ra)</code>다. 피호출자가 또 다른 함수를 부를 것이라면, 그 호출이 ra를 덮어쓰기 전에 자기 ra를 스택에 저장해 두어야 한다. ra가 “호출 뒤 보존되지 않는” 레지스터인 이유다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 820 320" role="img" aria-label="main이 f를 호출하고 f가 ret으로 돌아오는 흐름과 ra 값의 애니메이션">
+        <defs>
+          <path id="call-flow-path" d="M300 92 C 400 92, 420 70, 520 70 L 520 210 C 420 210, 400 122, 300 122"/>
+          <marker id="call-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker>
+        </defs>
+        <rect x="30" y="40" width="270" height="140" rx="12" class="f-elev"/>
+        <text x="46" y="64" class="t t-bold">main</text>
+        <g style="font-family:var(--mono)">
+          <text x="46" y="96" class="t-faint">0x1000</text><text x="116" y="96" class="t-mono t-bold">jal  ra, f</text>
+          <text x="46" y="126" class="t-faint">0x1004</text><text x="116" y="126" class="t-mono">mv   s0, a0</text>
+          <text x="46" y="156" class="t-faint">0x1008</text><text x="116" y="156" class="t-mono">…</text>
+        </g>
+        <rect x="520" y="40" width="270" height="200" rx="12" class="f-elev"/>
+        <text x="536" y="64" class="t t-bold">f (잎 함수)</text>
+        <g style="font-family:var(--mono)">
+          <text x="536" y="96" class="t-faint">0x2000</text><text x="606" y="96" class="t-mono">addi a0, a0, 1</text>
+          <text x="536" y="126" class="t-faint">0x2004</text><text x="606" y="126" class="t-mono">slli a0, a0, 1</text>
+          <text x="536" y="156" class="t-faint">0x2008</text><text x="606" y="156" class="t-mono">…</text>
+          <text x="536" y="214" class="t-faint">0x2010</text><text x="606" y="214" class="t-mono t-bold">ret</text>
+        </g>
+        <use href="#call-flow-path" class="s-accent flow-dash"/>
+        <text x="410" y="58" text-anchor="middle" class="t-accent">① 호출: ra ← 0x1004</text>
+        <text x="410" y="240" text-anchor="middle" class="t-ok">② 복귀: pc ← ra</text>
+        <circle r="7" fill="var(--accent-2)"><animateMotion dur="4s" begin="-0.4s" repeatCount="indefinite"><mpath href="#call-flow-path"/></animateMotion></circle>
+        <rect x="30" y="252" width="270" height="48" rx="10" class="f-gold-soft"/>
+        <text x="46" y="282" class="t-mono t-bold">ra</text>
+        <text x="90" y="282" class="t-mono">= 0x1004</text>
+        <text x="200" y="282" class="t-faint">(호출 순간 기록)</text>
+        <text x="410" y="292" text-anchor="middle" class="t-faint">잎 함수는 ra를 저장할 필요가 없다</text>
+      </svg></div>
+      <figcaption><b>그림 7-3.</b> 호출과 복귀. 금색 점이 제어의 흐름이다. <code>jal ra, f</code>가 복귀 주소 0x1004를 ra에 남기고, f의 <code>ret</code>이 그 값으로 돌아온다. 다른 함수를 부르지 않는 잎 함수는 ra를 건드리지 않으므로 스택 프레임조차 만들지 않을 수 있다.</figcaption>
+    </figure>
+    <p>어셈블러의 <code>call f</code>와 <code>tail f</code> 의사 명령은 먼 거리를 대비해 <b>두 명령</b>으로 펼쳐진다. <code>call</code>은 <code>auipc ra, …; jalr ra, …(ra)</code>, 함수의 마지막에서 다른 함수로 넘어가 버리는 꼬리 호출 <code>tail</code>은 <code>auipc t1, …; jalr x0, …(t1)</code>이다(GNU as 기준으로 임시 레지스터 t1을 쓴다). 꼬리 호출은 복귀 주소를 남기지 않으므로 호출된 함수의 <code>ret</code>이 곧바로 원래 호출자에게 돌아간다. 이 두 명령 쌍이 링커에서 한 명령으로 줄어드는 과정은 뒤의 링커 완화 절에서 본다.</p>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="stack-frame">
+    <h2>스택 프레임: 프롤로그와 에필로그</h2>
+    <p>psABI의 스택 규칙은 짧다. <b>스택은 아래(낮은 주소)로 자라고, 프로시저에 들어올 때 sp는 128비트(16바이트) 경계에 정렬되어 있어야 한다.</b> 표준 ABI에서는 프로시저가 실행되는 동안 내내 이 정렬을 유지해야 한다. 스택으로 넘긴 첫 번째 인자는 진입 시점의 sp+0에 있다. 그리고 sp보다 아래 주소의 데이터가 유지된다고 기대해서는 안 된다. 즉 x86-64 System V의 128바이트 “레드 존” 같은 것이 <b>없다</b>.</p>
+    <div class="callout spec"><strong>psABI 원문에서</strong>
+      <blockquote>“The stack grows downwards (towards lower addresses) and the stack pointer shall be aligned to a 128-bit boundary upon procedure entry. … Procedures must not rely upon the persistence of stack-allocated data whose addresses lie below the stack pointer.”</blockquote>
+      <p><a href="https://docs.riscv.org/reference/abi/v1.0/riscv-cc-procedure-calling-convention.html" target="_blank" rel="noopener">RISC-V ABIs Specification v1.0 — 2.1 Integer Calling Convention</a></p></div>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 820 440" role="img" aria-label="RV32 함수의 스택 프레임 배치">
+        <defs><marker id="frame-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent-2)"/></marker>
+          <pattern id="frame-hatch" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="8" stroke="var(--text-faint)" stroke-width="1.2"/></pattern></defs>
+        <text x="150" y="30" text-anchor="middle" class="t-faint">높은 주소 ↑</text>
+        <text x="150" y="430" text-anchor="middle" class="t-faint">낮은 주소 ↓ (스택이 자라는 방향)</text>
+        <rect x="250" y="20" width="300" height="60" rx="6" class="f-surface"/>
+        <text x="400" y="55" text-anchor="middle" class="t-dim">호출자의 프레임</text>
+        <rect x="250" y="80" width="300" height="60" rx="6" class="f-accent-soft"/>
+        <text x="400" y="105" text-anchor="middle" class="t">스택으로 넘긴 인자</text>
+        <text x="400" y="125" text-anchor="middle" class="t-faint">(인자 레지스터가 모자랄 때)</text>
+        <!-- 피호출자 프레임 -->
+        <rect x="250" y="140" width="300" height="40" rx="6" class="f-gold-soft"/><text x="400" y="165" text-anchor="middle" class="t-mono">ra  (sp+12)</text>
+        <rect x="250" y="180" width="300" height="40" rx="6" class="f-ok-soft"/><text x="400" y="205" text-anchor="middle" class="t-mono">s0 / fp  (sp+8)</text>
+        <rect x="250" y="220" width="300" height="60" rx="6" class="f-elev"/><text x="400" y="246" text-anchor="middle" class="t">지역 변수 · 다른 s 레지스터</text><text x="400" y="266" text-anchor="middle" class="t-faint">(sp+0 … sp+7)</text>
+        <rect x="250" y="280" width="300" height="50" rx="6" class="f-elev" stroke-dasharray="5 4"/><text x="400" y="310" text-anchor="middle" class="t-faint">다음 호출에 넘길 스택 인자 자리 (필요할 때)</text>
+        <rect x="250" y="330" width="300" height="70" fill="url(#frame-hatch)" opacity="0.5"/>
+        <text x="400" y="362" text-anchor="middle" class="t-dim">sp 아래: 보장 없음</text>
+        <text x="400" y="382" text-anchor="middle" class="t-faint">(레드 존 없음)</text>
+        <!-- 포인터 -->
+        <path d="M640 140 H556" class="s-gold" marker-end="url(#frame-arrow)"/>
+        <text x="650" y="136" class="t-gold">진입 시 sp</text>
+        <text x="650" y="154" class="t-faint">= 첫 스택 인자 주소</text>
+        <text x="650" y="172" class="t-faint">= fp (s0, 쓴다면)</text>
+        <path d="M640 330 H556" class="s-gold" marker-end="url(#frame-arrow)"/>
+        <text x="650" y="326" class="t-gold">현재 sp</text>
+        <text x="650" y="344" class="t-faint">16바이트 정렬 유지</text>
+        <!-- 프레임 괄호 -->
+        <path d="M236 142 h-10 v186 h10" class="s-line"/>
+        <text x="216" y="230" text-anchor="end" class="t t-bold">이 함수의 프레임</text>
+        <text x="216" y="250" text-anchor="end" class="t-faint">크기 = 16의 배수</text>
+        <text x="216" y="268" text-anchor="end" class="t-faint">(예: 16 또는 32 바이트)</text>
+      </svg></div>
+      <figcaption><b>그림 7-4.</b> RV32 함수 하나의 스택 프레임(위가 높은 주소). 프롤로그가 sp를 프레임 크기만큼 내리고, ra와 쓸 s 레지스터를 저장한다. 프레임 포인터를 쓰면 s0에 진입 시의 sp를 넣어 둔다. psABI는 프레임 포인터를 선택 사항으로 두되, 쓴다면 반드시 s0에 두라고 정한다. 프레임 안의 구체적인 배치(ra를 sp+12에 두는 것 등)는 컴파일러가 정하는 관례다.</figcaption>
+    </figure>
+
+    <div class="codebox" data-title="재귀 팩토리얼 — 프롤로그 · 본문 · 에필로그" id="factorial-source"></div>
+    <p>s0에 n을 넣어 둔 이유를 눈여겨보자. n은 재귀 호출 <b>뒤에</b> <code>mul</code>에서 다시 필요하다. a0는 호출에서 망가지므로, 호출 뒤 보존되는 s0에 옮겨 두었다. 대신 s0를 쓰는 대가로 프롤로그에서 호출자의 s0를 저장하고 에필로그에서 복원한다. 프레임에 실제로 쓰는 것은 8바이트뿐이지만 16바이트 정렬을 지키려고 16바이트를 잡았다.</p>
+
+    <div class="sim" id="factorial-sim">
+      <div class="sim-head"><span class="sim-tag">SIMULATOR</span><h3>재귀 호출과 스택 프레임 (RV32IM 에뮬레이터)</h3></div>
+      <div class="frame-emulator">
+        <div class="program-listing" id="factorial-listing"></div>
+        <div class="stack-panel">
+          <h4>스택 메모리 (위가 높은 주소, 4바이트 칸)</h4>
+          <div class="stack-base" id="factorial-stack-base"></div>
+          <div class="stack-table" id="factorial-stack"></div>
+          <div class="register-strip" id="factorial-registers"></div>
+        </div>
+      </div>
+      <div class="step-description" id="factorial-description"></div>
+      <div class="sim-controls">
+        <label class="control"><span>n <output id="factorial-n-output"></output></span><input type="range" id="factorial-n" min="1" max="7" value="4"></label>
+        <div class="control"><span>실행</span><div class="button-row"><button class="button primary" id="factorial-step">한 명령</button><button class="button" id="factorial-run">자동 실행</button><button class="button" id="factorial-reset">처음으로</button></div></div>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">pc</span><span class="value" id="factorial-pc">—</span></div>
+        <div class="stat"><span class="key">sp</span><span class="value" id="factorial-sp">—</span></div>
+        <div class="stat"><span class="key">호출 깊이</span><span class="value" id="factorial-depth">0</span></div>
+        <div class="stat"><span class="key">출력</span><span class="value" id="factorial-output">—</span></div>
+      </div>
+      <div class="sim-note">“한 명령”을 눌러 가며 <code>addi sp, sp, -16</code>마다 sp 표시(금색 테두리)가 16바이트씩 내려가고, 프레임마다 ra와 s0 칸이 채워지는 모습을 보자. 가장 깊은 곳(n = 1)에 이르면 이번에는 <code>lw</code>로 값을 되살리며 sp가 다시 올라간다. 각 프레임의 ra 칸에 담긴 주소가 main으로 가는지, fact 안의 <code>mul</code>로 가는지도 확인하자.</div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="arguments">
+    <h2>인자와 반환값 전달 규칙</h2>
+    <p>기본 정수 호출 규약은 인자 레지스터 여덟 개 a0–a7을 쓰고, 그중 a0·a1을 반환값에도 쓴다. 세부 규칙은 값의 크기에 따라 갈린다.</p>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>인자 종류</th><th>전달 방법 (정수 호출 규약)</th></tr></thead>
+      <tbody>
+        <tr><td>XLEN 이하 스칼라</td><td>레지스터 하나. 없으면 스택에 값으로. XLEN보다 좁은 정수는 자기 부호에 따라 32비트로 넓힌 뒤 XLEN으로 부호 확장</td></tr>
+        <tr><td>2×XLEN 스칼라 (RV32의 <code>long long</code>, RV64의 <code>__int128</code>)</td><td>레지스터 둘(낮은 번호에 하위 절반). 하나만 남았으면 하위는 레지스터, 상위는 스택</td></tr>
+        <tr><td>2×XLEN보다 넓은 스칼라</td><td>참조로(주소를 대신 넘김)</td></tr>
+        <tr><td>XLEN 이하 구조체</td><td>메모리 배치 그대로 레지스터 하나에</td></tr>
+        <tr><td>2×XLEN 이하 구조체</td><td>레지스터 둘. 하나만 남았으면 앞부분은 레지스터, 나머지는 스택</td></tr>
+        <tr><td>2×XLEN보다 큰 구조체, 비자명 복사 생성자가 있는 C++ 객체</td><td>참조로 (피호출자가 수정해도 됨)</td></tr>
+        <tr><td>가변 인자 중 정렬·크기가 2×XLEN인 것</td><td><b>짝수 번호에서 시작하는</b> 레지스터 쌍에 (남는 레지스터는 건너뜀)</td></tr>
+        <tr><td>반환값</td><td>같은 타입의 첫 번째 인자처럼. 참조로 넘겨야 할 크기라면 호출자가 공간을 마련하고 그 주소를 숨은 첫 인자로 넘김</td></tr>
+      </tbody>
+    </table></div>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 400" role="img" aria-label="네 가지 함수 선언에서 인자가 레지스터와 스택에 배치되는 예">
+        <!-- 예 1 -->
+        <text x="20" y="30" class="t-mono t-bold">① RV32 · ilp32:  int f(int a, long long b, int c)</text>
+        <g transform="translate(20,42)" style="font-family:var(--mono)">
+          <rect width="90" height="36" rx="7" class="f-accent-soft"/><text x="45" y="16" text-anchor="middle" class="t-mono t-bold" style="font-size:12px">a0</text><text x="45" y="30" text-anchor="middle" class="t-faint">a</text>
+          <rect x="96" width="90" height="36" rx="7" class="f-gold-soft"/><text x="141" y="16" text-anchor="middle" class="t-mono t-bold" style="font-size:12px">a1</text><text x="141" y="30" text-anchor="middle" class="t-faint">b 하위</text>
+          <rect x="192" width="90" height="36" rx="7" class="f-gold-soft"/><text x="237" y="16" text-anchor="middle" class="t-mono t-bold" style="font-size:12px">a2</text><text x="237" y="30" text-anchor="middle" class="t-faint">b 상위</text>
+          <rect x="288" width="90" height="36" rx="7" class="f-accent-soft"/><text x="333" y="16" text-anchor="middle" class="t-mono t-bold" style="font-size:12px">a3</text><text x="333" y="30" text-anchor="middle" class="t-faint">c</text>
+          <text x="400" y="24" class="t-dim" style="font-family:var(--font)">이름 있는 인자의 쌍은 홀수 번호에서 시작해도 된다</text>
+        </g>
+        <!-- 예 2 -->
+        <text x="20" y="118" class="t-mono t-bold">② RV32:  void g(struct big s)   // struct big { int x[5]; } = 20바이트 &gt; 2×XLEN</text>
+        <g transform="translate(20,130)">
+          <rect width="90" height="36" rx="7" class="f-accent-soft"/><text x="45" y="16" text-anchor="middle" class="t-mono t-bold" style="font-size:12px">a0</text><text x="45" y="30" text-anchor="middle" class="t-faint">&amp;복사본</text>
+          <path d="M92 18 H150" class="s-accent flow-dash"/>
+          <rect x="152" width="220" height="36" rx="7" class="f-elev"/><text x="262" y="23" text-anchor="middle" class="t-dim">호출자가 만든 20바이트 복사본</text>
+          <text x="400" y="24" class="t-dim">참조로 전달 (피호출자가 바꿔도 원본은 안전)</text>
+        </g>
+        <!-- 예 3 -->
+        <text x="20" y="206" class="t-mono t-bold">③ RV32:  int h(int p1, …, int p10)   // 정수 인자 10개</text>
+        <g transform="translate(20,218)" style="font-family:var(--mono)">
+          <rect width="56" height="36" rx="7" class="f-accent-soft"/><text x="28" y="23" text-anchor="middle" class="t-mono" style="font-size:12px">a0</text>
+          <rect x="60" width="56" height="36" rx="7" class="f-accent-soft"/><text x="88" y="23" text-anchor="middle" class="t-mono" style="font-size:12px">a1</text>
+          <rect x="120" width="56" height="36" rx="7" class="f-accent-soft"/><text x="148" y="23" text-anchor="middle" class="t-mono" style="font-size:12px">a2</text>
+          <rect x="180" width="56" height="36" rx="7" class="f-accent-soft"/><text x="208" y="23" text-anchor="middle" class="t-mono" style="font-size:12px">…</text>
+          <rect x="240" width="56" height="36" rx="7" class="f-accent-soft"/><text x="268" y="23" text-anchor="middle" class="t-mono" style="font-size:12px">a7</text>
+          <rect x="320" width="110" height="36" rx="7" class="f-violet-soft"/><text x="375" y="23" text-anchor="middle" class="t-mono" style="font-size:12px">p9 → sp+0</text>
+          <rect x="436" width="110" height="36" rx="7" class="f-violet-soft"/><text x="491" y="23" text-anchor="middle" class="t-mono" style="font-size:12px">p10 → sp+4</text>
+          <text x="566" y="24" class="t-dim" style="font-family:var(--font)">진입 시 sp 기준, 높은 주소로</text>
+        </g>
+        <!-- 예 4 -->
+        <text x="20" y="294" class="t-mono t-bold">④ RV64 · lp64d:  double k(int i, double d, struct { float f; int n; } s)</text>
+        <g transform="translate(20,306)" style="font-family:var(--mono)">
+          <rect width="90" height="36" rx="7" class="f-accent-soft"/><text x="45" y="16" text-anchor="middle" class="t-mono t-bold" style="font-size:12px">a0</text><text x="45" y="30" text-anchor="middle" class="t-faint">i</text>
+          <rect x="96" width="90" height="36" rx="7" class="f-teal-soft"/><text x="141" y="16" text-anchor="middle" class="t-mono t-bold" style="font-size:12px">fa0</text><text x="141" y="30" text-anchor="middle" class="t-faint">d</text>
+          <rect x="192" width="90" height="36" rx="7" class="f-teal-soft"/><text x="237" y="16" text-anchor="middle" class="t-mono t-bold" style="font-size:12px">fa1</text><text x="237" y="30" text-anchor="middle" class="t-faint">s.f</text>
+          <rect x="288" width="90" height="36" rx="7" class="f-accent-soft"/><text x="333" y="16" text-anchor="middle" class="t-mono t-bold" style="font-size:12px">a1</text><text x="333" y="30" text-anchor="middle" class="t-faint">s.n</text>
+          <rect x="420" width="120" height="36" rx="7" class="f-teal-soft"/><text x="480" y="16" text-anchor="middle" class="t-mono t-bold" style="font-size:12px">fa0</text><text x="480" y="30" text-anchor="middle" class="t-faint">반환 double</text>
+          <text x="556" y="24" class="t-dim" style="font-family:var(--font)">실수 + 정수 구조체는 f 하나 + x 하나</text>
+        </g>
+        <text x="430" y="384" text-anchor="middle" class="t-faint">파랑 = 정수 인자 레지스터 · 청록 = 부동소수점 인자 레지스터 · 보라 = 스택</text>
+      </svg></div>
+      <figcaption><b>그림 7-5.</b> 인자 배치의 네 가지 예. ①의 <code>long long</code>은 a1–a2 쌍에 들어간다. 짝수 레지스터에서 시작해야 하는 규칙은 <b>가변 인자</b>에만 적용된다. ③처럼 a0–a7이 차면 나머지는 스택으로 간다. ④는 하드웨어 부동소수점 규약(다음 절)이 적용되어 실수 값이 fa 레지스터로 간다.</figcaption>
+    </figure>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="data-models">
+    <h2>부동소수점 호출 규약과 데이터 모델</h2>
+    <p>F나 D가 있는 칩이라면 부동소수점 값을 정수 레지스터로 옮겨 넘기는 것은 낭비다. 그래서 psABI는 정수 규약 위에 <b>하드웨어 부동소수점 호출 규약</b>을 덧붙인다. fa0–fa7 여덟 개를 인자로, fa0·fa1을 반환값으로 쓰고, fs0–fs11을 호출 뒤 보존한다. 이때 부동소수점 레지스터로 넘길 수 있는 최대 폭을 <b>ABI_FLEN</b>이라 한다. 정수 규약만 쓸지, ABI_FLEN을 32·64·128 중 무엇으로 할지, 그리고 XLEN이 무엇인지에 따라 이름 붙은 ABI가 갈린다.</p>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>ABI</th><th>XLEN</th><th>ABI_FLEN</th><th>요구 확장</th><th>ELF 플래그</th><th>psABI 1.0 상태</th></tr></thead>
+      <tbody>
+        <tr><td><code>ilp32</code></td><td>32</td><td>없음 (정수 규약만)</td><td>—</td><td>FLOAT_ABI_SOFT</td><td>Ratified</td></tr>
+        <tr><td><code>ilp32f</code></td><td>32</td><td>32</td><td>F</td><td>FLOAT_ABI_SINGLE</td><td>Ratified</td></tr>
+        <tr><td><code>ilp32d</code></td><td>32</td><td>64</td><td>D</td><td>FLOAT_ABI_DOUBLE</td><td>Ratified</td></tr>
+        <tr><td><code>ilp32e</code></td><td>32</td><td>없음</td><td>RV32E용, D와 함께 쓰면 안 됨</td><td>SOFT + RVE</td><td>Draft</td></tr>
+        <tr><td><code>lp64</code></td><td>64</td><td>없음</td><td>—</td><td>FLOAT_ABI_SOFT</td><td>Ratified</td></tr>
+        <tr><td><code>lp64f</code></td><td>64</td><td>32</td><td>F</td><td>FLOAT_ABI_SINGLE</td><td>Ratified</td></tr>
+        <tr><td><code>lp64d</code></td><td>64</td><td>64</td><td>D</td><td>FLOAT_ABI_DOUBLE</td><td>Ratified</td></tr>
+        <tr><td><code>lp64q</code></td><td>64</td><td>128</td><td>Q</td><td>FLOAT_ABI_QUAD</td><td>Ratified</td></tr>
+      </tbody>
+    </table></div>
+    <p>psABI는 RV32G에는 <code>ilp32d</code>, RV64G에는 <code>lp64d</code>를 기본 ABI로 강하게 권한다. RV64GQ 칩도 표준 RV64G 소프트웨어와 맞추기 위해 <code>lp64d</code>를 쓰라고 한다. Zfinx처럼 f 레지스터가 없는 칩은 정수 규약만 쓰는 <code>ilp32</code>·<code>ilp32e</code>·<code>lp64</code>를 쓴다. 링커는 ELF 헤더의 부동소수점 ABI 플래그가 다른 오브젝트를 함께 링크하면 오류를 낸다.</p>
+    <p>이름의 앞부분 <b>ILP32</b>와 <b>LP64</b>는 C 자료형 크기의 관례다. ILP32는 int·long·포인터가 모두 32비트, LP64는 long과 포인터가 64비트다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 820 360" role="img" aria-label="ILP32와 LP64에서 C 자료형 크기 비교 막대">
+        <text x="150" y="28" class="t t-bold">ILP32 (RV32)</text>
+        <text x="500" y="28" class="t t-bold">LP64 (RV64)</text>
+        <text x="20" y="28" class="t-faint">바이트 →</text>
+        <g style="font-size:13px">
+          <text x="140" y="62" text-anchor="end" class="t-mono">char</text><rect x="150" y="48" width="20" height="20" rx="3" class="f-accent-soft"/><text x="176" y="63" class="t-faint">1</text><rect x="500" y="48" width="20" height="20" rx="3" class="f-accent-soft"/><text x="526" y="63" class="t-faint">1 (부호 없음)</text>
+          <text x="140" y="96" text-anchor="end" class="t-mono">short</text><rect x="150" y="82" width="40" height="20" rx="3" class="f-accent-soft"/><text x="196" y="97" class="t-faint">2</text><rect x="500" y="82" width="40" height="20" rx="3" class="f-accent-soft"/><text x="546" y="97" class="t-faint">2</text>
+          <text x="140" y="130" text-anchor="end" class="t-mono">int</text><rect x="150" y="116" width="80" height="20" rx="3" class="f-accent-soft"/><text x="236" y="131" class="t-faint">4</text><rect x="500" y="116" width="80" height="20" rx="3" class="f-accent-soft"/><text x="586" y="131" class="t-faint">4</text>
+          <text x="140" y="164" text-anchor="end" class="t-mono">long</text><rect x="150" y="150" width="80" height="20" rx="3" class="f-gold-soft"/><text x="236" y="165" class="t-faint">4</text><rect x="500" y="150" width="160" height="20" rx="3" class="f-gold-soft"/><text x="666" y="165" class="t-gold">8</text>
+          <text x="140" y="198" text-anchor="end" class="t-mono">long long</text><rect x="150" y="184" width="160" height="20" rx="3" class="f-accent-soft"/><text x="316" y="199" class="t-faint">8</text><rect x="500" y="184" width="160" height="20" rx="3" class="f-accent-soft"/><text x="666" y="199" class="t-faint">8</text>
+          <text x="140" y="232" text-anchor="end" class="t-mono">void *</text><rect x="150" y="218" width="80" height="20" rx="3" class="f-gold-soft"/><text x="236" y="233" class="t-faint">4</text><rect x="500" y="218" width="160" height="20" rx="3" class="f-gold-soft"/><text x="666" y="233" class="t-gold">8</text>
+          <text x="140" y="266" text-anchor="end" class="t-mono">double</text><rect x="150" y="252" width="160" height="20" rx="3" class="f-teal-soft"/><text x="316" y="267" class="t-faint">8</text><rect x="500" y="252" width="160" height="20" rx="3" class="f-teal-soft"/><text x="666" y="267" class="t-faint">8</text>
+          <text x="140" y="300" text-anchor="end" class="t-mono">long double</text><rect x="150" y="286" width="320" height="20" rx="3" class="f-teal-soft"/><text x="476" y="300" class="t-faint" text-anchor="end" dx="-6">16</text><rect x="500" y="286" width="300" height="20" rx="3" class="f-teal-soft"/><text x="794" y="301" class="t-faint" text-anchor="end">16 (4배정밀도)</text>
+        </g>
+        <text x="410" y="340" text-anchor="middle" class="t-faint">금색 = ILP32와 LP64에서 크기가 다른 타입 · max_align_t 정렬은 둘 다 16</text>
+      </svg></div>
+      <figcaption><b>그림 7-6.</b> psABI의 C 자료형 크기. 다른 것은 <code>long</code>과 포인터뿐이다. <code>char</code>는 RISC-V에서 <b>부호 없는</b> 타입이고, <code>long double</code>은 두 모델 모두 16바이트(128비트 4배정밀도)다. 그래서 Q가 없는 칩에서 <code>long double</code> 연산은 소프트웨어 라이브러리로 처리된다.</figcaption>
+    </figure>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="relocations">
+    <h2>주소 만들기: %hi·%lo·%pcrel과 재배치</h2>
+    <p>RISC-V 명령 하나에는 32비트 주소가 통째로 들어가지 않는다. 그래서 주소는 <b>상위 20비트</b>(lui 또는 auipc)와 <b>하위 12비트</b>(addi·load·store·jalr의 즉시값)로 나눠 두 명령으로 만든다. 컴파일할 때는 최종 주소를 모르므로, 어셈블러는 빈칸을 남기고 오브젝트 파일에 <span class="term">재배치</span><span class="english">(relocation)</span> 항목을 기록한다. 링커가 주소를 정한 뒤 그 칸을 채운다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 820 300" role="img" aria-label="주소 0x12345FFF를 lui와 addi로 만들 때 상위 값을 1 올리는 이유">
+        <text x="20" y="32" class="t t-bold">목표 주소 0x12345FFF</text>
+        <rect x="200" y="14" width="400" height="30" rx="5" class="f-gold-soft"/><text x="400" y="34" text-anchor="middle" class="t-mono">0001 0010 0011 0100 0101 │ 1111 1111 1111</text>
+        <text x="610" y="34" class="t-dim">상위 20 │ 하위 12</text>
+        <text x="20" y="84" class="t-dim">하위 12비트 0xFFF를</text>
+        <text x="20" y="102" class="t-dim">addi는 −1로 읽는다</text>
+        <rect x="200" y="62" width="400" height="52" rx="8" class="f-bad-soft"/>
+        <text x="400" y="84" text-anchor="middle" class="t-mono">lui 0x12345 → 0x12345000, addi −1</text>
+        <text x="400" y="106" text-anchor="middle" class="t-bad">= 0x12344FFF  ✕ 틀림</text>
+        <text x="20" y="152" class="t-dim">그래서 %hi는</text>
+        <text x="20" y="170" class="t-dim">(주소 + 0x800) &gt;&gt; 12</text>
+        <rect x="200" y="128" width="400" height="52" rx="8" class="f-ok-soft"/>
+        <text x="400" y="150" text-anchor="middle" class="t-mono">lui 0x12346 → 0x12346000, addi −1</text>
+        <text x="400" y="172" text-anchor="middle" class="t-ok">= 0x12345FFF  ✓</text>
+        <rect x="20" y="200" width="780" height="88" rx="10" class="f-elev"/>
+        <text x="40" y="226" class="t-mono">lui a0, %hi(sym)</text><text x="330" y="226" class="t-mono t-violet" style="font-family:var(--mono);font-size:13px">R_RISCV_HI20 (26)</text>
+        <text x="40" y="248" class="t-mono">addi a0, a0, %lo(sym)</text><text x="330" y="248" class="t-mono t-violet" style="font-family:var(--mono);font-size:13px">R_RISCV_LO12_I (27)</text>
+        <text x="40" y="270" class="t-mono">sw a1, %lo(sym)(a0)</text><text x="330" y="270" class="t-mono t-violet" style="font-family:var(--mono);font-size:13px">R_RISCV_LO12_S (28)</text><text x="530" y="270" class="t-faint">저장은 S 형식 칸</text>
+      </svg></div>
+      <figcaption><b>그림 7-7.</b> 상위·하위 나누기. addi·load의 12비트 즉시값은 <b>부호 확장</b>되므로, 하위 12비트의 최상위 비트가 1이면 상위 값을 1 올려 보정해야 한다. <code>%hi</code>가 0x800을 더해 반올림하는 이유다. 괄호 안 숫자는 psABI 재배치 번호다.</figcaption>
+    </figure>
+
+    <h3>코드 모델</h3>
+    <p>주소를 어떤 명령 조합으로 만들지는 <b>코드 모델</b>이 정한다. psABI는 세 가지를 정의한다.</p>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>코드 모델</th><th>명령</th><th>닿는 범위</th><th>재배치</th></tr></thead>
+      <tbody>
+        <tr><td><b>medlow</b> (medium low)</td><td><code>lui</code> + <code>addi</code>/load/store</td><td>RV32 전체, RV64에서는 주소 0 근처 아래위 약 2 GiB (0x0–0x7FFFF7FF, 0xFFFFFFFF7FFFF800–끝)</td><td>HI20 + LO12_I/S</td></tr>
+        <tr><td><b>medany</b> (medium any)</td><td><code>auipc</code> + <code>addi</code>/load/store</td><td>현재 pc에서 ±2 GiB</td><td>PCREL_HI20 + PCREL_LO12_I/S</td></tr>
+        <tr><td><b>medium PIC</b></td><td>지역 심볼은 medany와 같고, 비지역 심볼은 GOT를 거침</td><td>공유 라이브러리용</td><td>GOT_HI20 + PCREL_LO12</td></tr>
+      </tbody>
+    </table></div>
+    <div class="codebox" data-title="medany 코드 모델 — la, call 의 펼침과 재배치" id="relocation-source"></div>
+    <p><code>%pcrel_lo</code>의 피연산자는 심볼이 아니라 <b>짝이 되는 auipc의 라벨</b>이라는 점이 특이하다. 하위 12비트는 “auipc가 있던 pc를 기준으로 한 거리”의 하위 비트이므로, 링커는 라벨을 따라가 그 auipc의 <code>R_RISCV_PCREL_HI20</code> 항목을 찾아 같은 계산을 한다. 한 auipc에 여러 load/store가 짝지어질 수도 있다.</p>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>번호</th><th>재배치</th><th>칸</th><th>쓰임</th></tr></thead>
+      <tbody>
+        <tr><td class="number">16</td><td><code>R_RISCV_BRANCH</code></td><td>B 형식</td><td>조건 분기, ±4 KiB</td></tr>
+        <tr><td class="number">17</td><td><code>R_RISCV_JAL</code></td><td>J 형식</td><td>jal, −1 MiB ~ +1 MiB−2</td></tr>
+        <tr><td class="number">18</td><td><code>R_RISCV_CALL</code></td><td>U+I</td><td>사용 중단(deprecated), CALL_PLT를 쓸 것</td></tr>
+        <tr><td class="number">19</td><td><code>R_RISCV_CALL_PLT</code></td><td>U+I</td><td><code>call</code>·<code>tail</code>의 auipc+jalr 쌍</td></tr>
+        <tr><td class="number">20</td><td><code>R_RISCV_GOT_HI20</code></td><td>U</td><td><code>%got_pcrel_hi</code>, GOT 항목까지의 pc 상대 거리</td></tr>
+        <tr><td class="number">23–25</td><td><code>R_RISCV_PCREL_HI20 / LO12_I / LO12_S</code></td><td>U / I / S</td><td><code>%pcrel_hi</code>·<code>%pcrel_lo</code></td></tr>
+        <tr><td class="number">26–28</td><td><code>R_RISCV_HI20 / LO12_I / LO12_S</code></td><td>U / I / S</td><td><code>%hi</code>·<code>%lo</code> 절대 주소</td></tr>
+        <tr><td class="number">29–32</td><td><code>R_RISCV_TPREL_HI20 / LO12_I / LO12_S / ADD</code></td><td>U / I / S / —</td><td>TLS Local Exec</td></tr>
+        <tr><td class="number">51</td><td><code>R_RISCV_RELAX</code></td><td>—</td><td>“이 명령은 완화해도 된다”는 표시</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="relaxation">
+    <h2>링커 완화</h2>
+    <p>컴파일러는 함수가 얼마나 멀리 있을지 모르므로 <code>call</code>을 일단 8바이트(auipc+jalr)로 만든다. 그러나 링크해 보면 대부분의 호출은 가까운 곳으로 간다. 링커는 이때 두 명령을 한 명령으로 바꾸고 남는 바이트를 지운다. 이것이 RISC-V 툴체인의 특징인 <span class="term">링커 완화</span><span class="english">(linker relaxation)</span>다. 링커는 후보 재배치와 같은 자리에 <code>R_RISCV_RELAX</code>가 함께 있을 때만 완화한다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 380" role="img" aria-label="함수 호출 완화와 전역 포인터 완화">
+        <defs><marker id="relax-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker></defs>
+        <text x="20" y="28" class="t t-bold">함수 호출 완화</text>
+        <rect x="20" y="42" width="240" height="78" rx="10" class="f-elev"/>
+        <text x="36" y="66" class="t-mono">auipc ra, 0</text><text x="36" y="88" class="t-mono">jalr  ra, 0(ra)</text><text x="36" y="110" class="t-faint">8바이트 · ±2 GiB</text>
+        <path d="M262 81 H318" class="s-accent flow-dash" marker-end="url(#relax-arrow)"/>
+        <text x="290" y="70" text-anchor="middle" class="t-faint">±1 MiB</text>
+        <rect x="322" y="42" width="220" height="78" rx="10" class="f-accent-soft"/>
+        <text x="338" y="76" class="t-mono">jal ra, sym</text><text x="338" y="104" class="t-faint">4바이트 · R_RISCV_JAL</text>
+        <path d="M544 81 H600" class="s-accent flow-dash" marker-end="url(#relax-arrow)"/>
+        <text x="572" y="70" text-anchor="middle" class="t-faint">±2 KiB</text>
+        <rect x="604" y="42" width="236" height="78" rx="10" class="f-ok-soft"/>
+        <text x="620" y="70" class="t-mono">c.jal sym  (RV32)</text><text x="620" y="92" class="t-mono">c.j   sym  (tail)</text><text x="620" y="112" class="t-faint">2바이트 · C 필요</text>
+        <!-- gp 완화 -->
+        <text x="20" y="168" class="t t-bold">전역 포인터 완화</text>
+        <rect x="20" y="182" width="240" height="78" rx="10" class="f-elev"/>
+        <text x="36" y="208" class="t-mono">lui t0, %hi(x)</text><text x="36" y="230" class="t-mono">lw  t1, %lo(x)(t0)</text><text x="36" y="250" class="t-faint">2명령</text>
+        <path d="M262 221 H318" class="s-accent flow-dash" marker-end="url(#relax-arrow)"/>
+        <rect x="322" y="182" width="220" height="78" rx="10" class="f-ok-soft"/>
+        <text x="338" y="216" class="t-mono">lw t1, off(gp)</text><text x="338" y="244" class="t-faint">1명령</text>
+        <!-- gp 창 -->
+        <rect x="580" y="170" width="260" height="190" rx="10" class="f-elev"/>
+        <text x="710" y="192" text-anchor="middle" class="t-dim">데이터 영역</text>
+        <rect x="610" y="206" width="200" height="110" rx="6" class="f-gold-soft"/>
+        <line x1="600" y1="261" x2="820" y2="261" stroke="var(--accent-2)" stroke-width="2"/>
+        <text x="710" y="256" text-anchor="middle" class="t-gold" style="font-size:12.5px">gp = __global_pointer$</text>
+        <text x="710" y="226" text-anchor="middle" class="t-faint">+2 KiB</text>
+        <text x="710" y="304" text-anchor="middle" class="t-faint">−2 KiB</text>
+        <text x="710" y="344" text-anchor="middle" class="t-faint">이 창 안의 변수는 gp 기준 한 명령</text>
+        <text x="20" y="300" class="t-dim">조건: gp와 심볼의 거리 ±2 KiB</text>
+        <text x="20" y="322" class="t-dim">프로그램 시작 시 gp를 __global_pointer$로 초기화해야 함</text>
+        <text x="20" y="344" class="t-dim">(초기화 코드 자체는 .option norelax 로 완화 금지)</text>
+      </svg></div>
+      <figcaption><b>그림 7-8.</b> 두 가지 대표 완화. 위: 대상이 ±1 MiB 안이면 auipc+jalr이 <code>jal</code> 하나로, ±2 KiB 안이고 C가 있으면 16비트 <code>c.jal</code>(RV32 전용, RV64에서 그 인코딩은 c.addiw)이나 꼬리 호출용 <code>c.j</code>로 줄어든다. 아래: 전역 변수가 gp 주변 ±2 KiB 안에 있으면 lui를 지우고 gp 기준 접근 한 명령으로 바꾼다. 이 밖에 0번지 근처 주소의 x0 기준 완화, c.lui 완화, tp 기준 TLS 완화가 있다.</figcaption>
+    </figure>
+    <div class="callout warn"><strong>완화는 코드를 움직인다</strong><p>완화는 바이트를 <b>지우므로</b> 그 뒤의 모든 코드 주소가 당겨진다. 그래서 함수 안의 분기처럼 보통은 어셈블 시점에 끝나는 거리 계산도, 완화가 켜져 있으면 재배치로 남겨 링커가 다시 계산해야 한다. psABI가 “완화를 켜면 코드 생성기는 재배치를 항상 내보내야 한다”고 적는 이유다. 정렬 지시어도 <code>R_RISCV_ALIGN</code>으로 남겨 완화 뒤에 다시 맞춘다.</p></div>
+
+    <div class="sim" id="relaxation-sim">
+      <div class="sim-head"><span class="sim-tag">SIMULATOR</span><h3>call 완화 실험: 거리에 따라 몇 바이트가 되나</h3></div>
+      <div class="sim-view"><canvas id="relaxation-canvas" aria-label="호출 거리와 각 명령 형태의 도달 범위를 로그 눈금으로 보여 주는 그림"></canvas></div>
+      <div class="sim-pad" style="padding-top:6px">
+        <div class="relaxation-columns" id="relaxation-columns"></div>
+      </div>
+      <div class="step-description" id="relaxation-description"></div>
+      <div class="sim-controls">
+        <label class="control"><span>호출 위치 → 대상 거리 <output id="relaxation-distance-output"></output></span><input type="range" id="relaxation-distance" min="0" max="12" value="5"></label>
+        <div class="control"><span>방향</span><div class="segmented" id="relaxation-direction"><button data-value="1" class="on">앞으로(+)</button><button data-value="-1">뒤로(−)</button></div></div>
+        <div class="control"><span>XLEN</span><div class="segmented" id="relaxation-xlen"><button data-value="32" class="on">RV32</button><button data-value="64">RV64</button></div></div>
+        <div class="control"><span>C 확장</span><div class="segmented" id="relaxation-compressed"><button data-value="yes" class="on">있음</button><button data-value="no">없음</button></div></div>
+        <div class="control"><span>의사 명령</span><div class="segmented" id="relaxation-kind"><button data-value="call" class="on">call</button><button data-value="tail">tail</button></div></div>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">완화 전</span><span class="value" id="relaxation-before">8 B</span></div>
+        <div class="stat"><span class="key">완화 후</span><span class="value" id="relaxation-after">—</span></div>
+        <div class="stat"><span class="key">절약</span><span class="value" id="relaxation-saved">—</span></div>
+      </div>
+      <div class="sim-note">거리를 2 KiB 근처에서 한 칸씩 움직여 c.jal → jal 경계를, 1 MiB 근처에서 jal → auipc+jalr 경계를 넘어 보자. RV64로 바꾸면 c.jal이 사라지는(그 인코딩이 RV64에서는 c.addiw라서) 반면 꼬리 호출의 c.j는 남는다. 기계어는 riscv.js의 인코더로, c.jal·c.j는 이 장의 CJ 형식 인코더로 만든 것이다.</div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="pic-tls">
+    <h2>PIC·GOT·PLT와 TLS</h2>
+    <p>공유 라이브러리는 메모리 어디에 올라갈지 모른다. 그래서 코드 안에 절대 주소를 박지 않는 <span class="term">위치 독립 코드</span><span class="english">(PIC)</span>로 만든다. 자기 안의 심볼은 auipc 기반 pc 상대 주소로 충분하지만, 다른 모듈에 있는 심볼의 주소는 실행 시에야 정해진다. 이때 쓰는 간접 테이블이 <b>GOT</b>(Global Offset Table)와 <b>PLT</b>(Program Linkage Table)다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 330" role="img" aria-label="PLT 스텁이 GOT 항목을 읽어 공유 라이브러리 함수로 점프하는 흐름">
+        <defs><marker id="plt-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker>
+          <marker id="plt-arrow-faint" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--text-faint)"/></marker></defs>
+        <rect x="20" y="30" width="200" height="90" rx="12" class="f-elev"/>
+        <text x="120" y="56" text-anchor="middle" class="t t-bold">main (실행 파일)</text>
+        <text x="120" y="84" text-anchor="middle" class="t-mono">call printf@plt</text>
+        <text x="120" y="106" text-anchor="middle" class="t-faint">R_RISCV_CALL_PLT</text>
+        <path d="M222 75 H268" class="s-accent flow-dash" marker-end="url(#plt-arrow)"/>
+        <rect x="272" y="20" width="290" height="110" rx="12" class="f-accent-soft"/>
+        <text x="417" y="44" text-anchor="middle" class="t t-bold">PLT 항목 (16바이트)</text>
+        <text x="288" y="68" class="t-mono" style="font-size:12px">auipc  t3, %pcrel_hi(printf@.got.plt)</text>
+        <text x="288" y="88" class="t-mono" style="font-size:12px">l[w|d] t3, %pcrel_lo(1b)(t3)</text>
+        <text x="288" y="108" class="t-mono" style="font-size:12px">jalr   t1, t3  ;  nop</text>
+        <path d="M417 132 V178" class="s-accent flow-dash" marker-end="url(#plt-arrow)"/>
+        <text x="428" y="160" class="t-faint">주소 읽기</text>
+        <rect x="292" y="182" width="250" height="60" rx="12" class="f-gold-soft"/>
+        <text x="417" y="206" text-anchor="middle" class="t t-bold">GOT (.got.plt) 칸</text>
+        <text x="417" y="228" text-anchor="middle" class="t-mono" style="font-size:12px">&amp;printf (동적 링커가 채움)</text>
+        <path d="M564 75 H630" class="s-accent flow-dash" marker-end="url(#plt-arrow)"/>
+        <text x="597" y="64" text-anchor="middle" class="t-faint">점프</text>
+        <rect x="634" y="30" width="206" height="90" rx="12" class="f-violet-soft"/>
+        <text x="737" y="58" text-anchor="middle" class="t t-bold">libc.so</text>
+        <text x="737" y="84" text-anchor="middle" class="t-mono">printf: …</text>
+        <text x="737" y="106" text-anchor="middle" class="t-mono">ret → main</text>
+        <!-- 첫 호출 -->
+        <rect x="620" y="182" width="220" height="60" rx="12" class="f-elev"/>
+        <text x="730" y="206" text-anchor="middle" class="t t-bold">_dl_runtime_resolve</text>
+        <text x="730" y="228" text-anchor="middle" class="t-faint">첫 호출 때 주소를 찾아 GOT에 기록</text>
+        <path d="M544 212 H616" class="s-line s-dashed" marker-end="url(#plt-arrow-faint)"/>
+        <text x="20" y="282" class="t-dim">• 지연 바인딩: 처음에는 GOT 칸이 PLT 맨 앞의 해석 루틴을 가리키고, 첫 호출에서 실제 주소로 바뀐다(LD_BIND_NOW면 미리 채움).</text>
+        <text x="20" y="306" class="t-dim">• 다른 모듈의 전역 변수 주소: auipc a0, %got_pcrel_hi(x) ; l[w|d] a0, %pcrel_lo(…)(a0)  — GOT에서 주소를 읽는다.</text>
+      </svg></div>
+      <figcaption><b>그림 7-9.</b> PLT를 거친 함수 호출. 코드에는 다른 모듈의 절대 주소가 없고, 쓰기 가능한 데이터 영역인 GOT만 실행 시 고쳐진다. 그 덕분에 코드 영역은 여러 프로세스가 그대로 공유할 수 있다. PLT 스텁의 <code>jalr t1, t3</code>는 t1에 자기 다음 주소를 남겨 해석 루틴이 어느 항목에서 왔는지 알 수 있게 한다.</figcaption>
+    </figure>
+    <h3>tp와 스레드 지역 저장소</h3>
+    <p>C의 <code>__thread</code>나 <code>thread_local</code> 변수는 스레드마다 따로 있다. RISC-V는 ELF TLS의 <b>Variant I</b>을 따르며, <b>tp 레지스터가 스레드 제어 블록(TCB) 바로 다음 주소</b>를 가리킨다. 정적으로 링크한 실행 파일의 TLS 변수는 tp로부터의 고정 오프셋으로 접근하는데(Local Exec 모델), <code>%tprel_hi</code>·<code>%tprel_add</code>·<code>%tprel_lo</code>를 쓴다. tp가 프로시저 사이에서 절대 바뀌면 안 되는 이유다.</p>
+    <div class="codebox" data-title="TLS Local Exec (psABI 8.5.1 예시)">        lui  a5, %tprel_hi(i)          # R_RISCV_TPREL_HI20
+        add  a5, a5, tp, %tprel_add(i) # R_RISCV_TPREL_ADD
+        lw   t0, %tprel_lo(i)(a5)      # R_RISCV_TPREL_LO12_I
+        addi t0, t0, 1
+        sw   t0, %tprel_lo(i)(a5)      # R_RISCV_TPREL_LO12_S</div>
+    <p>오프셋이 tp에서 ±2 KiB 안이면 링커가 lui와 add를 지우고 <code>lw t0, off(tp)</code> 한 명령으로 완화한다(thread-pointer relaxation). 그 밖에 공유 라이브러리용 Initial Exec·Global Dynamic 모델은 GOT를 거친다.</p>
+  </section>
+
+  <section class="keypoints" id="summary">
+    <h2>핵심 정리</h2>
+    <ol>
+      <li>ISA는 명령의 뜻을, <b>psABI</b>는 함수 사이의 약속(레지스터 역할, 스택, 자료형, ELF·재배치)을 정한다. psABI 1.0은 2022년에 비준되었다.</li>
+      <li>인자는 a0–a7, 반환값은 a0–a1. <b>sp와 s0–s11은 피호출자가 보존</b>하고, ra·t·a는 호출 뒤 바뀌어 있을 수 있다. gp·tp는 아무도 바꾸지 않는다.</li>
+      <li>스택은 아래로 자라고 sp는 항상 <b>16바이트 정렬</b>, 레드 존은 없다. 프레임 포인터는 선택이며 쓰면 s0다. ILP32E는 4바이트 정렬과 a0–a5만 쓴다.</li>
+      <li>2×XLEN 스칼라는 레지스터 쌍, 더 큰 값과 2×XLEN보다 큰 구조체는 참조로 넘긴다. 짝수 레지스터 쌍 규칙은 가변 인자에만 적용된다.</li>
+      <li>ABI 이름은 데이터 모델(ILP32/LP64)과 ABI_FLEN(없음·f·d·q)의 조합이다. RV64G의 권장 기본값은 <code>lp64d</code>, RV32G는 <code>ilp32d</code>다.</li>
+      <li>주소는 상위 20비트 + 하위 12비트로 나누며 <code>%hi</code>는 0x800을 더해 반올림한다. <code>call</code>은 R_RISCV_CALL_PLT + R_RISCV_RELAX가 붙은 auipc+jalr 쌍이다.</li>
+      <li>링커 완화로 call은 jal(±1 MiB)이나 c.jal/c.j(±2 KiB)로, 전역 변수 접근은 gp 기준 한 명령으로 줄어든다.</li>
+      <li>PIC는 GOT·PLT로 다른 모듈의 주소를 간접 참조하고, TLS는 tp 기준(Variant I)으로 접근한다.</li>
+    </ol>
+  </section>
+
+  <section id="quiz">
+    <h2>확인 퀴즈</h2>
+    <div class="quiz">
+      <div class="quiz-question"><p>재귀 호출 뒤에도 필요한 값을 담기에 가장 알맞은 레지스터는?</p><div class="options">
+        <button class="option">a0</button>
+        <button class="option">t0</button>
+        <button class="option" data-correct>s0</button>
+        <button class="option">ra</button>
+      </div><div class="quiz-explanation">s 레지스터는 피호출자가 보존하므로 호출을 건너 살아남는다. 대신 그 함수도 프롤로그에서 호출자의 s0를 저장해 두어야 한다.</div></div>
+      <div class="quiz-question"><p>psABI가 정한 프로시저 진입 시 sp의 정렬은?</p><div class="options">
+        <button class="option">4바이트</button>
+        <button class="option">8바이트</button>
+        <button class="option" data-correct>16바이트 (128비트)</button>
+        <button class="option">정렬 규칙 없음</button>
+      </div><div class="quiz-explanation">표준 ABI에서는 16바이트로 정렬하고 실행 내내 유지한다. ILP32E만 4바이트로 완화한다.</div></div>
+      <div class="quiz-question"><p>RV32 ilp32에서 <code>void f(int a, long long b)</code>의 b는 어디로 가나?</p><div class="options">
+        <button class="option">a2–a3 (짝수 레지스터부터)</button>
+        <button class="option" data-correct>a1–a2</button>
+        <button class="option">스택</button>
+        <button class="option">a1 하나</button>
+      </div><div class="quiz-explanation">2×XLEN 스칼라는 다음 레지스터 쌍에 들어간다. 짝수에서 시작해야 한다는 규칙은 가변 인자에만 적용된다.</div></div>
+      <div class="quiz-question"><p>LP64에서 크기가 8바이트가 <b>아닌</b> 타입은?</p><div class="options">
+        <button class="option">long</button>
+        <button class="option">void *</button>
+        <button class="option" data-correct>int</button>
+        <button class="option">long long</button>
+      </div><div class="quiz-explanation">LP64는 Long과 Pointer가 64비트라는 뜻이다. int는 여전히 4바이트다.</div></div>
+      <div class="quiz-question"><p>주소 0x00012800을 <code>lui</code>+<code>addi</code>로 만들 때 <code>%hi</code> 값은?</p><div class="options">
+        <button class="option">0x00012</button>
+        <button class="option" data-correct>0x00013</button>
+        <button class="option">0x00011</button>
+        <button class="option">0x12800</button>
+      </div><div class="quiz-explanation">하위 12비트 0x800은 addi에서 −2048로 읽힌다. 그래서 상위에 1을 더한 0x13을 쓰면 0x13000 − 0x800 = 0x12800이 된다. (0x12800 + 0x800) &gt;&gt; 12 = 0x13.</div></div>
+      <div class="quiz-question"><p>대상이 300 KiB 떨어진 <code>call</code>을 링커 완화하면?</p><div class="options">
+        <button class="option">auipc+jalr 그대로 (8바이트)</button>
+        <button class="option" data-correct>jal 하나 (4바이트)</button>
+        <button class="option">c.jal (2바이트)</button>
+        <button class="option">링크 오류</button>
+      </div><div class="quiz-explanation">±1 MiB 안이므로 jal로 줄어든다. c.jal은 ±2 KiB 안이어야 한다.</div></div>
+      <div class="quiz-question"><p>tp 레지스터의 역할로 옳은 것은?</p><div class="options">
+        <button class="option">임시 레지스터로 자유롭게 쓴다</button>
+        <button class="option">함수의 두 번째 반환값</button>
+        <button class="option" data-correct>스레드 지역 저장소의 기준 주소로, 프로시저가 바꾸면 안 된다</button>
+        <button class="option">링커가 전역 변수 접근에 쓴다</button>
+      </div><div class="quiz-explanation">tp는 TLS의 기준(TCB 다음 주소)이다. 전역 변수 완화에 쓰는 것은 gp다.</div></div>
+    </div>
+  </section>
+
+  <section id="references">
+    <h2>더 읽을거리</h2>
+    <ul class="references">
+      <li><a href="https://docs.riscv.org/reference/abi/index.html" target="_blank" rel="noopener">RISC-V ABIs Specification, Version 1.0 (Ratified)</a> — 호출 규약, ELF, DWARF</li>
+      <li><a href="https://docs.riscv.org/reference/abi/v1.0/riscv-cc-register-convention.html" target="_blank" rel="noopener">psABI — Register Convention</a></li>
+      <li><a href="https://docs.riscv.org/reference/abi/v1.0/riscv-cc-procedure-calling-convention.html" target="_blank" rel="noopener">psABI — Procedure Calling Convention</a></li>
+      <li><a href="https://docs.riscv.org/reference/abi/v1.0/riscv-elf-code-models.html" target="_blank" rel="noopener">psABI — Code Models</a> · <a href="https://docs.riscv.org/reference/abi/v1.0/riscv-elf-object-files.html" target="_blank" rel="noopener">ELF Object Files (재배치·TLS)</a></li>
+      <li><a href="https://docs.riscv.org/reference/abi/v1.0/riscv-elf-linker-relaxation.html" target="_blank" rel="noopener">psABI — Linker Relaxation</a></li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html" target="_blank" rel="noopener">Volume I — RV32I: JAL·JALR와 링크 레지스터</a></li>
+    </ul>
+  </section>
+</main>
+
+<script>
+/* ---------------------------------------------------------------------------
+   코드 상자 채우기
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const Riscv = window.Riscv;
+  const RELOCATION_SOURCE = [
+    "# la a0, sym  →  pc 상대 주소 두 명령",
+    ".L1:   auipc a0, %pcrel_hi(sym)        # R_RISCV_PCREL_HI20",
+    "       addi  a0, a0, %pcrel_lo(.L1)    # R_RISCV_PCREL_LO12_I",
+    "# lw a1, sym  →  짝 auipc 의 라벨을 가리킨다",
+    ".L2:   auipc a1, %pcrel_hi(sym)        # R_RISCV_PCREL_HI20",
+    "       lw    a1, %pcrel_lo(.L2)(a1)    # R_RISCV_PCREL_LO12_I",
+    "# call f  →  완화 가능 표시가 붙은 쌍",
+    "       auipc ra, 0                     # R_RISCV_CALL_PLT (f), R_RISCV_RELAX",
+    "       jalr  ra, 0(ra)",
+  ].join("\n");
+  document.getElementById("relocation-source").innerHTML = Riscv.highlightAssembly(RELOCATION_SOURCE);
+})();
+
+/* ---------------------------------------------------------------------------
+   재귀 팩토리얼과 스택 프레임: riscv.js 에뮬레이터로 실제로 실행한다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const Riscv = window.Riscv;
+  const FRAME_SIZE = 16;
+  const WORD_SIZE = 4;
+  const RA_OFFSET = 12;
+  const SAVED_S0_OFFSET = 8;
+  const STACK_POINTER = 2;
+  const MILLISECONDS_PER_STEP = 260;
+  const DEPTH_COLOR_COUNT = 4;
+  const REGISTERS_SHOWN = [10, 8, 1, 2];
+
+  function buildSource(argument) {
+    return [
+      "main:   li   a0, " + argument + "          # n",
+      "        call fact          # ra ← 다음 주소",
+      "        li   a7, 1         # 결과 출력",
+      "        ecall",
+      "        li   a7, 10        # 종료",
+      "        ecall",
+      "fact:   addi sp, sp, -16   # 프롤로그: 프레임 16바이트",
+      "        sw   ra, 12(sp)    #   복귀 주소 저장",
+      "        sw   s0, 8(sp)     #   호출자의 s0 저장",
+      "        mv   s0, a0        # n을 s0에 보관",
+      "        li   t0, 1",
+      "        ble  a0, t0, base  # n <= 1 이면 끝",
+      "        addi a0, a0, -1",
+      "        call fact          # fact(n-1)",
+      "        mul  a0, a0, s0    # n * fact(n-1)",
+      "        j    done",
+      "base:   li   a0, 1",
+      "done:   lw   ra, 12(sp)    # 에필로그: 복원",
+      "        lw   s0, 8(sp)",
+      "        addi sp, sp, 16",
+      "        ret",
+    ].join("\n");
+  }
+
+  const listing = document.getElementById("factorial-listing");
+  const stackTable = document.getElementById("factorial-stack");
+  const stackBase = document.getElementById("factorial-stack-base");
+  const registerStrip = document.getElementById("factorial-registers");
+  const description = document.getElementById("factorial-description");
+  const runButton = document.getElementById("factorial-run");
+  const machine = new Riscv.Machine();
+  let program = null;
+  let argument = 4;
+  let initialStackPointer = 0;
+  let mainReturnAddress = 0;
+  let lastRecord = null;
+  let runTimer = null;
+
+  document.getElementById("factorial-source").innerHTML = Riscv.highlightAssembly(buildSource("n").split("\n").slice(6).join("\n"));
+
+  function load() {
+    stopRunning();
+    program = Riscv.assemble(buildSource(argument));
+    machine.load(program);
+    initialStackPointer = machine.registers[STACK_POINTER] >>> 0;
+    const callEntry = program.words.find((entry) => entry.line === 2);
+    mainReturnAddress = callEntry.address + WORD_SIZE;
+    lastRecord = null;
+    listing.innerHTML = program.words.map((entry) =>
+      '<div class="row" data-address="' + entry.address + '"><span class="address">' + entry.address.toString(16).padStart(3, "0") + "</span><span>" + entry.text + "</span></div>").join("");
+    description.innerHTML = "<b>한 명령</b>을 눌러 시작하자. sp는 " + book.toHex(initialStackPointer, 16) + "에서 출발한다(16의 배수).";
+    render();
+  }
+
+  function frameDepthOf(address) {
+    return Math.floor((initialStackPointer - 1 - address) / FRAME_SIZE) + 1;
+  }
+  function slotLabel(address, value) {
+    const offsetInFrame = address - (initialStackPointer - frameDepthOf(address) * FRAME_SIZE);
+    if (offsetInFrame === RA_OFFSET) {
+      if (value === 0) return "ra 칸";
+      return value === mainReturnAddress ? "ra → main으로" : "ra → fact 안 mul로";
+    }
+    if (offsetInFrame === SAVED_S0_OFFSET) return "호출자의 s0" + (frameDepthOf(address) > 1 ? " (= 바깥 n)" : "");
+    return "정렬용 빈칸";
+  }
+
+  function render() {
+    const stackPointer = machine.registers[STACK_POINTER] >>> 0;
+    const currentDepth = (initialStackPointer - stackPointer) / FRAME_SIZE;
+    listing.querySelectorAll(".row").forEach((row) => row.classList.toggle("current", Number(row.dataset.address) === machine.pc && !machine.isHalted));
+    const currentRow = listing.querySelector(".row.current");
+    if (currentRow) {
+      const rowTop = currentRow.offsetTop - listing.offsetTop;
+      if (rowTop < listing.scrollTop || rowTop > listing.scrollTop + listing.clientHeight - currentRow.offsetHeight) listing.scrollTop = rowTop - listing.clientHeight / 2;
+    }
+    stackBase.textContent = book.toHex(initialStackPointer, 16) + " 위: main이 받은 스택 (스택 바닥)" + (stackPointer === initialStackPointer ? "  ← sp" : "");
+    const rows = [];
+    const writtenAddress = lastRecord && lastRecord.memoryWrite ? lastRecord.memoryWrite.address : null;
+    for (let depth = 1; depth <= argument; depth += 1) {
+      for (let offset = FRAME_SIZE - WORD_SIZE; offset >= 0; offset -= WORD_SIZE) {
+        const address = initialStackPointer - depth * FRAME_SIZE + offset;
+        const value = machine.readMemory(address, WORD_SIZE, false);
+        const classNames = ["stack-row", "depth-" + (depth % DEPTH_COLOR_COUNT)];
+        if (depth > currentDepth) classNames.push("is-inactive");
+        if (address === writtenAddress) classNames.push("changed");
+        if (address === stackPointer) classNames.push("at-sp");
+        const label = (offset === FRAME_SIZE - WORD_SIZE ? "fact#" + depth + " · " : "") + slotLabel(address, value);
+        rows.push('<div class="' + classNames.join(" ") + '"><span class="address">' + address.toString(16) + "</span><span>" + book.toHex(value) + '</span><span class="label">' + label + '</span><span class="pointer">' + (address === stackPointer ? "← sp" : "") + "</span></div>");
+      }
+    }
+    stackTable.innerHTML = rows.join("");
+    registerStrip.innerHTML = REGISTERS_SHOWN.map((number) => {
+      const isChanged = lastRecord && lastRecord.registerWrite && lastRecord.registerWrite.number === number;
+      const value = number === STACK_POINTER ? book.toHex(machine.registers[number] >>> 0, 16) : String(machine.registers[number]);
+      return '<div class="cell' + (isChanged ? " changed" : "") + '"><div class="cell-name"><span>' + Riscv.ABI_NAMES[number] + "</span><span>x" + number + '</span></div><div class="cell-value">' + value + "</div></div>";
+    }).join("");
+    document.getElementById("factorial-pc").textContent = book.toHex(machine.pc, 16);
+    document.getElementById("factorial-sp").textContent = book.toHex(stackPointer, 16);
+    document.getElementById("factorial-depth").textContent = currentDepth;
+    document.getElementById("factorial-output").textContent = machine.output || "—";
+  }
+
+  function describe(record) {
+    if (!record || !record.text) return;
+    if (record.error) {
+      description.innerHTML = "⚠️ " + record.error;
+      return;
+    }
+    let text = "<code>" + record.text + "</code> — ";
+    const name = record.decoded ? record.decoded.name : "";
+    if (record.memoryWrite) text += book.toHex(record.memoryWrite.address, 16) + "에 " + book.toHex(record.memoryWrite.after) + " 저장. ";
+    if (record.memoryRead) text += book.toHex(record.memoryRead.address, 16) + "에서 " + book.toHex(record.memoryRead.value >>> 0) + " 복원. ";
+    if (record.registerWrite && record.registerWrite.number === STACK_POINTER) {
+      text += record.registerWrite.after < record.registerWrite.before ? "sp를 16 내려 새 프레임을 만든다. " : "sp를 16 올려 프레임을 버린다. ";
+    } else if (name === "jal" && record.registerWrite && record.registerWrite.number === 1) {
+      text += "ra ← " + book.toHex(record.registerWrite.after >>> 0, 16) + " 를 남기고 fact로 들어간다. ";
+    } else if (name === "jalr") {
+      text += "ret: ra가 가리키는 " + book.toHex(record.nextPc, 16) + "로 돌아간다. ";
+    } else if (record.registerWrite && record.registerWrite.number !== 0) {
+      text += Riscv.ABI_NAMES[record.registerWrite.number] + " ← " + record.registerWrite.after + ". ";
+    }
+    if (record.isBranch && name !== "jal" && name !== "jalr") text += record.isBranchTaken ? "분기 성립. " : "분기 불성립. ";
+    if (machine.isHalted) text += "프로그램 종료. 출력 = " + machine.output;
+    description.innerHTML = text;
+  }
+
+  function step() {
+    if (machine.isHalted) {
+      stopRunning();
+      return;
+    }
+    lastRecord = machine.step();
+    describe(lastRecord);
+    render();
+    if (machine.isHalted) stopRunning();
+  }
+  function stopRunning() {
+    if (runTimer) clearInterval(runTimer);
+    runTimer = null;
+    runButton.textContent = "자동 실행";
+  }
+  document.getElementById("factorial-step").addEventListener("click", () => {
+    stopRunning();
+    step();
+  });
+  runButton.addEventListener("click", () => {
+    if (runTimer) {
+      stopRunning();
+      return;
+    }
+    runTimer = setInterval(step, MILLISECONDS_PER_STEP);
+    runButton.textContent = "멈춤";
+  });
+  document.getElementById("factorial-reset").addEventListener("click", load);
+  book.range("factorial-n", (value) => {
+    argument = value;
+    load();
+  }, (value) => value + " (" + value + "! = " + factorial(value) + ")");
+  function factorial(value) {
+    let result = 1;
+    for (let factor = 2; factor <= value; factor += 1) result *= factor;
+    return result;
+  }
+})();
+
+/* ---------------------------------------------------------------------------
+   이 레지스터는 누가 지키나: 저장·복원 책임을 애니메이션으로 보여 준다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const STEP_SECONDS = 1.25;
+  const TOKEN_TRAVEL_FRACTION = 0.7;
+  const MINIMUM_FONT_SIZE = 11;
+  const FONT_SCALE = 0.018;
+  const CANVAS_ASPECT_RATIO = 0.44;
+  const MINIMUM_CODE_FONT_SIZE = 8;
+
+  /*
+   * 시나리오: 호출자·피호출자 코드 줄과, 한 걸음씩 진행할 동작 목록.
+   * 동작 type: set(값 쓰기) | save(스택 칸으로) | restore(스택 칸에서) | call | return | none | check
+   */
+  function buildScenario(registerName, isBroken) {
+    if (registerName === "s1") {
+      return {
+        kind: "피호출자 저장", owner: "피호출자 (f)", initial: "?",
+        caller: ["li   s1, 42", "call f", "add  a0, s1, a0   # s1을 계속 씀"],
+        callee: ["f: addi sp, sp, -16", isBroken ? "   # sw s1 생략 (약속 위반)" : "   sw   s1, 0(sp)", "   li   s1, 7       # 마음껏 씀", isBroken ? "   # lw s1 생략" : "   lw   s1, 0(sp)", "   addi sp, sp, 16", "   ret"],
+        brokenLines: isBroken ? { callee: [1, 3] } : {},
+        steps: [
+          { side: "caller", line: 0, type: "set", value: "42" },
+          { side: "caller", line: 1, type: "call" },
+          { side: "callee", line: 0, type: "none" },
+          { side: "callee", line: 1, type: isBroken ? "none" : "save", slot: "callee" },
+          { side: "callee", line: 2, type: "set", value: "7" },
+          { side: "callee", line: 3, type: isBroken ? "none" : "restore", slot: "callee" },
+          { side: "callee", line: 4, type: "none" },
+          { side: "callee", line: 5, type: "return" },
+          { side: "caller", line: 2, type: "check", expected: "42" },
+        ],
+      };
+    }
+    if (registerName === "t0") {
+      return {
+        kind: "호출자 저장", owner: "호출자 (main)", initial: "?",
+        caller: ["li   t0, 42", isBroken ? "# sw t0 생략 (약속 위반)" : "sw   t0, 0(sp)    # 호출 전 저장", "call f", isBroken ? "# lw t0 생략" : "lw   t0, 0(sp)    # 호출 뒤 복원", "add  a0, t0, a0"],
+        callee: ["f: li  t0, 7     # t0는 마음껏 씀", "   ret"],
+        brokenLines: isBroken ? { caller: [1, 3] } : {},
+        steps: [
+          { side: "caller", line: 0, type: "set", value: "42" },
+          { side: "caller", line: 1, type: isBroken ? "none" : "save", slot: "caller" },
+          { side: "caller", line: 2, type: "call" },
+          { side: "callee", line: 0, type: "set", value: "7" },
+          { side: "callee", line: 1, type: "return" },
+          { side: "caller", line: 3, type: isBroken ? "none" : "restore", slot: "caller" },
+          { side: "caller", line: 4, type: "check", expected: "42" },
+        ],
+      };
+    }
+    if (registerName === "ra") {
+      return {
+        kind: "호출 뒤 보존 안 됨", owner: "부르는 쪽 f (잎이 아니면)", initial: "0x1004",
+        callerTitle: "f (main이 부름)", calleeTitle: "g (f가 부름)",
+        caller: ["f: addi sp, sp, -16", isBroken ? "   # sw ra 생략 (약속 위반)" : "   sw   ra, 12(sp)", "   call g       # ra ← 0x2010", isBroken ? "   # lw ra 생략" : "   lw   ra, 12(sp)", "   addi sp, sp, 16", "   ret          # main 0x1004 로?"],
+        callee: ["g: …", "   ret          # 0x2010 으로"],
+        brokenLines: isBroken ? { caller: [1, 3] } : {},
+        steps: [
+          { side: "caller", line: 0, type: "none" },
+          { side: "caller", line: 1, type: isBroken ? "none" : "save", slot: "caller" },
+          { side: "caller", line: 2, type: "call", value: "0x2010" },
+          { side: "callee", line: 0, type: "none" },
+          { side: "callee", line: 1, type: "return" },
+          { side: "caller", line: 3, type: isBroken ? "none" : "restore", slot: "caller" },
+          { side: "caller", line: 4, type: "none" },
+          { side: "caller", line: 5, type: "check", expected: "0x1004" },
+        ],
+      };
+    }
+    if (registerName === "sp") {
+      return {
+        kind: "피호출자 저장", owner: "피호출자 (f)", initial: "0xfff0",
+        caller: ["# sp = 0xfff0", "call f", "lw   s0, 8(sp)   # 내 프레임을 읽음"],
+        callee: ["f: addi sp, sp, -16", "   …", isBroken ? "   # addi sp, sp, 16 생략" : "   addi sp, sp, 16", "   ret"],
+        brokenLines: isBroken ? { callee: [2] } : {},
+        steps: [
+          { side: "caller", line: 0, type: "none" },
+          { side: "caller", line: 1, type: "call" },
+          { side: "callee", line: 0, type: "set", value: "0xffe0" },
+          { side: "callee", line: 1, type: "none" },
+          { side: "callee", line: 2, type: isBroken ? "none" : "set", value: "0xfff0" },
+          { side: "callee", line: 3, type: "return" },
+          { side: "caller", line: 2, type: "check", expected: "0xfff0" },
+        ],
+      };
+    }
+    if (registerName === "a0") {
+      return {
+        kind: "인자·반환값", owner: "보존 안 함 (바뀌는 것이 약속)", initial: "?", hasNoBrokenVariant: true,
+        caller: ["li   a0, 5        # 인자 n", "call fact", "mv   s0, a0       # 반환값"],
+        callee: ["fact: …           # a0 = 5 를 읽음", "   li  a0, 120   # 반환값", "   ret"],
+        brokenLines: {},
+        steps: [
+          { side: "caller", line: 0, type: "set", value: "5" },
+          { side: "caller", line: 1, type: "call" },
+          { side: "callee", line: 0, type: "none" },
+          { side: "callee", line: 1, type: "set", value: "120" },
+          { side: "callee", line: 2, type: "return" },
+          { side: "caller", line: 2, type: "check", expected: "120" },
+        ],
+      };
+    }
+    return {
+      kind: "할당 대상 아님", owner: "아무도 바꾸지 않음", initial: "__gp",
+      caller: ["# gp = __global_pointer$", "call f", "lw   a0, -2000(gp)  # 전역 변수"],
+      callee: ["f: …", isBroken ? "   li  gp, 0        # 약속 위반!" : "   … gp 는 건드리지 않음", "   ret"],
+      brokenLines: isBroken ? { callee: [1] } : {},
+      steps: [
+        { side: "caller", line: 0, type: "none" },
+        { side: "caller", line: 1, type: "call" },
+        { side: "callee", line: 0, type: "none" },
+        { side: "callee", line: 1, type: isBroken ? "set" : "none", value: "0" },
+        { side: "callee", line: 2, type: "return" },
+        { side: "caller", line: 2, type: "check", expected: "__gp" },
+      ],
+    };
+  }
+
+  const canvas = document.getElementById("who-saves-canvas");
+  const description = document.getElementById("who-saves-description");
+  const playButton = document.getElementById("who-saves-play");
+  let registerName = "s1";
+  let isBroken = false;
+  let scenario = buildScenario(registerName, isBroken);
+  let stepIndex = 0;
+  let stepTime = 0;
+  let state = null;
+
+  function resetState() {
+    scenario = buildScenario(registerName, isBroken);
+    stepIndex = 0;
+    stepTime = 0;
+    state = { value: scenario.initial, callerSlot: "—", calleeSlot: "—", result: null, isReturned: false };
+    applyStep(scenario.steps[0]);
+    document.getElementById("who-saves-kind").textContent = scenario.kind;
+    document.getElementById("who-saves-owner").textContent = scenario.owner;
+    document.getElementById("who-saves-result").textContent = "—";
+  }
+
+  function applyStep(step) {
+    if (step.type === "set") state.value = step.value;
+    if (step.type === "save") state[step.slot + "Slot"] = state.value;
+    if (step.type === "restore") state.value = state[step.slot + "Slot"];
+    if (step.type === "call" && step.value) state.value = step.value;
+    if (step.type === "check") {
+      state.result = state.value === step.expected;
+      document.getElementById("who-saves-result").textContent = registerName + " = " + state.value + (state.result ? " ✓" : " ✕");
+    }
+    describeStep(step);
+  }
+
+  function describeStep(step) {
+    const lines = step.side === "caller" ? scenario.caller : scenario.callee;
+    let text = "<code>" + lines[step.line].replace(/^\s*f:\s*|^\s*g:\s*|^\s*fact:\s*/, "").trim() + "</code> — ";
+    if (step.type === "save") text += registerName + " 값 " + state.value + "을(를) " + (step.slot === "caller" ? "호출자" : "피호출자") + " 스택 칸에 저장한다.";
+    else if (step.type === "restore") text += "스택 칸에서 " + state.value + "을(를) 되살린다.";
+    else if (step.type === "call") text += "제어가 피호출자로 넘어간다." + (step.value ? " 호출이 ra를 " + step.value + "로 덮어쓴다." : "");
+    else if (step.type === "return") text += "호출자에게 돌아간다.";
+    else if (step.type === "set") text += registerName + " ← " + step.value + ".";
+    else if (step.type === "check") {
+      if (state.result) text += "호출 뒤에도 기대한 값 " + step.expected + "이(가) 있다. 약속이 지켜졌다.";
+      else if (registerName === "ra") text += "ra가 0x2010으로 남아 f의 ret이 다시 f 안으로 돌아간다 — 무한 반복!";
+      else text += "기대한 값은 " + step.expected + "인데 " + state.value + "이(가) 들어 있다. 호출자가 피해를 본다.";
+    } else text += "이 레지스터와는 상관없는 명령.";
+    description.innerHTML = text;
+  }
+
+  function draw(context, width, height, colors) {
+    const fontSize = Math.max(MINIMUM_FONT_SIZE, Math.round(width * FONT_SCALE));
+    const lineHeight = fontSize * 1.9;
+    const columnWidth = (width - 48) / 2;
+    const columnTop = 14;
+    const columns = [
+      { side: "caller", x: 16, title: scenario.callerTitle || "호출자 (main)", lines: scenario.caller },
+      { side: "callee", x: 32 + columnWidth, title: scenario.calleeTitle || "피호출자 (f)", lines: scenario.callee },
+    ];
+    const currentStep = scenario.steps[stepIndex];
+    const maximumLineCount = Math.max(scenario.caller.length, scenario.callee.length);
+    const columnHeight = lineHeight * (maximumLineCount + 1) + 12;
+    columns.forEach((column) => {
+      book.roundedRectangle(context, column.x, columnTop, columnWidth, columnHeight, 10);
+      context.fillStyle = colors.elevated;
+      context.fill();
+      context.strokeStyle = currentStep.side === column.side ? colors.accent : colors.border;
+      context.lineWidth = currentStep.side === column.side ? 2 : 1;
+      context.stroke();
+      book.drawText(context, column.title, column.x + 12, columnTop + lineHeight * 0.65, { size: fontSize, bold: true, color: colors.text });
+      const brokenList = (scenario.brokenLines[column.side] || []);
+      column.lines.forEach((line, index) => {
+        const y = columnTop + lineHeight * (index + 1.15);
+        if (currentStep.side === column.side && currentStep.line === index) {
+          book.roundedRectangle(context, column.x + 6, y, columnWidth - 12, lineHeight - 4, 6);
+          context.fillStyle = colors.goldSoft;
+          context.fill();
+        }
+        const isBrokenLine = brokenList.includes(index);
+        drawFittedCode(context, line, column.x + 12, y + lineHeight / 2 - 2, columnWidth - 24, fontSize - 1, isBrokenLine ? colors.bad : colors.text);
+      });
+    });
+
+    // 아래쪽: 호출자 스택 칸 · 레지스터 · 피호출자 스택 칸
+    const boxTop = columnTop + columnHeight + 22;
+    const boxHeight = Math.max(52, fontSize * 3.6);
+    const boxWidth = Math.min(200, (width - 64) / 3);
+    const centers = [width * 0.2, width * 0.5, width * 0.8];
+    const boxes = [
+      { label: "호출자 스택 칸", value: state.callerSlot, fill: colors.surface },
+      { label: "레지스터 " + registerName, value: state.value, fill: colors.accentSoft },
+      { label: "피호출자 스택 칸", value: state.calleeSlot, fill: colors.surface },
+    ];
+    const finalStep = scenario.steps[scenario.steps.length - 1];
+    const isFinished = currentStep === finalStep;
+    boxes.forEach((box, index) => {
+      const x = centers[index] - boxWidth / 2;
+      book.roundedRectangle(context, x, boxTop, boxWidth, boxHeight, 10);
+      let fill = box.fill;
+      if (index === 1 && isFinished) fill = state.result ? colors.okSoft : colors.badSoft;
+      context.fillStyle = fill;
+      context.fill();
+      context.strokeStyle = index === 1 ? (isFinished ? (state.result ? colors.ok : colors.bad) : colors.accent) : colors.border;
+      context.lineWidth = index === 1 ? 2 : 1;
+      context.stroke();
+      book.drawText(context, box.label, x + boxWidth / 2, boxTop + boxHeight * 0.3, { size: fontSize - 1, align: "center", color: colors.dim });
+      book.drawText(context, box.value, x + boxWidth / 2, boxTop + boxHeight * 0.68, { size: fontSize + 2, bold: true, mono: true, align: "center", color: colors.text });
+    });
+
+    // 저장·복원 때 값이 이동하는 모습
+    const travelFraction = book.clamp(stepTime / (STEP_SECONDS * TOKEN_TRAVEL_FRACTION), 0, 1);
+    if ((currentStep.type === "save" || currentStep.type === "restore") && travelFraction < 1) {
+      const slotCenter = currentStep.slot === "caller" ? centers[0] : centers[2];
+      const fromX = currentStep.type === "save" ? centers[1] : slotCenter;
+      const toX = currentStep.type === "save" ? slotCenter : centers[1];
+      const eased = book.easeInOut(travelFraction);
+      const tokenX = book.linearInterpolate(fromX, toX, eased);
+      const tokenY = boxTop - 10 - Math.sin(eased * Math.PI) * 22;
+      context.beginPath();
+      context.arc(tokenX, tokenY, fontSize * 0.9, 0, Math.PI * 2);
+      context.fillStyle = colors.gold;
+      context.fill();
+    }
+    if (isFinished) {
+      const message = state.result ? "✓ 약속대로 값이 남아 있다" : "✕ 값이 망가졌다";
+      book.drawText(context, message, width / 2, boxTop + boxHeight + fontSize * 1.4, { size: fontSize + 1, bold: true, align: "center", color: state.result ? colors.ok : colors.bad });
+    }
+  }
+
+  /*
+   * 좁은 화면에서는 코드 줄이 칸을 넘친다. 먼저 주석(# 뒤)을 떼어 보고,
+   * 그래도 넘치면 글자 크기를 줄여 칸 안에 맞춘다.
+   */
+  function drawFittedCode(context, line, x, y, availableWidth, fontSize, color) {
+    const monoFont = book.palette().mono;
+    const measure = (text, size) => {
+      context.font = "400 " + size + "px " + monoFont;
+      return context.measureText(text).width;
+    };
+    let text = line;
+    const commentIndex = line.indexOf("#");
+    const isCommentOnly = commentIndex >= 0 && line.slice(0, commentIndex).trim() === "";
+    if (measure(text, fontSize) > availableWidth && commentIndex > 0 && !isCommentOnly) text = line.slice(0, commentIndex).replace(/\s+$/, "");
+    let size = fontSize;
+    while (size > MINIMUM_CODE_FONT_SIZE && measure(text, size) > availableWidth) size -= 0.5;
+    book.drawText(context, text, x, y, { size, mono: true, color });
+  }
+
+  resetState();
+  const view = book.createCanvas(canvas, draw, { aspectRatio: CANVAS_ASPECT_RATIO, minimumHeight: 290, maximumHeight: 390 });
+  const loop = book.animationLoop(canvas, (deltaSeconds) => {
+    stepTime += deltaSeconds;
+    const isLastStep = stepIndex === scenario.steps.length - 1;
+    // 마지막 걸음은 결과를 읽을 시간을 주려고 두 배로 머문다
+    const limit = isLastStep ? STEP_SECONDS * 2.4 : STEP_SECONDS;
+    if (stepTime >= limit) {
+      stepTime = 0;
+      if (isLastStep) {
+        resetState();
+      } else {
+        stepIndex += 1;
+        applyStep(scenario.steps[stepIndex]);
+      }
+    }
+    view.redraw();
+  });
+  function updatePlayLabel() {
+    playButton.textContent = loop.isRunning() ? "멈춤" : "재생";
+  }
+  playButton.addEventListener("click", () => {
+    if (loop.isRunning()) loop.stop();
+    else loop.start();
+    updatePlayLabel();
+  });
+  document.getElementById("who-saves-restart").addEventListener("click", () => {
+    resetState();
+    view.redraw();
+  });
+  book.segmented("who-saves-register", (value) => {
+    registerName = value;
+    resetState();
+    if (scenario.hasNoBrokenVariant && isBroken) description.innerHTML += " <b>(a0는 바뀌는 것이 약속이라 ‘어김’ 시나리오가 없다.)</b>";
+    view.redraw();
+  });
+  book.segmented("who-saves-promise", (value) => {
+    isBroken = value === "broken";
+    resetState();
+    view.redraw();
+  });
+  updatePlayLabel();
+})();
+
+/* ---------------------------------------------------------------------------
+   call 완화 실험: 거리에 따라 auipc+jalr / jal / c.jal(c.j) 중 무엇이 되나
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const Riscv = window.Riscv;
+  // 슬라이더 칸마다의 거리(바이트). 경계 바로 안쪽과 바깥쪽을 일부러 넣었다.
+  const DISTANCES = [64, 1000, 2046, 2048, 6000, 300000, 1048574, 1048576, 3000000, 50000000, 1500000000, 2147481599, 3000000000];
+  const COMPRESSED_MINIMUM = -2048;
+  const COMPRESSED_MAXIMUM = 2046;
+  const JAL_MINIMUM = -1048576;
+  const JAL_MAXIMUM = 1048574;
+  const AUIPC_PAIR_MINIMUM = -2147483648 - 2048;
+  const AUIPC_PAIR_MAXIMUM = 2147483647 - 2048;
+  const TWO_TO_THE_32 = 4294967296;
+  const LOW_PART_MODULUS = 4096;
+  const LOW_PART_HALF = 2048;
+  const RETURN_ADDRESS_REGISTER = 1;
+  const ZERO_REGISTER = 0;
+  const TAIL_SCRATCH_REGISTER = 6;
+  const COMPRESSED_JAL_FUNCT3 = 0b001;
+  const COMPRESSED_J_FUNCT3 = 0b101;
+  const COMPRESSED_QUADRANT_ONE = 0b01;
+  const AXIS_MINIMUM_EXPONENT = 4;
+  const AXIS_MAXIMUM_EXPONENT = 34;
+
+  let distanceIndex = 5;
+  let direction = 1;
+  let xlen = 32;
+  let hasCompressed = true;
+  let kind = "call";
+
+  /** CJ 형식(c.jal, c.j) 인코더: offset[11|4|9:8|10|6|7|3:1|5] 을 비트 12:2 에 흩어 놓는다 */
+  function encodeCompressedJump(funct3, offset) {
+    const bit = (position) => (offset >> position) & 1;
+    let word = (funct3 << 13) | COMPRESSED_QUADRANT_ONE;
+    word |= bit(11) << 12;
+    word |= bit(4) << 11;
+    word |= ((offset >> 8) & 0b11) << 9;
+    word |= bit(10) << 8;
+    word |= bit(6) << 7;
+    word |= bit(7) << 6;
+    word |= ((offset >> 1) & 0b111) << 3;
+    word |= bit(5) << 2;
+    return word & 0xffff;
+  }
+
+  /** pc 상대 거리를 auipc 의 상위 20비트와 jalr 의 하위 12비트로 나눈다 (하위는 부호 있는 값) */
+  function splitOffset(offset) {
+    let lower = ((offset % LOW_PART_MODULUS) + LOW_PART_MODULUS) % LOW_PART_MODULUS;
+    if (lower >= LOW_PART_HALF) lower -= LOW_PART_MODULUS;
+    const upper = (offset - lower) / LOW_PART_MODULUS;
+    return { upper, lower };
+  }
+  function wrapToSigned32(value) {
+    let wrapped = ((value % TWO_TO_THE_32) + TWO_TO_THE_32) % TWO_TO_THE_32;
+    if (wrapped >= TWO_TO_THE_32 / 2) wrapped -= TWO_TO_THE_32;
+    return wrapped;
+  }
+  function formatBytes(value) {
+    const magnitude = Math.abs(value);
+    if (magnitude >= 1073741824) return (value / 1073741824).toFixed(2) + " GiB";
+    if (magnitude >= 1048576) return (value / 1048576).toFixed(magnitude % 1048576 === 0 ? 0 : 3) + " MiB";
+    if (magnitude >= 1024) return (value / 1024).toFixed(magnitude % 1024 === 0 ? 0 : 2) + " KiB";
+    return value + " B";
+  }
+
+  function analyze() {
+    const offset = DISTANCES[distanceIndex] * direction;
+    const isCall = kind === "call";
+    const linkRegister = isCall ? RETURN_ADDRESS_REGISTER : ZERO_REGISTER;
+    const baseRegister = isCall ? RETURN_ADDRESS_REGISTER : TAIL_SCRATCH_REGISTER;
+    const baseName = isCall ? "ra" : "t1";
+    let isPairReachable = offset >= AUIPC_PAIR_MINIMUM && offset <= AUIPC_PAIR_MAXIMUM;
+    let pairOffset = offset;
+    let wrapNote = "";
+    if (xlen === 32 && !isPairReachable) {
+      // RV32 주소 계산은 2^32 를 법으로 감싸므로 어느 거리든 닿는다
+      pairOffset = wrapToSigned32(offset);
+      isPairReachable = true;
+      wrapNote = "RV32에서는 주소 계산이 2³²를 법으로 감싸므로 " + formatBytes(offset) + "도 " + formatBytes(pairOffset) + "와 같은 곳이다. ";
+    }
+    const result = { offset, isCall, baseName, linkRegister, isPairReachable, wrapNote };
+    if (isPairReachable) {
+      const split = splitOffset(pairOffset);
+      result.upper = split.upper;
+      result.lower = split.lower;
+      result.auipcWord = Riscv.encode("auipc", { rd: baseRegister, immediate: split.upper & 0xfffff });
+      result.jalrWord = Riscv.encode("jalr", { rd: linkRegister, rs1: baseRegister, immediate: split.lower });
+    }
+    const canUseCompressed = hasCompressed && offset >= COMPRESSED_MINIMUM && offset <= COMPRESSED_MAXIMUM && (!isCall || xlen === 32);
+    const canUseJal = offset >= JAL_MINIMUM && offset <= JAL_MAXIMUM;
+    if (canUseCompressed) {
+      result.relaxed = { name: isCall ? "c.jal" : "c.j", size: 2, word: encodeCompressedJump(isCall ? COMPRESSED_JAL_FUNCT3 : COMPRESSED_J_FUNCT3, offset), relocation: "R_RISCV_RVC_JUMP" };
+    } else if (canUseJal) {
+      result.relaxed = { name: "jal", size: 4, word: Riscv.encode("jal", { rd: linkRegister, immediate: offset }), relocation: "R_RISCV_JAL" };
+    } else {
+      result.relaxed = null;
+    }
+    result.canUseJal = canUseJal;
+    return result;
+  }
+
+  const columns = document.getElementById("relaxation-columns");
+  const description = document.getElementById("relaxation-description");
+  const canvas = document.getElementById("relaxation-canvas");
+
+  function signedText(value) {
+    return (value >= 0 ? "+" : "") + value;
+  }
+
+  function render() {
+    const result = analyze();
+    const linkName = result.isCall ? "ra" : "x0";
+    let beforeHtml = '<div class="relaxation-box' + (result.isPairReachable ? "" : " is-error") + '"><h4>어셈블러 출력 (8바이트)</h4>';
+    if (result.isPairReachable) {
+      beforeHtml += '<div class="code-line"><span class="word">' + book.toHex(result.auipcWord) + "</span>auipc " + result.baseName + ", " + book.toHex(result.upper & 0xfffff, 20) + "</div>";
+      beforeHtml += '<div class="relocation">R_RISCV_CALL_PLT (19) + R_RISCV_RELAX (51)</div>';
+      beforeHtml += '<div class="code-line"><span class="word">' + book.toHex(result.jalrWord) + "</span>jalr " + linkName + ", " + result.lower + "(" + result.baseName + ")</div>";
+    } else {
+      beforeHtml += '<div class="code-line">auipc+jalr로도 닿지 않는다</div><div class="relocation">“relocation truncated to fit” 링크 오류</div>';
+    }
+    beforeHtml += "</div>";
+    let afterHtml;
+    if (result.relaxed) {
+      const wordText = result.relaxed.size === 2 ? book.toHex(result.relaxed.word, 16) : book.toHex(result.relaxed.word);
+      afterHtml = '<div class="relaxation-box is-best"><h4>링커 완화 뒤 (' + result.relaxed.size + '바이트)</h4><div class="code-line"><span class="word">' + wordText + "</span>" + result.relaxed.name + (result.relaxed.name === "jal" ? " " + linkName + "," : "") + " " + signedText(result.offset) + '</div><div class="relocation">' + result.relaxed.relocation + "</div></div>";
+    } else {
+      afterHtml = '<div class="relaxation-box' + (result.isPairReachable ? "" : " is-error") + '"><h4>링커 완화 뒤</h4><div class="code-line">' + (result.isPairReachable ? "완화 불가 — auipc+jalr 그대로 8바이트" : "—") + "</div></div>";
+    }
+    columns.innerHTML = beforeHtml + afterHtml;
+    const afterSize = result.relaxed ? result.relaxed.size : (result.isPairReachable ? 8 : null);
+    document.getElementById("relaxation-after").textContent = afterSize === null ? "오류" : afterSize + " B";
+    document.getElementById("relaxation-saved").textContent = afterSize === null ? "—" : (8 - afterSize) + " B";
+    let text = result.wrapNote + "거리 " + signedText(result.offset) + " 바이트(" + formatBytes(result.offset) + "). ";
+    if (result.relaxed && result.relaxed.size === 2) text += "±2 KiB 안이고 C가 있으므로 16비트 " + result.relaxed.name + "로 줄어든다.";
+    else if (result.relaxed) {
+      text += "±1 MiB(−1 MiB ~ +1 MiB−2) 안이므로 jal 하나로 줄어든다.";
+      if (hasCompressed && result.isCall && xlen === 64 && result.offset >= COMPRESSED_MINIMUM && result.offset <= COMPRESSED_MAXIMUM) text += " (RV64에는 c.jal이 없어 여기서 멈춘다.)";
+    } else if (result.isPairReachable) text += "jal 범위를 넘으므로 auipc+jalr를 그대로 둔다. %pcrel_hi = " + book.toHex(result.upper & 0xfffff, 20) + ", 하위 = " + result.lower + ".";
+    else text += "RV64에서 auipc+jalr의 범위(약 ±2 GiB)도 넘는다. 이런 대상은 GOT를 거치는 간접 호출이나 다른 코드 모델이 필요하다.";
+    description.innerHTML = text;
+    view.redraw();
+  }
+
+  function drawAxis(context, width, height, colors) {
+    const fontSize = Math.max(11, Math.round(width * 0.016));
+    const left = 20;
+    const right = width - 20;
+    const axisY = height * 0.62;
+    const positionOf = (bytes) => left + (Math.log2(Math.max(bytes, Math.pow(2, AXIS_MINIMUM_EXPONENT))) - AXIS_MINIMUM_EXPONENT) / (AXIS_MAXIMUM_EXPONENT - AXIS_MINIMUM_EXPONENT) * (right - left);
+    const isCall = kind === "call";
+    const zones = [
+      { limit: 2048, label: isCall ? "c.jal" : "c.j", color: colors.okSoft, stroke: colors.ok, isAvailable: hasCompressed && (!isCall || xlen === 32) },
+      { limit: 1048576, label: "jal", color: colors.accentSoft, stroke: colors.accent, isAvailable: true },
+      { limit: 2147483648, label: "auipc + jalr", color: colors.goldSoft, stroke: colors.gold, isAvailable: true },
+    ];
+    let previousX = left;
+    const bandTop = axisY - height * 0.32;
+    const bandHeight = height * 0.3;
+    zones.forEach((zone) => {
+      const x = positionOf(zone.limit);
+      context.fillStyle = zone.isAvailable ? zone.color : colors.surface;
+      context.fillRect(previousX, bandTop, x - previousX, bandHeight);
+      context.strokeStyle = zone.isAvailable ? zone.stroke : colors.border;
+      context.lineWidth = 1.5;
+      context.strokeRect(previousX, bandTop, x - previousX, bandHeight);
+      book.drawText(context, zone.label + (zone.isAvailable ? "" : " (불가)"), (previousX + x) / 2, bandTop + bandHeight / 2, { size: fontSize, bold: true, align: "center", color: zone.isAvailable ? colors.text : colors.faint, mono: true });
+      previousX = x;
+    });
+    const beyondLabel = xlen === 32 ? "RV32: 감싸 돎" : "닿지 않음";
+    context.fillStyle = xlen === 32 ? colors.goldSoft : colors.badSoft;
+    context.fillRect(previousX, bandTop, right - previousX, bandHeight);
+    book.drawText(context, beyondLabel, (previousX + right) / 2, bandTop + bandHeight / 2, { size: fontSize - 1, align: "center", color: colors.dim });
+    // 눈금
+    context.strokeStyle = colors.border;
+    context.beginPath();
+    context.moveTo(left, axisY);
+    context.lineTo(right, axisY);
+    context.stroke();
+    const ticks = [[16, "16 B"], [1024, "1 KiB"], [2048, "2 KiB"], [65536, "64 KiB"], [1048576, "1 MiB"], [67108864, "64 MiB"], [2147483648, "2 GiB"]];
+    ticks.forEach(([bytes, label], index) => {
+      const x = positionOf(bytes);
+      context.beginPath();
+      context.moveTo(x, axisY - 4);
+      context.lineTo(x, axisY + 4);
+      context.stroke();
+      // 2 KiB 와 1 KiB 는 가까우니 높이를 엇갈린다
+      const labelY = axisY + fontSize + (index % 2 === 0 ? 2 : fontSize + 4);
+      book.drawText(context, label, x, labelY, { size: fontSize - 1, align: "center", color: colors.dim });
+    });
+    // 현재 거리
+    const markerX = positionOf(DISTANCES[distanceIndex]);
+    book.drawArrow(context, markerX, bandTop - 22, markerX, bandTop - 2, { color: colors.bad, width: 2.5, headSize: 9 });
+    book.drawText(context, "|거리| = " + formatBytes(DISTANCES[distanceIndex]), book.clamp(markerX, left + 60, right - 60), bandTop - 32, { size: fontSize, bold: true, align: "center", color: colors.bad });
+  }
+  const view = book.createCanvas(canvas, drawAxis, { aspectRatio: 0.28, minimumHeight: 190, maximumHeight: 240 });
+
+  book.range("relaxation-distance", (value) => { distanceIndex = value; render(); }, (value) => formatBytes(DISTANCES[value]));
+  book.segmented("relaxation-direction", (value) => { direction = Number(value); render(); });
+  book.segmented("relaxation-xlen", (value) => { xlen = Number(value); render(); });
+  book.segmented("relaxation-compressed", (value) => { hasCompressed = value === "yes"; render(); });
+  book.segmented("relaxation-kind", (value) => { kind = value; render(); });
+})();
+</script>
+</body>
+</html>

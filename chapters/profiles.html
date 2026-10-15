@@ -1,0 +1,1143 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>23 프로파일: RVA23과 호환성 · RISC-V Book</title>
+<meta name="description" content="수십 개의 RISC-V 확장 가운데 무엇을 반드시 갖춰야 하는지 정한 프로파일(RVI20·RVA20·RVA22·RVA23·RVB23)의 구조와 필수 확장 목록, 실행 중 기능 탐지, 배포판의 채택 현황을 그림과 시뮬레이터로 살펴본다.">
+<link rel="icon" href="../assets/img/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/style.css">
+<script src="../assets/js/book.js"></script>
+<style>
+  /* 프로파일 호환성 검사기 */
+  .checker-layout { display: grid; grid-template-columns: minmax(0, 1fr); }
+  @media (min-width: 900px) { .checker-layout { grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); } }
+  .extension-groups { padding: 14px 16px; display: grid; gap: 12px; border-right: 1px solid var(--border); }
+  @media (max-width: 899px) { .extension-groups { border-right: 0; border-bottom: 1px solid var(--border); } }
+  .extension-group h4 { margin: 0 0 6px !important; font-size: 12.5px !important; letter-spacing: 0.06em; color: var(--text-faint); font-weight: 700; }
+  .chip-row { display: flex; flex-wrap: wrap; gap: 5px; }
+  .extension-chip { font: inherit; font-family: var(--mono); font-size: 12.5px; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--border); background: var(--bg); color: var(--text-dim); cursor: pointer; line-height: 1.5; transition: background 0.2s, border-color 0.2s, color 0.2s; }
+  .extension-chip:hover { border-color: var(--accent); }
+  .extension-chip.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 700; }
+  .extension-chip.implied { border-style: dashed; color: var(--accent); }
+  .profile-results { padding: 14px 16px; display: grid; gap: 10px; align-content: start; }
+  .profile-row { border: 1px solid var(--border); border-radius: 10px; padding: 9px 12px; background: var(--bg); }
+  .profile-row .row-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+  .profile-row .profile-name { font-family: var(--mono); font-weight: 700; font-size: 14.5px; }
+  .progress-track { height: 8px; border-radius: 999px; background: var(--surface-2); overflow: hidden; margin: 7px 0 5px; }
+  .progress-fill { height: 100%; width: 0; border-radius: 999px; background: var(--warn); transition: width 0.7s cubic-bezier(.2,.8,.2,1), background 0.4s; }
+  .progress-fill.complete { background: var(--ok); }
+  .missing-list { font-family: var(--mono); font-size: 12px; color: var(--text-faint); line-height: 1.55; overflow-wrap: anywhere; }
+  .missing-list b { color: var(--bad); font-weight: 600; }
+  .isa-string { font-family: var(--mono); font-size: 13px; padding: 10px 16px; border-top: 1px solid var(--border); background: var(--canvas-bg); overflow-wrap: anywhere; color: var(--text-dim); }
+  .isa-string::before { content: "ISA 문자열 · "; font-family: var(--font); font-weight: 700; color: var(--text-faint); }
+
+  /* 상위 집합 탐색기 */
+  .superset-layout { display: grid; grid-template-columns: minmax(0, 1fr); }
+  @media (min-width: 860px) { .superset-layout { grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); } }
+  .superset-layout svg { display: block; width: 100%; height: auto; }
+  .superset-layout svg .ring { cursor: pointer; transition: fill-opacity 0.4s, stroke-width 0.3s; }
+  .superset-layout svg .ring.selected { stroke-width: 3.5; }
+  .superset-detail { padding: 16px 18px; border-left: 1px solid var(--border); font-size: 15px; }
+  @media (max-width: 859px) { .superset-detail { border-left: 0; border-top: 1px solid var(--border); } }
+  .superset-detail h4 { margin: 0 0 4px; font-family: var(--mono); font-size: 18px; }
+  .superset-detail p { margin: 6px 0 10px; color: var(--text-dim); font-size: 14.5px; }
+  .superset-detail .label { font-size: 12.5px; font-weight: 700; color: var(--text-faint); letter-spacing: 0.05em; margin: 10px 0 5px; }
+  .added-chip { display: inline-block; font-family: var(--mono); font-size: 12.5px; padding: 2px 9px; margin: 0 4px 5px 0; border-radius: 999px; background: var(--accent-2-soft); color: var(--accent-2); font-weight: 700; opacity: 0; transform: translateY(6px); animation: chip-arrive 0.45s ease forwards; }
+  .added-chip.option { background: var(--surface); color: var(--text-dim); font-weight: 500; }
+  @keyframes chip-arrive { to { opacity: 1; transform: none; } }
+  @media (prefers-reduced-motion: reduce) { .added-chip { animation: none; opacity: 1; transform: none; } }
+
+  .count-badge { font-family: var(--mono); font-weight: 700; color: var(--accent); }
+  .option-kinds { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); margin: 22px 0; }
+  .option-kind { border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; background: var(--bg-elev); }
+  .option-kind b { display: block; margin-bottom: 4px; }
+  .option-kind p { margin: 0; font-size: 14.5px; color: var(--text-dim); line-height: 1.6; }
+  .option-kind code { font-size: 12.5px; }
+  table.profile-matrix td:first-child { font-family: var(--mono); font-weight: 700; white-space: nowrap; }
+  table.profile-matrix td, table.profile-matrix th { text-align: center; }
+  table.profile-matrix td:first-child, table.profile-matrix th:first-child { text-align: left; }
+  table.profile-matrix .pill { font-size: 11.5px; }
+</style>
+</head>
+<body data-chapter="profiles">
+<main class="chapter">
+  <header class="chapter-hero">
+    <div class="eyebrow">Chapter 23</div>
+    <h1>프로파일: RVA23과 호환성</h1>
+    <p class="lead">RISC-V에는 비준된 확장만 해도 수십 개가 있다. 칩마다 고른 조합이 다르면 운영체제 배포판은 어느 조합에 맞춰 바이너리를 만들어야 할지 알 수 없다. <strong>프로파일은 “이 이름을 단 하드웨어라면 이 확장들은 반드시 있다”고 약속하는 묶음이다.</strong> 이 장에서는 RVI20·RVA20·RVA22·RVA23·RVB23 프로파일이 무엇을 필수로 정했는지 규격 원문 그대로 정리하고, 소프트웨어가 실행 중에 기능을 알아내는 방법과 배포판이 프로파일을 받아들이는 현황까지 살펴본다.</p>
+    <ul class="objectives">
+      <li>확장이 많을수록 생기는 “조합 폭발” 문제와 프로파일이 그것을 푸는 방식을 설명한다.</li>
+      <li><code>RVA23U64</code> 같은 프로파일 이름을 계열·연도·특권 모드·XLEN으로 해독한다.</li>
+      <li>필수 확장과 네 종류의 선택 확장(지역·개발·확장·과도기 옵션)을 구별한다.</li>
+      <li>RVA20 → RVA22 → RVA23 으로 갈 때 새로 필수가 된 확장을 정확히 안다.</li>
+      <li>RVA23과 RVB23의 차이, U 프로파일과 S 프로파일의 차이를 이해한다.</li>
+      <li>hwprobe 시스템 호출, <code>/proc/cpuinfo</code>, 함수 다중 버전으로 실행 중에 기능을 고르는 방법을 안다.</li>
+    </ul>
+    <div class="spec-meta">
+      <a class="spec-link" href="https://docs.riscv.org/reference/rva20-rvi20-rva22/v1.0/index.html" target="_blank" rel="noopener">RISC-V Profiles v1.0 (RVI20·RVA20·RVA22)</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/rva23/v1.0/index.html" target="_blank" rel="noopener">RVA23 Profile v1.0</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/rvb23/v1.0/index.html" target="_blank" rel="noopener">RVB23 Profiles v1.0</a>
+    </div>
+  </header>
+
+  <!-- ============================================================ -->
+  <section id="why">
+    <h2>왜 프로파일이 필요한가: 조합 폭발</h2>
+    <p><a href="modular.html">2장</a>에서 본 것처럼 RISC-V는 작은 베이스 위에 확장을 골라 얹는 모듈식 ISA다. 마이크로컨트롤러는 <code>RV32IMC</code>만으로 충분하고, 서버 칩은 벡터와 하이퍼바이저까지 갖춘다. 필요한 것만 고를 수 있다는 점은 하드웨어 입장에서는 큰 장점이다. 그런데 소프트웨어 입장에서는 골칫거리가 된다.</p>
+    <p>확장이 <i>N</i>개 있으면 가능한 조합은 대략 2<sup><i>N</i></sup>가지다. 확장 40개면 조합은 1조 개를 넘는다. 리눅스 배포판은 패키지 수만 개를 <b>미리 컴파일해서</b> 나눠 주는데, 어느 조합을 가정하고 컴파일해야 할까? 너무 적게 가정하면(예: <code>RV64I</code>만) 곱셈 명령조차 못 쓰는 느린 바이너리가 되고, 너무 많이 가정하면 그 확장이 없는 칩에서 <b>잘못된 명령 예외</b>로 죽는다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 340" role="img" aria-label="프로파일이 없을 때와 있을 때 배포판이 바이너리를 만드는 방식 비교">
+        <defs>
+          <marker id="why-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--text-faint)"/></marker>
+          <marker id="why-arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--ok)"/></marker>
+          <path id="why-path-one" d="M190 300 C 240 300 520 300 560 252"/>
+          <path id="why-path-two" d="M630 92 V 196"/>
+          <path id="why-path-three" d="M630 254 V 280"/>
+        </defs>
+        <!-- 왼쪽: 프로파일 없음 -->
+        <text x="210" y="24" text-anchor="middle" class="t t-bold">프로파일이 없다면</text>
+        <g transform="translate(14,40)">
+          <rect width="120" height="56" rx="10" class="f-surface"/><text x="60" y="24" text-anchor="middle" class="t t-bold">칩 A</text><text x="60" y="44" text-anchor="middle" class="t-mono" style="font-size:11px">rv64imac_zba</text>
+        </g>
+        <g transform="translate(146,40)">
+          <rect width="128" height="56" rx="10" class="f-surface"/><text x="64" y="24" text-anchor="middle" class="t t-bold">칩 B</text><text x="64" y="44" text-anchor="middle" class="t-mono" style="font-size:11px">rv64gc_zbb_zicond</text>
+        </g>
+        <g transform="translate(286,40)">
+          <rect width="120" height="56" rx="10" class="f-surface"/><text x="60" y="24" text-anchor="middle" class="t t-bold">칩 C</text><text x="60" y="44" text-anchor="middle" class="t-mono" style="font-size:11px">rv64gcv_zfh</text>
+        </g>
+        <path d="M74 98 L190 186" class="s-line s-dashed" marker-end="url(#why-arrow)"/>
+        <path d="M210 98 L210 184" class="s-line s-dashed" marker-end="url(#why-arrow)"/>
+        <path d="M346 98 L232 186" class="s-line s-dashed" marker-end="url(#why-arrow)"/>
+        <rect x="80" y="190" width="260" height="66" rx="12" class="f-warn-soft"/>
+        <text x="210" y="216" text-anchor="middle" class="t t-bold">배포판 빌드 담당자</text>
+        <text x="210" y="238" text-anchor="middle" class="t-dim">“어느 조합에 맞춰 컴파일하지?”</text>
+        <text x="352" y="214" class="t-warn pulse" style="font-size:34px">?</text>
+        <text x="210" y="290" text-anchor="middle" class="t-dim">확장 N개 → 조합 약 2ᴺ 가지</text>
+        <text x="210" y="312" text-anchor="middle" class="t-faint">최소 공통분모(RV64I)로 가면 느리고, 욕심내면 죽는다</text>
+        <line x1="430" y1="20" x2="430" y2="320" stroke="var(--border)" stroke-dasharray="4 6"/>
+        <!-- 오른쪽: 프로파일 있음 -->
+        <text x="645" y="24" text-anchor="middle" class="t t-bold">프로파일이 있다면</text>
+        <g transform="translate(456,40)">
+          <rect width="112" height="52" rx="10" class="f-surface"/><text x="56" y="22" text-anchor="middle" class="t t-bold">칩 X</text><text x="56" y="41" text-anchor="middle" class="t-ok" style="font-size:12px">RVA23 ✓</text>
+        </g>
+        <g transform="translate(578,40)">
+          <rect width="112" height="52" rx="10" class="f-surface"/><text x="56" y="22" text-anchor="middle" class="t t-bold">칩 Y</text><text x="56" y="41" text-anchor="middle" class="t-ok" style="font-size:12px">RVA23 ✓</text>
+        </g>
+        <g transform="translate(700,40)">
+          <rect width="112" height="52" rx="10" class="f-surface"/><text x="56" y="22" text-anchor="middle" class="t t-bold">칩 Z</text><text x="56" y="41" text-anchor="middle" class="t-ok" style="font-size:12px">RVA23 ✓</text>
+        </g>
+        <use href="#why-path-two" class="s-gold flow-dash"/>
+        <path d="M512 92 C512 150 600 160 612 196" class="s-gold flow-dash"/>
+        <path d="M756 92 C756 150 660 160 648 196" class="s-gold flow-dash"/>
+        <rect x="520" y="198" width="220" height="54" rx="12" class="f-gold-soft"/>
+        <text x="630" y="222" text-anchor="middle" class="t-gold" style="font-size:16px">RVA23U64</text>
+        <text x="630" y="241" text-anchor="middle" class="t-dim">필수 확장 목록이라는 약속</text>
+        <use href="#why-path-three" class="s-ok" marker-end="url(#why-arrow-ok)"/>
+        <rect x="520" y="284" width="220" height="44" rx="10" class="f-ok-soft"/>
+        <text x="630" y="303" text-anchor="middle" class="t t-bold">바이너리 한 벌</text>
+        <text x="630" y="320" text-anchor="middle" class="t-faint">세 칩 모두에서 그대로 돈다</text>
+        <circle r="5" fill="var(--accent-2)"><animateMotion dur="1.6s" begin="-0.4s" repeatCount="indefinite"><mpath href="#why-path-two"/></animateMotion></circle>
+        <circle r="5" fill="var(--ok)"><animateMotion dur="2s" begin="-1s" repeatCount="indefinite"><mpath href="#why-path-three"/></animateMotion></circle>
+      </svg></div>
+      <figcaption><b>그림 23-1.</b> 프로파일이 푸는 문제. 왼쪽처럼 칩마다 확장 조합이 제각각이면 미리 컴파일된 바이너리를 나눠 주는 배포판은 기준을 잡을 수 없다. 오른쪽처럼 하드웨어가 “RVA23을 만족한다”고 약속하면 소프트웨어는 그 목록만 믿고 한 벌의 바이너리를 만든다.</figcaption>
+    </figure>
+
+    <p>그래서 RISC-V International은 <span class="term">프로파일</span><span class="english">(profile)</span>을 정했다. 프로파일은 새 명령어를 만들지 않는다. 이미 비준된 확장 중에서 <b>무엇이 반드시 있어야 하는지(필수)</b>, <b>무엇은 있을 수도 있어 소프트웨어가 대비해야 하는지(선택)</b>를 이름 하나로 묶을 뿐이다. 길고 다루기 힘든 ISA 문자열(예: <code>rv64imafdcv_zicsr_zifencei_zba_zbb_…</code>)을 짧은 이름 하나로 줄여 주는 효과도 있다.</p>
+
+    <div class="callout spec"><strong>규격 원문에서</strong>
+      <blockquote>“This flexibility can be used to highly optimize a specialized design by including only the exact set of ISA features required for an application, but the same flexibility also leads to a combinatorial explosion in possible ISA choices. Profiles specify a much smaller common set of ISA choices that capture the most value for most users …”</blockquote>
+      <p><a href="https://docs.riscv.org/reference/rva20-rvi20-rva22/v1.0/intro.html" target="_blank" rel="noopener">RISC-V Profiles v1.0, Introduction</a> — 유연함이 곧 조합 폭발로 이어진다는 점을 규격 스스로 인정하고, 그 해법으로 프로파일을 내놓는다.</p></div>
+
+    <div class="callout tip"><strong>프로파일은 금지 목록이 아니다</strong><p>프로파일은 확장을 마음대로 조합하거나 사용자 정의 확장을 넣는 것을 막지 않는다. 다만 그런 조합에는 “널리 퍼진 소프트웨어 지원과 하드웨어 사이의 이식성”을 기대하지 말라는 것이다. 딥 임베디드처럼 소프트웨어를 한 회사가 전부 직접 빌드하는 시장에서는 여전히 자유로운 조합이 맞다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="naming">
+    <h2>프로파일 이름 읽기</h2>
+    <p>프로파일 이름은 정해진 순서로 이어 붙인 문자열이다. 규격은 <b>RV</b> 접두어, <b>계열</b>(family) 이름, <b>연도</b>, <b>특권 모드</b>, <b>XLEN</b>의 다섯 부분으로 정의한다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 820 300" role="img" aria-label="RVA23U64 이름을 다섯 부분으로 나눈 그림">
+        <g font-family="var(--mono)">
+          <rect x="170" y="24" width="96" height="70" rx="10" class="f-surface"/>
+          <text x="218" y="72" text-anchor="middle" class="t-mono" style="font-size:40px;font-weight:700">RV</text>
+          <rect x="272" y="24" width="72" height="70" rx="10" class="f-accent-soft"/>
+          <text x="308" y="72" text-anchor="middle" class="t-accent" style="font-size:40px">A</text>
+          <rect x="350" y="24" width="110" height="70" rx="10" class="f-gold-soft"/>
+          <text x="405" y="72" text-anchor="middle" class="t-gold" style="font-size:40px">23</text>
+          <rect x="466" y="24" width="72" height="70" rx="10" class="f-violet-soft"/>
+          <text x="502" y="72" text-anchor="middle" class="t-violet" style="font-size:40px">U</text>
+          <rect x="544" y="24" width="106" height="70" rx="10" class="f-teal-soft"/>
+          <text x="597" y="72" text-anchor="middle" class="t-teal" style="font-size:40px">64</text>
+        </g>
+        <path d="M218 96 V124 H110 V160" class="s-line"/>
+        <path d="M308 96 V130 H262 V160" class="s-accent"/>
+        <path d="M405 96 V160" class="s-gold"/>
+        <path d="M502 96 V130 H552 V160" class="s-line" style="stroke:var(--violet)"/>
+        <path d="M597 96 V120 H700 V160" class="s-line" style="stroke:var(--teal)"/>
+        <g transform="translate(10,160)"><rect width="200" height="128" rx="10" class="f-elev"/><text x="100" y="24" text-anchor="middle" class="t t-bold">접두어</text><text x="100" y="48" text-anchor="middle" class="t-dim">RISC-V</text><text x="100" y="72" text-anchor="middle" class="t-faint">ISA 문자열과 같은</text><text x="100" y="90" text-anchor="middle" class="t-faint">RV로 시작한다</text></g>
+        <g transform="translate(220,160)"><rect width="150" height="128" rx="10" class="f-accent-soft"/><text x="75" y="24" text-anchor="middle" class="t-accent">계열</text><text x="75" y="48" text-anchor="middle" class="t-dim">I 범용 비특권</text><text x="75" y="68" text-anchor="middle" class="t-dim">A 응용 프로세서</text><text x="75" y="88" text-anchor="middle" class="t-dim">B 맞춤형 응용</text><text x="75" y="112" text-anchor="middle" class="t-faint">계열은 1년에 최대 한 번</text></g>
+        <g transform="translate(380,160)"><rect width="150" height="128" rx="10" class="f-gold-soft"/><text x="75" y="24" text-anchor="middle" class="t-gold">연도</text><text x="75" y="48" text-anchor="middle" class="t-dim">2000년 이후 햇수</text><text x="75" y="70" text-anchor="middle" class="t-faint">2019년 비준 규격 기반</text><text x="75" y="88" text-anchor="middle" class="t-faint">→ 20</text><text x="75" y="112" text-anchor="middle" class="t-faint">발표 연도가 아님!</text></g>
+        <g transform="translate(540,160)"><rect width="120" height="128" rx="10" class="f-violet-soft"/><text x="60" y="24" text-anchor="middle" class="t-violet">특권 모드</text><text x="60" y="48" text-anchor="middle" class="t-dim">U 사용자</text><text x="60" y="68" text-anchor="middle" class="t-dim">S 슈퍼바이저</text><text x="60" y="88" text-anchor="middle" class="t-dim">M 머신</text><text x="60" y="112" text-anchor="middle" class="t-faint">가장 높은 모드</text></g>
+        <g transform="translate(670,160)"><rect width="140" height="128" rx="10" class="f-teal-soft"/><text x="70" y="24" text-anchor="middle" class="t-teal">XLEN</text><text x="70" y="48" text-anchor="middle" class="t-dim">32 또는 64</text><text x="70" y="70" text-anchor="middle" class="t-faint">베이스 RV32I /</text><text x="70" y="88" text-anchor="middle" class="t-faint">RV64I 를 가리킨다</text></g>
+      </svg></div>
+      <figcaption><b>그림 23-2.</b> 프로파일 이름 <code>RVA23U64</code>의 구조. 연도 자리는 그 프로파일이 바탕으로 삼은 규격이 비준된 해를 기준으로 한다. 규격은 “2019년에 비준된 규격에 기반한 프로파일은 20”이라고 예를 든다. 하이퍼바이저 지원은 특권 모드 글자로 표시하지 않고 확장(옵션 또는 필수)으로 다룬다.</figcaption>
+    </figure>
+
+    <div class="table-wrap"><table>
+      <thead><tr><th>계열</th><th>규격이 밝힌 대상</th><th>정의된 프로파일</th></tr></thead>
+      <tbody>
+        <tr><td><b>I</b></td><td>범용 비특권 명령어(generic unprivileged instructions). 툴체인의 최소 공통 목표</td><td><code>RVI20U32</code>, <code>RVI20U64</code></td></tr>
+        <tr><td><b>A</b></td><td>리치 OS를 돌리는 64비트 응용 프로세서(application processors running rich OS stacks). 바이너리 배포 시장</td><td><code>RVA20U64/S64</code>, <code>RVA22U64/S64</code>, <code>RVA23U64/S64</code></td></tr>
+        <tr><td><b>B</b></td><td>리치 OS를 돌리되 보통 표준 OS 소스를 <b>직접 맞춤 빌드</b>해 쓰는 맞춤형 64비트 응용 프로세서(customized application processors)</td><td><code>RVB23U64/S64</code></td></tr>
+      </tbody>
+    </table></div>
+    <div class="callout warn"><strong>B는 무엇의 약자인가?</strong><p>RVB23 규격은 B라는 글자를 따로 풀어 쓰지 않는다. 규격 본문은 RVB를 “리치 OS를 돌리지만 대개 표준 OS 소스를 맞춤 빌드해서 쓰는 맞춤형 응용 프로세서”용이라고 설명하고, docs.riscv.org 목록은 “임베디드·엣지(Embedded and edge)” 프로파일이라고 소개한다. 비트 조작 확장 <code>B</code>(<a href="bit-manipulation.html">14장</a>)와는 아무 관계가 없다. 또 처음 정의된 이름 규칙 문서는 계열 글자의 예로 I·M·A를 들지만, 2026년 현재 비준된 계열은 I·A·B뿐이다.</p></div>
+
+    <h3>U 프로파일과 S 프로파일</h3>
+    <p>특권 모드 글자는 “그 실행 환경에서 <b>가장 높은</b> 특권 모드”를 뜻한다. <code>U64</code> 프로파일은 응용 프로그램이 보는 세계, <code>S64</code> 프로파일은 운영체제 커널이 보는 세계다. S 프로파일은 U 모드도 포함하므로 U 모드에서 <code>ecall</code>을 하면 S 모드 처리기로 가는 <b>contained</b> 트랩이 되고, S 모드에서 <code>ecall</code>을 하면 바깥 실행 환경(펌웨어, <a href="platform.html">22장</a>의 SBI)으로 나가는 <b>requested</b> 트랩이 된다(<a href="intro.html">1장</a>의 트랩 분류).</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 820 290" role="img" aria-label="U 프로파일과 S 프로파일이 다루는 범위">
+        <defs>
+          <marker id="mode-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent-2)"/></marker>
+          <path id="mode-path-user" d="M200 116 V 222"/>
+          <path id="mode-path-contained" d="M560 96 V 140"/>
+          <path id="mode-path-requested" d="M600 184 V 224"/>
+        </defs>
+        <!-- U64 -->
+        <text x="200" y="22" text-anchor="middle" class="t t-bold">RVA23U64 가 묘사하는 세계</text>
+        <rect x="40" y="36" width="320" height="160" rx="14" fill="none" stroke="var(--violet)" stroke-width="2" stroke-dasharray="6 5"/>
+        <rect x="80" y="56" width="240" height="58" rx="10" class="f-violet-soft"/>
+        <text x="200" y="82" text-anchor="middle" class="t t-bold">응용 프로그램 (U 모드)</text>
+        <text x="200" y="102" text-anchor="middle" class="t-mono" style="font-size:12px">ecall</text>
+        <use href="#mode-path-user" class="s-gold flow-dash" marker-end="url(#mode-arrow)"/>
+        <text x="212" y="160" class="t-faint">requested 트랩</text>
+        <rect x="40" y="226" width="320" height="50" rx="10" class="f-surface"/>
+        <text x="200" y="250" text-anchor="middle" class="t t-bold">실행 환경 (리눅스 사용자 ABI 등)</text>
+        <text x="200" y="268" text-anchor="middle" class="t-faint">프로파일이 정하지 않는 바깥</text>
+        <!-- S64 -->
+        <text x="600" y="22" text-anchor="middle" class="t t-bold">RVA23S64 가 묘사하는 세계</text>
+        <rect x="440" y="36" width="340" height="160" rx="14" fill="none" stroke="var(--accent)" stroke-width="2" stroke-dasharray="6 5"/>
+        <rect x="470" y="46" width="180" height="48" rx="10" class="f-violet-soft"/>
+        <text x="560" y="68" text-anchor="middle" class="t t-bold">응용 (U 모드)</text>
+        <text x="560" y="86" text-anchor="middle" class="t-mono" style="font-size:12px">ecall</text>
+        <use href="#mode-path-contained" class="s-accent flow-dash"/>
+        <text x="572" y="124" class="t-faint">contained 트랩</text>
+        <rect x="470" y="142" width="280" height="40" rx="10" class="f-accent-soft"/>
+        <text x="610" y="167" text-anchor="middle" class="t t-bold">커널 (S 모드) — ecall</text>
+        <use href="#mode-path-requested" class="s-gold flow-dash" marker-end="url(#mode-arrow)"/>
+        <text x="612" y="210" class="t-faint">requested 트랩</text>
+        <rect x="440" y="226" width="340" height="50" rx="10" class="f-surface"/>
+        <text x="610" y="250" text-anchor="middle" class="t t-bold">실행 환경 (SBI · M 모드 펌웨어)</text>
+        <text x="610" y="268" text-anchor="middle" class="t-faint">어떤 ecall 이 있는지는 프로파일 밖</text>
+        <circle r="5" fill="var(--accent-2)"><animateMotion dur="1.8s" begin="-0.6s" repeatCount="indefinite"><mpath href="#mode-path-user"/></animateMotion></circle>
+        <circle r="5" fill="var(--accent)"><animateMotion dur="1.2s" begin="-0.3s" repeatCount="indefinite"><mpath href="#mode-path-contained"/></animateMotion></circle>
+        <circle r="5" fill="var(--accent-2)"><animateMotion dur="1.2s" begin="-0.9s" repeatCount="indefinite"><mpath href="#mode-path-requested"/></animateMotion></circle>
+      </svg></div>
+      <figcaption><b>그림 23-3.</b> U 프로파일과 S 프로파일. 점선 테두리 안이 프로파일이 정하는 범위다. 프로파일은 바깥 실행 환경이 어떤 <code>ecall</code> 서비스를 주는지는 정하지 않고, 그것은 리눅스 사용자 ABI나 SBI 같은 별도 인터페이스의 몫으로 남긴다.</figcaption>
+    </figure>
+    <div class="callout deep"><strong>U 프로파일은 S 프로파일의 부분 집합이 아니다</strong><p>규격은 “U 모드 프로파일의 명령은 모두 사용자 모드에서 실행되지만, S 모드 프로파일 안의 사용자 모드 명령과 동작이 다를 수 있으므로 U 모드 프로파일을 S 모드 프로파일의 부분 집합으로 볼 수 없다”고 못 박는다. 예를 들어 같은 <code>ecall</code>이라도 어느 쪽 환경이냐에 따라 트랩이 가는 곳이 다르다. 대신 더 높은 특권의 프로파일을 갖춘 플랫폼은 그 위에 OS를 올려 같은 계열의 낮은 특권 프로파일 환경을 언제나 만들어 줄 수 있다.</p></div>
+
+    <h3>ISA 문자열과의 관계</h3>
+    <p>프로파일 이름은 ISA 이름 문자열 안에 그대로 넣을 수 있게 설계되었다. 그래서 규격은 “프로파일 이름 규칙과 겹치는 이름의 표준 확장은 만들지 않는다”고 약속한다. 실제로 최근 Clang과 GCC는 <code>-march=rva23u64</code>처럼 프로파일 이름을 아키텍처 값으로 받는다. 한편 프로파일과 함께 등장한 <code>Ziccif</code>, <code>Za64rs</code>, <code>Svade</code> 같은 이름은 새 기능이 아니라 <b>원래 규격에 있던 성질에 이름만 붙인</b> “프로파일 정의 확장(profile-defined extensions)”이다. 이름이 있어야 필수 목록에 적을 수 있기 때문이다.</p>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="structure">
+    <h2>필수와 선택: 네 종류의 옵션</h2>
+    <p>모든 프로파일은 <b>비준된 베이스 ISA</b>(지금은 RV32I 또는 RV64I) 하나와, 비준된 확장들을 두 범주로 나눠 담는다.</p>
+    <ul>
+      <li><b>필수</b>(Mandatory): 구현은 반드시 제공해야 한다. 베이스와 필수 확장을 합쳐 <span class="term">프로파일 의무 사항</span><span class="english">(profile mandates)</span>이라 하고, 소프트웨어는 이것이 늘 있다고 가정해도 된다.</li>
+      <li><b>선택</b>(Optional, 옵션): 있을 수도 있다. 소프트웨어 생태계는 이 옵션들이 있을 때 쓸 수 있도록 준비하고, 적어도 옵션이 있다고 오류나 경고를 내서는 안 된다.</li>
+    </ul>
+    <p>목록에 없는 확장은 <b>비프로파일 확장</b>이다. 프로파일과 충돌하지 않는 비프로파일 확장(예: 사용자 정의 X 확장 일부)을 더 넣어도 여전히 그 프로파일과 호환이지만, 필수 확장의 동작을 바꾸거나 충돌하는 확장을 넣으면 호환이 아니다. 대표적인 예가 <code>Zfinx</code> 계열이다. 부동소수점 값을 정수 레지스터에 두는 이 확장(<a href="floating-point.html">12장</a>)은 F·D를 필수로 하는 RVA 프로파일과 함께 쓸 수 없다고 규격에 적혀 있다.</p>
+
+    <p>RVA23 규격의 근거(rationale) 절은 선택 확장을 성격에 따라 네 종류로 나눈다. RVA23U64는 실제 옵션 목록을 이 네 제목 아래 적어 두었다.</p>
+    <div class="option-kinds">
+      <div class="option-kind"><b>🌐 지역 옵션 (localized)</b><p>지정학·관할 지역에 따라 쓰임이 반드시 달라지는 것. 대표가 암호다. 앞으로도 늘 선택으로 남는다. RVA23U64: <code>Zvkng</code>, <code>Zvksg</code></p></div>
+      <div class="option-kind"><b>🛠️ 개발 옵션 (development)</b><p>지금은 수명 초기라 선택이지만 다음 세대 RVA에서 필수가 될 확장. “우선 개발하라”는 신호다. RVA23U64: <code>Zabha</code>, <code>Zacas</code>, <code>Ziccamoc</code>, <code>Zvbc</code>, <code>Zama16b</code></p></div>
+      <div class="option-kind"><b>📦 확장 옵션 (expansion)</b><p>구현 비용이 크지만 모든 플랫폼에 필요하지는 않고, 탐지로 쉽게 다룰 수 있는 것. 계속 옵션으로 남는다. RVA23U64: <code>Zfh</code>, <code>Zbc</code>, <code>Zicfilp</code>, <code>Zicfiss</code>, <code>Zvfh</code>, <code>Zfbfmin</code>, <code>Zvfbfmin</code>, <code>Zvfbfwma</code> / RVA23S64: <code>Sv48</code>, <code>Sv57</code>, <code>Zkr</code>, <code>Svadu</code>, <code>Sdtrig</code>, <code>Ssstrict</code>, <code>Svvptc</code>, <code>Sspm</code></p></div>
+      <div class="option-kind"><b>⏳ 과도기 옵션 (transitory)</b><p>필수·지역·확장 중 어디로 갈지, 아예 빠질지 아직 모르는 것. 언젠가 빠질 수 있다는 신호다. 규격은 벡터 암호가 준비되기 전까지 스칼라 암호를 이 방식으로 허용했다고 설명한다. RVA23에는 과도기 옵션이 없다.</p></div>
+    </div>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 840 330" role="img" aria-label="필수, 네 종류의 옵션, 비프로파일 확장의 관계">
+        <rect x="10" y="10" width="820" height="310" rx="18" fill="none" stroke="var(--border)" stroke-width="1.5" stroke-dasharray="6 6"/>
+        <text x="28" y="34" class="t-dim">비프로파일 확장 — 사용자 정의 X 확장, 프로파일 이후에 나온 확장 …</text>
+        <g transform="translate(600,22)"><rect width="214" height="46" rx="10" class="f-bad-soft"/><text x="107" y="20" text-anchor="middle" class="t-bad" style="font-size:13px">충돌 → 호환 아님</text><text x="107" y="37" text-anchor="middle" class="t-mono" style="font-size:12px">Zfinx · Zdinx · Zhinx</text></g>
+        <rect x="40" y="80" width="760" height="226" rx="16" class="f-surface"/>
+        <text x="60" y="104" class="t t-bold">프로파일 RVA23U64</text>
+        <!-- 필수 -->
+        <rect x="60" y="118" width="300" height="172" rx="14" class="f-accent-soft"/>
+        <text x="210" y="144" text-anchor="middle" class="t-accent">필수 (profile mandates)</text>
+        <rect x="80" y="156" width="260" height="36" rx="8" class="f-accent"/>
+        <text x="210" y="179" text-anchor="middle" class="t-on-accent">베이스 RV64I</text>
+        <text x="210" y="214" text-anchor="middle" class="t-mono" style="font-size:12px">M A F D C B V Zicsr …</text>
+        <text x="210" y="234" text-anchor="middle" class="t-mono" style="font-size:12px">Zicond Zfa Zcb Zawrs Supm …</text>
+        <text x="210" y="266" text-anchor="middle" class="t-dim">소프트웨어가 늘 있다고 가정</text>
+        <rect x="80" y="156" width="260" height="36" rx="8" fill="none" stroke="var(--accent-2)" stroke-width="2" class="pulse"/>
+        <!-- 옵션들 -->
+        <g transform="translate(380,118)">
+          <rect width="200" height="80" rx="12" class="f-teal-soft"/><text x="100" y="26" text-anchor="middle" class="t-teal">지역 옵션</text><text x="100" y="48" text-anchor="middle" class="t-mono" style="font-size:12px">Zvkng · Zvksg</text><text x="100" y="68" text-anchor="middle" class="t-faint">늘 선택으로 남음</text>
+        </g>
+        <g transform="translate(590,118)">
+          <rect width="200" height="80" rx="12" class="f-gold-soft"/><text x="100" y="26" text-anchor="middle" class="t-gold">개발 옵션</text><text x="100" y="48" text-anchor="middle" class="t-mono" style="font-size:12px">Zacas · Zabha · Zvbc …</text><text x="100" y="68" text-anchor="middle" class="t-faint">→ 다음 RVA에서 필수 예정</text>
+        </g>
+        <g transform="translate(380,210)">
+          <rect width="200" height="80" rx="12" class="f-violet-soft"/><text x="100" y="26" text-anchor="middle" class="t-violet">확장 옵션</text><text x="100" y="48" text-anchor="middle" class="t-mono" style="font-size:12px">Zfh · Zicfilp · Zvfh …</text><text x="100" y="68" text-anchor="middle" class="t-faint">탐지해서 쓰는 큰 기능</text>
+        </g>
+        <g transform="translate(590,210)">
+          <rect width="200" height="80" rx="12" class="f-elev"/><text x="100" y="26" text-anchor="middle" class="t t-bold">과도기 옵션</text><text x="100" y="48" text-anchor="middle" class="t-dim">RVA23 에는 없음</text><text x="100" y="68" text-anchor="middle" class="t-faint">언젠가 빠질 수 있음</text>
+        </g>
+        <path d="M690 116 V 100 H 230 V 116" class="s-gold flow-dash" fill="none"/>
+        <text x="460" y="94" text-anchor="middle" class="t-gold" style="font-size:12px">다음 세대에서 필수로 승격</text>
+      </svg></div>
+      <figcaption><b>그림 23-4.</b> 한 프로파일 안의 구조. 필수(파랑) 바깥에 성격이 다른 네 종류의 옵션이 있고, 그 밖은 비프로파일 확장이다. 금색 점선은 개발 옵션이 다음 세대에서 필수로 옮겨 가는 길이다. 실제로 RVA22에서 옵션이던 V가 RVA23에서 필수가 되었다.</figcaption>
+    </figure>
+    <div class="callout tip"><strong>옵션은 묶음 단위다</strong><p>여러 확장으로 이루어진 옵션은 구성 확장이 <b>전부</b> 있어야 그 옵션을 갖춘 것으로 본다. RVA22 규격의 예로, <code>Zbkb</code>는 <code>Zkn</code> 옵션의 구성 요소이지만 그것만 따로는 프로파일 옵션이 아니다. 옵션의 단위를 크게 잡는 것은 소프트웨어가 대비해야 할 조합의 수를 줄이기 위해서다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="lineup">
+    <h2>RVI20 → RVA20 → RVA22 → RVA23</h2>
+    <p>지금까지 비준된 프로파일 문서는 두 묶음이다. 2023년 4월 2일 날짜의 <b>RISC-V Profiles v1.0</b>이 RVI20·RVA20·RVA22를, 2024년 10월 17일 날짜의 <b>RVA23 v1.0</b>과 <b>RVB23 v1.0</b>이 각각 RVA23과 RVB23을 정의한다. 아래 표는 사용자 모드(U64) 프로파일의 필수·선택 확장을 규격 원문 그대로 옮긴 것이다.</p>
+
+    <div class="table-wrap"><table class="compact profile-matrix">
+      <thead><tr><th>확장</th><th>RVI20U64</th><th>RVA20U64</th><th>RVA22U64</th><th>RVA23U64</th><th>RVB23U64</th></tr></thead>
+      <tbody>
+        <tr><td>RV64I (베이스)</td><td><span class="pill ok">필수</span></td><td><span class="pill ok">필수</span></td><td><span class="pill ok">필수</span></td><td><span class="pill ok">필수</span></td><td><span class="pill ok">필수</span></td></tr>
+        <tr><td>M · A · F · D · C</td><td><span class="pill">선택</span></td><td><span class="pill ok">필수</span></td><td><span class="pill ok">필수</span></td><td><span class="pill ok">필수</span></td><td><span class="pill ok">필수</span></td></tr>
+        <tr><td>Zicsr · Zicntr</td><td><span class="pill">선택</span>¹</td><td><span class="pill ok">필수</span></td><td><span class="pill ok">필수</span></td><td><span class="pill ok">필수</span></td><td><span class="pill ok">필수</span></td></tr>
+        <tr><td>Zihpm</td><td><span class="pill">선택</span></td><td><span class="pill">선택</span></td><td><span class="pill ok">필수</span></td><td><span class="pill ok">필수</span></td><td><span class="pill ok">필수</span></td></tr>
+        <tr><td>Zifencei</td><td><span class="pill">선택</span></td><td>—²</td><td>—²</td><td>—²</td><td>—²</td></tr>
+        <tr><td>Ziccif · Ziccrse · Ziccamoa · Zicclsm</td><td>—</td><td><span class="pill ok">필수</span></td><td><span class="pill ok">필수</span></td><td><span class="pill ok">필수</span></td><td><span class="pill ok">필수</span></td></tr>
+        <tr><td>Za128rs → Za64rs</td><td>—</td><td><span class="pill ok">Za128rs</span></td><td><span class="pill ok">Za64rs</span></td><td><span class="pill ok">Za64rs</span></td><td><span class="pill ok">Za64rs</span></td></tr>
+        <tr><td>Zihintpause</td><td>—</td><td>—</td><td><span class="pill ok">필수</span></td><td><span class="pill ok">필수</span></td><td><span class="pill ok">필수</span></td></tr>
+        <tr><td>Zba · Zbb · Zbs (= B)</td><td>—</td><td>—</td><td><span class="pill ok">필수</span></td><td><span class="pill ok">필수</span></td><td><span class="pill ok">필수</span></td></tr>
+        <tr><td>Zic64b · Zicbom · Zicbop · Zicboz</td><td>—</td><td>—</td><td><span class="pill ok">필수</span></td><td><span class="pill ok">필수</span></td><td><span class="pill ok">필수</span></td></tr>
+        <tr><td>Zkt</td><td>—</td><td>—</td><td><span class="pill ok">필수</span></td><td><span class="pill ok">필수</span></td><td><span class="pill ok">필수</span></td></tr>
+        <tr><td>Zfhmin</td><td>—</td><td>—</td><td><span class="pill ok">필수</span></td><td><span class="pill ok">필수</span></td><td><span class="pill">선택</span></td></tr>
+        <tr><td>Zfh</td><td>—</td><td>—</td><td><span class="pill">선택</span></td><td><span class="pill">선택</span></td><td><span class="pill">선택</span></td></tr>
+        <tr><td>V</td><td>—</td><td>—</td><td><span class="pill">선택</span></td><td><span class="pill gold">필수 (신규)</span></td><td><span class="pill">선택</span></td></tr>
+        <tr><td>Zvfhmin · Zvbb · Zvkt</td><td>—</td><td>—</td><td>—</td><td><span class="pill gold">필수 (신규)</span></td><td><span class="pill">선택</span></td></tr>
+        <tr><td>Zihintntl · Zicond · Zimop · Zcmop</td><td>—</td><td>—</td><td>—</td><td><span class="pill gold">필수 (신규)</span></td><td><span class="pill ok">필수</span></td></tr>
+        <tr><td>Zcb · Zfa · Zawrs</td><td>—</td><td>—</td><td>—</td><td><span class="pill gold">필수 (신규)</span></td><td><span class="pill ok">필수</span></td></tr>
+        <tr><td>Supm</td><td>—</td><td>—</td><td>—</td><td><span class="pill gold">필수 (신규)</span></td><td><span class="pill">선택</span></td></tr>
+        <tr><td>Zkn · Zks (스칼라 암호)</td><td>—</td><td>—</td><td><span class="pill">선택</span></td><td>—</td><td><span class="pill">선택</span></td></tr>
+        <tr><td>Zvkng · Zvksg (벡터 암호)</td><td>—</td><td>—</td><td>—</td><td><span class="pill">선택</span></td><td><span class="pill">선택</span></td></tr>
+        <tr><td>Zacas · Zabha · Zvbc</td><td>—</td><td>—</td><td>—</td><td><span class="pill">선택</span></td><td><span class="pill">선택</span></td></tr>
+        <tr><td>Zicfilp · Zicfiss (CFI)</td><td>—</td><td>—</td><td>—</td><td><span class="pill">선택</span></td><td><span class="pill">선택</span></td></tr>
+      </tbody>
+    </table></div>
+    <p style="font-size:14px;color:var(--text-dim)">¹ RVI20에서 <code>Zicsr</code>는 단독으로는 지원되지 않고 <code>Zicntr</code>나 F와 함께 들어온다. ² <code>Zifencei</code>는 U64 프로파일의 옵션이 아니다. 여러 하트가 도는 환경에서는 <code>fence.i</code> 하나로 명령어 캐시를 맞출 수 없으므로 OS 호출(리눅스의 <code>__riscv_flush_icache</code>)을 쓰라는 이유다. 대신 모든 S64 프로파일에서는 필수다. 이 밖에 RVI20·RVA 모든 프로파일에서 <code>fence.tso</code>는 베이스의 일부로 필수다.</p>
+
+    <div class="sim" id="superset-sim">
+      <div class="sim-head"><span class="sim-tag">EXPLORER</span><h3>프로파일 상위 집합 탐색기</h3></div>
+      <div class="superset-layout">
+        <div class="sim-pad" style="padding:12px">
+          <svg id="superset-svg" viewBox="0 0 520 400" role="img" aria-label="RVI20U64 ⊂ RVA20U64 ⊂ RVA22U64 ⊂ RVA23U64 를 겹친 상자로 나타낸 그림. 상자를 누르면 새로 추가된 확장이 나타난다."></svg>
+        </div>
+        <div class="superset-detail" id="superset-detail"></div>
+      </div>
+      <div class="sim-controls">
+        <div class="control"><span>단계</span><div class="segmented" id="superset-step"><button data-value="0" class="on">RVI20U64</button><button data-value="1">RVA20U64</button><button data-value="2">RVA22U64</button><button data-value="3">RVA23U64</button></div></div>
+        <div class="control"><span>자동 재생</span><div class="button-row"><button class="button primary" id="superset-play">재생</button></div></div>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">이 단계의 필수 확장 수</span><span class="value" id="superset-total">0</span></div>
+        <div class="stat"><span class="key">이전 단계보다 늘어난 수</span><span class="value" id="superset-added">0</span></div>
+      </div>
+      <div class="sim-note">단계를 RVI20U64부터 차례로 눌러 보자. 안쪽 상자가 바깥 상자에 그대로 들어 있다는 것은 “RVA23U64를 만족하는 하드웨어는 RVA22U64·RVA20U64·RVI20U64용 바이너리도 실행한다”는 뜻이다. <code>B</code>는 <code>Zba</code>·<code>Zbb</code>·<code>Zbs</code> 세 개로 풀어서 셌다.</div>
+    </div>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 880 250" role="img" aria-label="프로파일과 배포판, 하드웨어의 연표">
+        <line x1="30" y1="125" x2="860" y2="125" stroke="var(--border)" stroke-width="4" stroke-linecap="round"/>
+        <line x1="30" y1="125" x2="860" y2="125" class="s-gold flow-dash" stroke-width="2"/>
+        <g transform="translate(70,125)"><circle r="9" class="f-accent"/><text y="-54" text-anchor="middle" class="t-accent">2019</text><text y="-34" text-anchor="middle" class="t-dim">베이스·IMAFDQC 비준</text><text y="-18" text-anchor="middle" class="t-faint">→ 이름의 “20”</text></g>
+        <g transform="translate(205,125)"><circle r="9" class="f-gold"/><text y="34" text-anchor="middle" class="t-gold">2023.04</text><text y="54" text-anchor="middle" class="t-dim">Profiles v1.0</text><text y="70" text-anchor="middle" class="t-faint">RVI20 · RVA20 · RVA22</text></g>
+        <g transform="translate(330,125)"><circle r="9" class="f-accent"/><text y="-54" text-anchor="middle" class="t-accent">2024.04</text><text y="-34" text-anchor="middle" class="t-dim">Ubuntu 24.04 LTS</text><text y="-18" text-anchor="middle" class="t-faint">RVA20 하드웨어 대상</text></g>
+        <g transform="translate(455,125)"><circle r="9" class="f-gold"/><text y="34" text-anchor="middle" class="t-gold">2024.10</text><text y="54" text-anchor="middle" class="t-dim">RVA23 · RVB23 v1.0</text><text y="70" text-anchor="middle" class="t-faint">V·H 필수화(RVA23)</text></g>
+        <g transform="translate(575,125)"><circle r="9" class="f-accent"/><text y="-54" text-anchor="middle" class="t-accent">2025.08</text><text y="-34" text-anchor="middle" class="t-dim">Debian 13 riscv64</text><text y="-18" text-anchor="middle" class="t-faint">공식 아키텍처, RV64GC 기준</text></g>
+        <g transform="translate(690,125)"><circle r="9" class="f-gold"/><text y="34" text-anchor="middle" class="t-gold">2025.10</text><text y="54" text-anchor="middle" class="t-dim">Ubuntu 25.10</text><text y="70" text-anchor="middle" class="t-faint">RVA23 기준으로 상향</text></g>
+        <g transform="translate(795,125)"><circle r="11" class="f-accent pulse"/><text y="-54" text-anchor="middle" class="t-accent">2026</text><text y="-34" text-anchor="middle" class="t-dim">RVA23 SoC 출하</text><text y="-18" text-anchor="middle" class="t-faint">SpacemiT K3 · Linux 7.0</text></g>
+      </svg></div>
+      <figcaption><b>그림 23-5.</b> 프로파일 규격과 생태계의 연표. 규격 날짜는 docs.riscv.org 문서 머리말 기준이고, 배포판·하드웨어 항목은 각 프로젝트의 발표를 따랐다(자세한 내용과 주의점은 이 장 끝의 <a href="#ecosystem">생태계 현황</a> 절).</figcaption>
+    </figure>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="rva23">
+    <h2>RVA23 자세히 보기</h2>
+    <p>RVA23은 지금까지의 프로파일 중 가장 큰 도약이다. 규격은 목표를 분명히 적는다. 바이너리 소프트웨어 생태계가 <b>넓은 필수 집합</b>과 <b>소수의 굵직한 옵션</b>에 기댈 수 있게 하는 것이며, “최소 기능만 두고 잘게 쪼갠 확장을 많이 허용해 하드웨어 자유도를 높이는 것은 명시적으로 목표가 아니다”라고 한다.</p>
+
+    <h3>RVA23U64에서 새로 필수가 된 것</h3>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>확장</th><th>내용</th><th>이 책</th></tr></thead>
+      <tbody>
+        <tr><td><code>V</code></td><td>벡터 확장. RVA22U64에서는 옵션이었다</td><td><a href="vector.html">15장</a></td></tr>
+        <tr><td><code>Zvfhmin</code></td><td>벡터 반정밀도(FP16) 최소 지원 — 변환 위주</td><td><a href="vector.html">15장</a></td></tr>
+        <tr><td><code>Zvbb</code> · <code>Zvkt</code></td><td>벡터 기본 비트 조작 · 벡터 데이터 독립 실행 시간</td><td><a href="bit-manipulation.html">14장</a></td></tr>
+        <tr><td><code>Zihintntl</code></td><td>비시간적(non-temporal) 지역성 힌트</td><td><a href="small-extensions.html">16장</a></td></tr>
+        <tr><td><code>Zicond</code></td><td>정수 조건 연산 <code>czero.eqz</code> · <code>czero.nez</code></td><td><a href="small-extensions.html">16장</a></td></tr>
+        <tr><td><code>Zimop</code> · <code>Zcmop</code></td><td>may-be-operations: 나중 확장을 위해 예약된, 지금은 무해한 명령</td><td><a href="small-extensions.html">16장</a></td></tr>
+        <tr><td><code>Zcb</code></td><td>추가 압축 명령어</td><td><a href="compressed.html">13장</a></td></tr>
+        <tr><td><code>Zfa</code></td><td>추가 부동소수점 명령어</td><td><a href="floating-point.html">12장</a></td></tr>
+        <tr><td><code>Zawrs</code></td><td>예약 집합 대기(wait-on-reservation-set) 명령</td><td><a href="atomic.html">10장</a></td></tr>
+        <tr><td><code>Supm</code></td><td>포인터 마스킹 — 실행 환경이 최소 PMLEN=0과 PMLEN=7을 고를 수단을 제공</td><td><a href="memory-protection.html">20장</a></td></tr>
+      </tbody>
+    </table></div>
+
+    <h3>RVA23S64: 하이퍼바이저가 필수</h3>
+    <p>RVA23S64는 특권 규격 1.13(<code>Ss1p13</code>)을 바탕으로 하고, RVA23U64의 모든 필수 확장에 <code>Zifencei</code>와 다음 특권 확장을 더한다. RVA22S64에서 이어진 것은 <code>Svbare</code>, <code>Sv39</code>, <code>Svade</code>, <code>Ssccptr</code>, <code>Sstvecd</code>, <code>Sstvala</code>, <code>Sscounterenw</code>, <code>Svpbmt</code>, <code>Svinval</code>이고, 새로 필수가 된 것은 다음과 같다.</p>
+    <ul>
+      <li><code>Svnapot</code>(<a href="virtual-memory.html">19장</a>), <code>Sstc</code>(S 모드 타이머, <a href="trap.html">18장</a>), <code>Sscofpmf</code>(카운터 오버플로·모드별 필터링), <code>Ssu64xl</code>(UXLEN=64 지원) — 모두 RVA22S64에서 옵션이었다.</li>
+      <li><code>Ssnpm</code> — S 모드의 포인터 마스킹 제어(<code>senvcfg.PME</code>, <code>henvcfg.PME</code>가 최소 PMLEN=0·7을 지원).</li>
+      <li><code>Sha</code> — “증강 하이퍼바이저(augmented hypervisor)” 확장. <code>H</code>(<a href="hypervisor.html">21장</a>)와 함께 반드시 있어야 하는 <code>Ssstateen</code>, <code>Shcounterenw</code>, <code>Shvstvala</code>, <code>Shtvala</code>, <code>Shvstvecd</code>, <code>Shvsatpa</code>, <code>Shgatpa</code>를 한 이름으로 묶은 프로파일 정의 확장이다.</li>
+    </ul>
+    <div class="callout spec"><strong>규격 원문에서</strong>
+      <blockquote>“The RVA23 profiles are intended to align implementations of RISC-V 64-bit application processors to allow binary software ecosystems to rely on a large set of guaranteed extensions and a small number of discoverable coarse-grain options.”</blockquote>
+      <p><a href="https://docs.riscv.org/reference/rva23/v1.0/rva23-profiles.html" target="_blank" rel="noopener">RVA23 Profile v1.0, RVA23 Profiles</a> — “넓은 필수, 적고 굵은 옵션”이 RVA23 설계의 한 줄 요약이다.</p></div>
+    <div class="callout deep"><strong>Ssstrict와 게스트 가상 머신</strong><p>RVA23S64의 확장 옵션 <code>Ssstrict</code>는 “표준·예약 인코딩 공간의 미구현 opcode나 CSR에 접근하면 반드시 S 모드로 가는 잘못된 명령 예외가 된다”는 성질에 붙인 이름이다(사용자 정의 공간은 해당하지 않는다). 규격은 RVA23의 필수·옵션이 하이퍼바이저 위의 <b>게스트 VM에는 적용되지 않는다</b>고도 밝힌다. RVA23 하이퍼바이저는 RVA23 호환 게스트를 줄 수도, H가 없거나 RVA20 수준인 게스트를 줄 수도 있다.</p></div>
+
+    <h3>RVB23: 같은 뼈대, 더 많은 옵션</h3>
+    <p>RVB23은 RVA23과 같은 날 비준되었다. 목표가 다르다. RVA는 여러 회사의 칩에서 같은 바이너리 커널과 응용을 돌리는 것이 목표지만, RVB는 “다양한 바이너리 배포판을 지원하는 단일 표준 인터페이스를 제공하는 것이 명시적으로 목표가 아니다”. 그래서 비용이 큰 기능은 옵션으로 돌린다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 840 330" role="img" aria-label="RVB23U64 필수 집합이 RVA23U64 필수 집합 안에 들어가는 모습">
+        <rect x="20" y="20" width="560" height="290" rx="18" class="f-accent-soft"/>
+        <text x="40" y="48" class="t-accent" style="font-size:16px">RVA23U64 필수</text>
+        <rect x="40" y="64" width="300" height="230" rx="14" class="f-teal-soft"/>
+        <text x="60" y="92" class="t-teal" style="font-size:16px">RVB23U64 필수</text>
+        <text x="60" y="120" class="t-mono" style="font-size:12.5px">RV64I M A F D C B</text>
+        <text x="60" y="142" class="t-mono" style="font-size:12.5px">Zicsr Zicntr Zihpm</text>
+        <text x="60" y="164" class="t-mono" style="font-size:12.5px">Ziccif Ziccrse Ziccamoa</text>
+        <text x="60" y="186" class="t-mono" style="font-size:12.5px">Zicclsm Za64rs Zihintpause</text>
+        <text x="60" y="208" class="t-mono" style="font-size:12.5px">Zic64b Zicbom Zicbop Zicboz Zkt</text>
+        <text x="60" y="230" class="t-mono" style="font-size:12.5px">Zihintntl Zicond Zimop Zcmop</text>
+        <text x="60" y="252" class="t-mono" style="font-size:12.5px">Zcb Zfa Zawrs</text>
+        <text x="60" y="278" class="t-faint">RVA23U64 의 부분 집합</text>
+        <text x="460" y="96" text-anchor="middle" class="t t-bold">RVA23 에만 필수</text>
+        <text x="460" y="116" text-anchor="middle" class="t-faint">(RVB23 에서는 확장 옵션)</text>
+        <g class="t-mono">
+          <rect x="370" y="134" width="84" height="30" rx="8" class="f-gold-soft blink-highlight"/><text x="412" y="154" text-anchor="middle" class="t-mono">V</text>
+          <rect x="466" y="134" width="96" height="30" rx="8" class="f-gold-soft"/><text x="514" y="154" text-anchor="middle" class="t-mono">Zfhmin</text>
+          <rect x="370" y="174" width="96" height="30" rx="8" class="f-gold-soft"/><text x="418" y="194" text-anchor="middle" class="t-mono">Zvfhmin</text>
+          <rect x="476" y="174" width="86" height="30" rx="8" class="f-gold-soft"/><text x="519" y="194" text-anchor="middle" class="t-mono">Zvbb</text>
+          <rect x="370" y="214" width="96" height="30" rx="8" class="f-gold-soft"/><text x="418" y="234" text-anchor="middle" class="t-mono">Zvkt</text>
+          <rect x="476" y="214" width="86" height="30" rx="8" class="f-gold-soft"/><text x="519" y="234" text-anchor="middle" class="t-mono">Supm</text>
+        </g>
+        <text x="460" y="276" text-anchor="middle" class="t-faint">S64: Ssnpm · Sha(H) 도 RVB 에선 옵션</text>
+        <!-- RVB 전용 옵션 -->
+        <rect x="600" y="20" width="224" height="290" rx="18" fill="none" stroke="var(--teal)" stroke-width="1.6" stroke-dasharray="6 5"/>
+        <text x="712" y="48" text-anchor="middle" class="t-teal">RVB23 에만 있는 옵션</text>
+        <text x="712" y="70" text-anchor="middle" class="t-faint">지역(localized) 옵션</text>
+        <text x="712" y="104" text-anchor="middle" class="t-mono">Zvkg</text>
+        <text x="712" y="130" text-anchor="middle" class="t-mono">Zvknc · Zvksc</text>
+        <text x="712" y="156" text-anchor="middle" class="t-mono">Zkn · Zks</text>
+        <text x="712" y="196" text-anchor="middle" class="t-faint">벡터가 옵션이라</text>
+        <text x="712" y="214" text-anchor="middle" class="t-faint">스칼라 암호를 남겼고,</text>
+        <text x="712" y="232" text-anchor="middle" class="t-faint">값싼 carry-less 곱셈판</text>
+        <text x="712" y="250" text-anchor="middle" class="t-faint">벡터 암호도 허용한다</text>
+      </svg></div>
+      <figcaption><b>그림 23-6.</b> RVB23U64와 RVA23U64. RVB23U64의 필수 집합은 RVA23U64 필수 집합에서 벡터 확장 네 개(<code>V</code>, <code>Zvfhmin</code>, <code>Zvbb</code>, <code>Zvkt</code>), 스칼라 <code>Zfhmin</code>, 포인터 마스킹 <code>Supm</code>을 뺀 것이다. 그것들은 RVB23에서 확장 옵션이 된다. S 모드에서는 <code>Svnapot</code>처럼 값싼 것은 RVB23S64에서도 필수이지만 <code>Sha</code>(하이퍼바이저)와 <code>Ssnpm</code>은 옵션이다.</figcaption>
+    </figure>
+    <div class="callout warn"><strong>RVA22U64 ⊄ RVB23U64</strong><p>RVB23U64는 RVA23U64의 부분 집합이지만, RVA22U64를 포함하지는 않는다. RVA22U64에서 필수였던 <code>Zfhmin</code>이 RVB23U64에서는 옵션이기 때문이다. 이름의 숫자가 크다고 늘 상위 집합인 것은 아니며, 같은 계열(A면 A) 안에서만 상위 집합 관계가 유지된다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="checker">
+    <h2>내 CPU는 어느 프로파일을 만족할까</h2>
+    <p>아래 검사기에서 CPU가 지원하는 확장을 눌러 켜고 끄면, 여섯 프로파일 각각에 대해 필수 확장을 얼마나 갖췄는지와 빠진 것이 무엇인지 바로 보여 준다. 판정 기준은 위 표와 같은 규격 원문의 필수 목록이다. 프리셋 버튼으로 대표적인 하드웨어 수준을 불러올 수도 있다.</p>
+
+    <div class="sim" id="checker-sim">
+      <div class="sim-head"><span class="sim-tag">SIMULATOR</span><h3>프로파일 호환성 검사기</h3></div>
+      <div class="sim-controls" style="border-top:0;border-bottom:1px solid var(--border)">
+        <div class="control"><span>프리셋</span><div class="button-row" id="checker-presets">
+          <button class="button" data-preset="rv32imc">마이크로컨트롤러 RV32IMC</button>
+          <button class="button" data-preset="rv64gc">RV64GC만</button>
+          <button class="button" data-preset="rva20">RVA20급 리눅스 보드</button>
+          <button class="button" data-preset="rva22">RVA22급</button>
+          <button class="button primary" data-preset="rva23">RVA23급</button>
+          <button class="button" data-preset="none">모두 끄기</button>
+        </div></div>
+        <div class="control"><span>베이스</span><div class="segmented" id="checker-base"><button data-value="RV32I">RV32I</button><button data-value="RV64I" class="on">RV64I</button></div></div>
+      </div>
+      <div class="checker-layout">
+        <div class="extension-groups" id="checker-groups"></div>
+        <div class="profile-results" id="checker-results"></div>
+      </div>
+      <div class="isa-string" id="checker-isa-string">rv64i</div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">켠 확장 수</span><span class="value" id="checker-count">0</span></div>
+        <div class="stat"><span class="key">만족하는 프로파일</span><span class="value" id="checker-satisfied">—</span></div>
+      </div>
+      <div class="sim-note">“RV64GC만”을 누르면 RVA20U64조차 만족하지 못한다. 빠진 것은 <code>Zicntr</code>와 메모리 속성 이름들이다. 실제 RV64GC 리눅스 보드는 대부분 이 성질을 이미 갖고 있어서, 규격이 RVA20을 만들 때 이름만 새로 붙였다. 그다음 “RVA22급”에서 <code>V</code> 하나만 켜 보고, RVA23U64까지 무엇이 더 필요한지 세어 보자. 점선 테두리는 다른 확장 때문에 저절로 충족된 항목이다(<code>Za64rs</code>를 켜면 더 느슨한 <code>Za128rs</code>도 만족).</div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="runtime">
+    <h2>실행 중에 기능 알아내기</h2>
+    <p>프로파일은 “최소한 이것은 있다”는 바닥을 정할 뿐이다. 옵션 확장을 쓰려면 프로그램이 <b>실행 중에</b> 하드웨어가 무엇을 갖췄는지 알아내야 한다. RISC-V에서 이 정보가 흘러가는 길은 다음과 같다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 340" role="img" aria-label="하드웨어 기능 정보가 펌웨어, 커널, 사용자 프로그램으로 전달되는 경로">
+        <defs>
+          <marker id="probe-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker>
+          <path id="probe-path-up-one" d="M150 262 V 196"/>
+          <path id="probe-path-up-two" d="M150 142 V 96"/>
+          <path id="probe-path-call" d="M420 70 H 500"/>
+          <path id="probe-path-return" d="M500 100 H 420"/>
+        </defs>
+        <!-- 하드웨어 -->
+        <rect x="20" y="266" width="260" height="62" rx="12" class="f-accent"/>
+        <text x="150" y="292" text-anchor="middle" class="t-on-accent">하트 (하드웨어)</text>
+        <text x="150" y="314" text-anchor="middle" class="t-on-accent" style="font-size:12px;font-weight:400">misa · mvendorid · marchid</text>
+        <!-- 펌웨어 -->
+        <rect x="20" y="146" width="260" height="48" rx="12" class="f-surface"/>
+        <text x="150" y="168" text-anchor="middle" class="t t-bold">M 모드 펌웨어 · 부트로더</text>
+        <text x="150" y="186" text-anchor="middle" class="t-faint">장치 트리 riscv,isa-extensions / ACPI RHCT</text>
+        <use href="#probe-path-up-one" class="s-accent flow-dash" marker-end="url(#probe-arrow)"/>
+        <!-- 커널 -->
+        <rect x="20" y="40" width="260" height="54" rx="12" class="f-violet-soft"/>
+        <text x="150" y="64" text-anchor="middle" class="t t-bold">리눅스 커널 (S 모드)</text>
+        <text x="150" y="83" text-anchor="middle" class="t-faint">하트별 확장 비트맵을 만든다</text>
+        <use href="#probe-path-up-two" class="s-accent flow-dash" marker-end="url(#probe-arrow)"/>
+        <!-- 사용자 공간 경로 -->
+        <path d="M282 60 H 410" class="s-line"/>
+        <rect x="300" y="18" width="110" height="24" rx="6" class="f-elev"/><text x="355" y="35" text-anchor="middle" class="t-mono" style="font-size:12px">/proc/cpuinfo</text>
+        <rect x="300" y="72" width="110" height="24" rx="6" class="f-elev"/><text x="355" y="89" text-anchor="middle" class="t-mono" style="font-size:12px">riscv_hwprobe</text>
+        <!-- 사용자 프로그램 -->
+        <rect x="500" y="20" width="340" height="300" rx="14" class="f-elev"/>
+        <text x="670" y="46" text-anchor="middle" class="t t-bold">사용자 프로그램 (U 모드)</text>
+        <rect x="520" y="60" width="300" height="50" rx="10" class="f-gold-soft"/>
+        <text x="670" y="82" text-anchor="middle" class="t t-bold">IFUNC 해석기 (FMV)</text>
+        <text x="670" y="100" text-anchor="middle" class="t-faint">“V 비트가 켜져 있나?”</text>
+        <use href="#probe-path-call" class="s-gold flow-dash"/>
+        <use href="#probe-path-return" class="s-accent flow-dash" marker-end="url(#probe-arrow)"/>
+        <text x="460" y="62" text-anchor="middle" class="t-faint" style="font-size:11px">질의</text>
+        <text x="460" y="116" text-anchor="middle" class="t-faint" style="font-size:11px">비트마스크</text>
+        <path d="M600 112 L 580 160" class="s-line"/>
+        <path d="M740 112 L 760 160" class="s-line"/>
+        <rect x="520" y="162" width="130" height="64" rx="10" class="f-surface"/>
+        <text x="585" y="188" text-anchor="middle" class="t-mono" style="font-size:12px">foo_default</text>
+        <text x="585" y="208" text-anchor="middle" class="t-faint">RV64GC 경로</text>
+        <rect x="690" y="162" width="130" height="64" rx="10" class="f-ok-soft"/>
+        <text x="755" y="188" text-anchor="middle" class="t-mono" style="font-size:12px">foo_arch_v</text>
+        <text x="755" y="208" text-anchor="middle" class="t-faint">벡터 경로</text>
+        <rect x="690" y="162" width="130" height="64" rx="10" fill="none" stroke="var(--ok)" stroke-width="3" class="pulse"/>
+        <text x="670" y="262" text-anchor="middle" class="t-dim">프로그램 시작 때 한 번 고르고</text>
+        <text x="670" y="282" text-anchor="middle" class="t-dim">이후에는 고른 함수를 바로 부른다</text>
+        <circle r="5" fill="var(--accent)"><animateMotion dur="1.5s" begin="-0.2s" repeatCount="indefinite"><mpath href="#probe-path-up-one"/></animateMotion></circle>
+        <circle r="5" fill="var(--accent)"><animateMotion dur="1.5s" begin="-0.9s" repeatCount="indefinite"><mpath href="#probe-path-up-two"/></animateMotion></circle>
+        <circle r="5" fill="var(--accent-2)"><animateMotion dur="1.2s" begin="-0.5s" repeatCount="indefinite"><mpath href="#probe-path-call"/></animateMotion></circle>
+        <circle r="5" fill="var(--accent)"><animateMotion dur="1.2s" begin="-1.1s" repeatCount="indefinite"><mpath href="#probe-path-return"/></animateMotion></circle>
+      </svg></div>
+      <figcaption><b>그림 23-7.</b> 확장 정보가 흐르는 길. 펌웨어가 장치 트리(<code>riscv,isa-extensions</code>)나 ACPI 표로 커널에 알려 주고, 커널은 그것을 <code>/proc/cpuinfo</code>와 <code>riscv_hwprobe</code> 시스템 호출로 사용자 공간에 내보낸다. 함수 다중 버전(FMV)으로 만든 프로그램은 시작할 때 이 값을 보고 함수 하나를 고른다.</figcaption>
+    </figure>
+
+    <h3>misa만으로는 왜 부족한가</h3>
+    <p><code>misa</code> CSR(<a href="privilege.html">17장</a>)은 A부터 Z까지 한 글자 확장마다 비트 하나를 둔다. 그래서 <code>Zba</code>, <code>Zicond</code> 같은 수많은 Z 확장은 표현할 수 없다. 게다가 <code>misa</code>는 M 모드 CSR이라 S 모드 커널이나 U 모드 프로그램은 직접 읽을 수 없다. 그래서 확장 목록은 펌웨어가 장치 트리나 ACPI(RISC-V의 RHCT 표)에 적어 커널에 넘기는 방식을 쓴다.</p>
+
+    <h3>리눅스: /proc/cpuinfo와 hwprobe</h3>
+    <div class="codebox" data-title="/proc/cpuinfo 의 한 하트 (예시 — 커널 버전과 하드웨어에 따라 다르다)">processor	: 0
+hart		: 0
+isa		: rv64imafdcv_zicbom_zicboz_zicntr_zicond_zicsr_zifencei_zihintpause_zihpm_zba_zbb_zbs
+mmu		: sv39</div>
+    <p>사람이 읽기에는 좋지만 문자열을 파싱하는 것은 느리고 틀리기 쉽다. 그래서 리눅스 6.4부터는 <code>riscv_hwprobe</code> 시스템 호출이 있다. 키-값 쌍 배열을 넘기면 커널이 값을 채워 준다. 예를 들어 키 <code>RISCV_HWPROBE_KEY_IMA_EXT_0</code>의 값은 <code>RISCV_HWPROBE_IMA_FD</code>, <code>RISCV_HWPROBE_IMA_C</code>, <code>RISCV_HWPROBE_IMA_V</code>, <code>RISCV_HWPROBE_EXT_ZBA</code> … 같은 비트로 이루어진 비트마스크다. 여러 CPU를 묻는 경우 불리언 성격의 키는 모든 CPU의 논리곱(AND)으로 답한다. 이기종 코어가 섞인 칩에서도 “모든 코어가 가진 것”만 믿게 하려는 것이다.</p>
+    <div class="codebox" data-title="hwprobe.c — 벡터 확장이 있는지 묻기"><span class="comment">// &lt;asm/hwprobe.h&gt; 의 구조체와 상수를 쓴다</span>
+<span class="keyword">struct</span> riscv_hwprobe pairs[] = {
+    { .key = RISCV_HWPROBE_KEY_IMA_EXT_0 },
+};
+<span class="comment">// cpusetsize = 0, cpus = NULL 이면 온라인 CPU 전체를 뜻한다</span>
+<span class="keyword">long</span> result = syscall(__NR_riscv_hwprobe, pairs, <span class="number">1</span>, <span class="number">0</span>, NULL, <span class="number">0</span>);
+<span class="keyword">if</span> (result == <span class="number">0</span> &amp;&amp; (pairs[<span class="number">0</span>].value &amp; RISCV_HWPROBE_IMA_V)) {
+    <span class="comment">// 벡터 경로를 고른다</span>
+}</div>
+
+    <h3>함수 다중 버전(FMV)</h3>
+    <p>매번 이런 코드를 손으로 쓰기는 번거롭다. RISC-V C API 규격은 <code>target_clones</code>·<code>target_version</code> 속성을 정의하고, 이를 지원하는 컴파일러는 한 함수를 여러 버전으로 컴파일한 뒤 IFUNC 해석기가 실행 시점에 (리눅스에서는 hwprobe로) 알맞은 버전을 고르게 만든다. <code>default</code> 버전이 반드시 있어야 해서, 기준 프로파일(예: RVA20)만 갖춘 칩에서도 프로그램이 돈다.</p>
+    <div class="codebox" data-title="fmv.c — RISC-V C API 의 target_clones 예"><span class="keyword">__attribute__</span>((target_clones(<span class="number">"default"</span>, <span class="number">"arch=+v"</span>)))
+<span class="keyword">void</span> add_arrays(<span class="keyword">float</span> *destination, <span class="keyword">const float</span> *source, size_t count)
+{
+    <span class="keyword">for</span> (size_t index = <span class="number">0</span>; index &lt; count; index++)
+        destination[index] += source[index];   <span class="comment">// "arch=+v" 판은 자동 벡터화된다</span>
+}</div>
+
+    <div class="sim" id="portability-sim">
+      <div class="sim-head"><span class="sim-tag animation">ANIMATION</span><h3>바이너리 이식성: 어디서 돌고 어디서 죽나</h3></div>
+      <div class="sim-view"><canvas id="portability-canvas"></canvas></div>
+      <div class="step-description" id="portability-description"></div>
+      <div class="sim-controls">
+        <div class="control"><span>컴파일 대상</span><div class="segmented" id="portability-target"><button data-value="rva20">-march=rva20u64</button><button data-value="rva22">-march=rva22u64</button><button data-value="rva23" class="on">-march=rva23u64</button><button data-value="fmv">RVA20 + FMV</button></div></div>
+        <div class="control"><span>재생</span><div class="button-row"><button class="button primary" id="portability-play">일시 정지</button><button class="button" id="portability-restart">처음부터</button></div></div>
+        <label class="control"><span>속도 <output id="portability-speed-output"></output></span><input type="range" id="portability-speed" min="1" max="6" value="3"></label>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">RVA23 CPU</span><span class="value" id="portability-status-0">—</span></div>
+        <div class="stat"><span class="key">RVA22 CPU</span><span class="value" id="portability-status-1">—</span></div>
+        <div class="stat"><span class="key">RV64GC CPU</span><span class="value" id="portability-status-2">—</span></div>
+      </div>
+      <div class="sim-note">컴파일 대상을 바꿔 가며 세 CPU의 결과를 비교하자. <code>rva23u64</code>로 빌드한 바이너리는 RVA22 CPU에서 <code>czero.eqz</code>(<code>Zicond</code>)를 만나는 순간 잘못된 명령 예외가 나고, 리눅스는 프로세스에 <code>SIGILL</code>을 보낸다. FMV 빌드는 공통 부분을 RVA20으로 만들고 뜨거운 함수만 여러 판으로 두어, 모든 CPU에서 돌면서도 RVA23 CPU에서는 벡터 경로를 탄다.</div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="ecosystem">
+    <h2>배포판과 하드웨어 현황</h2>
+    <p>프로파일이 의미를 가지려면 운영체제 배포판이 “우리는 이 프로파일을 기준으로 빌드한다”고 선언해야 한다. 2026년 10월 현재 확인한 공개 자료를 정리하면 다음과 같다. 이 분야는 빠르게 바뀌므로 아래 내용은 날짜와 함께 읽고, 실제로 쓰기 전에는 각 프로젝트의 공식 공지를 다시 확인하자.</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>프로젝트</th><th>RISC-V 기준</th><th>근거와 시점</th></tr></thead>
+      <tbody>
+        <tr><td><b>Debian</b></td><td>RV64GC, <code>lp64d</code> ABI</td><td>Debian 13 “trixie”(2025-08-09 발표)에서 riscv64가 처음으로 공식 아키텍처가 되었다. Debian 위키는 하드웨어 기준을 RV64GC로 밝힌다.</td></tr>
+        <tr><td><b>Ubuntu 24.04 LTS</b></td><td>RVA20</td><td>Canonical 블로그: 초기 RISC-V 사용자를 위해 RVA20 프로파일을 요구하는 24.04 LTS를 계속 제공한다.</td></tr>
+        <tr><td><b>Ubuntu 25.10 이후</b></td><td>RVA23 (사용자 공간은 RVA23U64)</td><td>2025년 계획 공지와 버그 트래커에 따르면 25.10부터 RVA23을 요구하고, 업그레이드 도구는 RVA23U64를 지원하지 않는 하드웨어에서 24.04 이후로의 업그레이드를 막는다. 2026년 2월에는 SpacemiT K3에서 26.04 LTS를 제공한다는 발표가 있었다.</td></tr>
+        <tr><td><b>Fedora</b></td><td>RV64GC (RVA23 이전 논의 중)</td><td>공개 발표와 토론에 따르면 현재 기준은 RV64GC이고, RVA23 하드웨어가 널리 보급되면 옮겨 갈 의사를 밝혀 왔다. 공식 결정 문서는 확인하지 못했다.</td></tr>
+      </tbody>
+    </table></div>
+    <div class="callout warn"><strong>하드웨어는 소프트웨어보다 늦게 온다</strong><p>Ubuntu가 RVA23 기준을 발표한 2025년 중반에는 RVA23을 만족하는 상용 칩이 사실상 없었다. 2026년 들어 SpacemiT K3가 “RVA23을 지원하는 첫 상용 SoC 가운데 하나”로 양산에 들어갔고, 리눅스 7.0에 초기 메인라인 지원이 들어갔으며, 이를 쓴 보드가 2026년 5월부터 판매되기 시작했다. “최초”라는 표현은 주로 제조사와 언론 보도에 근거하므로 조심해서 받아들이자. 그 사이 RVA22급 보드(벡터 1.0을 갖춘 것 포함)를 가진 사용자는 24.04 LTS나 RV64GC 기준 배포판에 머물러야 한다.</p></div>
+    <div class="callout history"><strong>왜 RVA22를 건너뛰었나</strong><p>배포판은 기준을 한 번 올리면 수년간 유지해야 한다. RVA22는 벡터와 하이퍼바이저가 옵션이라, RVA22를 기준으로 잡아도 고성능 코드는 여전히 탐지와 분기가 필요하다. RVA23은 이 둘을 필수로 만들어 “한 번 올릴 가치가 있는” 기준이 되었다. RVA 규격의 근거 절이 말하듯, 배포 생태계는 실제 출하된 기기에서 관찰한 최소 공통분모를 고르기 마련이고, RISC-V International은 세대마다 하드웨어 업체들이 같은 기능 집합에 맞추도록 이끄는 역할을 한다.</p></div>
+  </section>
+
+  <section class="keypoints" id="summary">
+    <h2>핵심 정리</h2>
+    <ol>
+      <li>프로파일은 새 명령어를 만들지 않는다. 비준된 확장 가운데 <b>필수</b>와 <b>선택</b>을 정해, 조합 폭발을 이름 하나로 줄인다.</li>
+      <li>이름은 <code>RV</code> + 계열(I·A·B) + 연도(바탕 규격의 비준 연도 기준) + 최고 특권 모드(U·S) + XLEN이다. 예: <code>RVA23U64</code>.</li>
+      <li>RVA23의 옵션은 <b>지역</b>(암호), <b>개발</b>(다음에 필수), <b>확장</b>(비싸고 탐지 가능), <b>과도기</b>(빠질 수 있음) 네 종류로 나뉜다.</li>
+      <li>RVA20U64는 RV64GC급(+Zicntr, 메모리 속성 이름), RVA22U64는 B(Zba·Zbb·Zbs)·CMO·Zfhmin·Zkt 등을 더했고, RVA23U64는 <b>V</b>, Zicond, Zfa, Zcb, Zawrs, Supm 등을 필수로 만들었다. RVA23S64는 <b>H</b>(Sha)를 필수로 한다.</li>
+      <li>RVB23은 같은 뼈대에서 벡터·하이퍼바이저 등을 옵션으로 돌린 맞춤형 응용 프로세서용 프로파일이다.</li>
+      <li>옵션은 실행 중에 탐지한다. 리눅스는 <code>/proc/cpuinfo</code>와 <code>riscv_hwprobe</code>로 알려 주고, FMV는 이를 써서 함수 버전을 고른다. 2025–2026년 Ubuntu는 RVA23을 기준으로 올렸고 Debian·Fedora는 RV64GC 기준이다.</li>
+    </ol>
+  </section>
+
+  <section id="quiz">
+    <h2>확인 퀴즈</h2>
+    <div class="quiz">
+      <div class="quiz-question"><p>프로파일이 하는 일로 가장 알맞은 것은?</p><div class="options">
+        <button class="option">새 명령어와 인코딩을 정의한다</button>
+        <button class="option" data-correct>이미 비준된 확장 가운데 반드시 있어야 할 것과 있을 수 있는 것을 정한다</button>
+        <button class="option">칩의 성능 등급을 매긴다</button>
+        <button class="option">부팅 과정과 펌웨어 호출 규약을 정한다</button>
+      </div><div class="quiz-explanation">프로파일의 구성 요소는 모두 비준된 확장이어야 한다. 부팅·펌웨어 같은 실행 환경 전체는 플랫폼 규격의 몫이다.</div></div>
+      <div class="quiz-question"><p><code>RVA20U64</code>의 “20”은 무엇을 뜻하나?</p><div class="options">
+        <button class="option">2020년에 프로파일 문서가 발표되었다</button>
+        <button class="option">필수 확장이 20개다</button>
+        <button class="option" data-correct>2019년에 비준된 규격을 바탕으로 한, 그다음 해(2000년 이후 햇수 20) 기준의 이름이다</button>
+        <button class="option">특권 규격 버전 1.20</button>
+      </div><div class="quiz-explanation">규격은 “2019년 비준 규격에 기반한 프로파일은 20”이라고 예를 든다. RVI20·RVA20·RVA22 를 정의한 문서 자체는 2023년 4월 날짜다.</div></div>
+      <div class="quiz-question"><p>RVA22U64에서는 옵션이었다가 RVA23U64에서 필수가 된 확장은?</p><div class="options">
+        <button class="option">Zba</button>
+        <button class="option" data-correct>V</button>
+        <button class="option">Zkn</button>
+        <button class="option">Zfh</button>
+      </div><div class="quiz-explanation">V는 RVA22U64의 옵션이었고 RVA23U64에서 필수가 되었다. Zba는 RVA22U64부터 필수, Zkn은 RVA23에서 옵션에서도 빠졌고, Zfh는 여전히 확장 옵션이다.</div></div>
+      <div class="quiz-question"><p>RVA23S64에서 하이퍼바이저 확장 H가 필수라는 사실을 프로파일 규격은 어떤 이름으로 적는가?</p><div class="options">
+        <button class="option">Ss1p13</button>
+        <button class="option">Ssstrict</button>
+        <button class="option" data-correct>Sha (augmented hypervisor)</button>
+        <button class="option">Svvptc</button>
+      </div><div class="quiz-explanation">Sha는 H와 그에 딸린 Ssstateen, Shcounterenw, Shvstvala, Shtvala, Shvstvecd, Shvsatpa, Shgatpa를 묶은 프로파일 정의 확장이다.</div></div>
+      <div class="quiz-question"><p>“다음 세대 RVA에서 필수가 될 예정”이라는 뜻의 옵션 종류는?</p><div class="options">
+        <button class="option">지역(localized) 옵션</button>
+        <button class="option" data-correct>개발(development) 옵션</button>
+        <button class="option">확장(expansion) 옵션</button>
+        <button class="option">과도기(transitory) 옵션</button>
+      </div><div class="quiz-explanation">RVA23U64의 개발 옵션은 Zabha, Zacas, Ziccamoc, Zvbc, Zama16b다.</div></div>
+      <div class="quiz-question"><p>RVB23U64와 RVA23U64의 관계로 옳은 것은?</p><div class="options">
+        <button class="option">RVB23U64는 RVA23U64의 상위 집합이다</button>
+        <button class="option" data-correct>RVB23U64의 필수 집합은 RVA23U64 필수 집합의 부분 집합이며, V 등은 RVB에서 옵션이다</button>
+        <button class="option">둘은 겹치는 확장이 거의 없다</button>
+        <button class="option">RVB23은 32비트 전용이다</button>
+      </div><div class="quiz-explanation">RVB23U64는 V, Zvfhmin, Zvbb, Zvkt, Zfhmin, Supm을 확장 옵션으로 돌렸다. 나머지 필수 확장은 RVA23U64와 같다.</div></div>
+      <div class="quiz-question"><p>사용자 프로그램이 Zba 지원 여부를 알아내는 방법으로 알맞지 <b>않은</b> 것은?</p><div class="options">
+        <button class="option">리눅스 <code>riscv_hwprobe</code> 시스템 호출의 IMA_EXT_0 비트마스크를 본다</button>
+        <button class="option">/proc/cpuinfo 의 isa 줄을 읽는다</button>
+        <button class="option" data-correct>U 모드에서 <code>misa</code> CSR을 읽어 Zba 비트를 확인한다</button>
+        <button class="option">FMV로 컴파일해 IFUNC 해석기에 맡긴다</button>
+      </div><div class="quiz-explanation">misa는 M 모드 CSR이고, 한 글자 확장만 비트로 표시하므로 Z 확장 정보가 없다.</div></div>
+      <div class="quiz-question"><p>RVA23U64용으로 빌드한 바이너리를 RVA22U64만 만족하는 CPU에서 실행하면?</p><div class="options">
+        <button class="option">자동으로 느린 경로로 바뀌어 잘 돈다</button>
+        <button class="option" data-correct>RVA23에서 새로 필수가 된 명령(예: czero.eqz, 벡터 명령)을 만나면 잘못된 명령 예외가 난다</button>
+        <button class="option">부팅 자체가 안 된다</button>
+        <button class="option">컴파일러가 실행 전에 막는다</button>
+      </div><div class="quiz-explanation">새 명령을 실행하는 순간 illegal-instruction 예외가 나고, 리눅스는 SIGILL로 프로세스를 끝낸다. 그래서 Ubuntu는 업그레이드 단계에서 하드웨어를 미리 검사한다.</div></div>
+    </div>
+  </section>
+
+  <section id="references">
+    <h2>더 읽을거리</h2>
+    <ul class="references">
+      <li><a href="https://docs.riscv.org/reference/rva20-rvi20-rva22/v1.0/index.html" target="_blank" rel="noopener">RISC-V Profiles v1.0 (2023-04-02)</a> — <a href="https://docs.riscv.org/reference/rva20-rvi20-rva22/v1.0/components.html" target="_blank" rel="noopener">Components of a Profile</a>, <a href="https://docs.riscv.org/reference/rva20-rvi20-rva22/v1.0/rvi20.html" target="_blank" rel="noopener">RVI20</a>, <a href="https://docs.riscv.org/reference/rva20-rvi20-rva22/v1.0/rva20.html" target="_blank" rel="noopener">RVA20</a>, <a href="https://docs.riscv.org/reference/rva20-rvi20-rva22/v1.0/rva22.html" target="_blank" rel="noopener">RVA22</a> (이 장의 RVI20·RVA20·RVA22 목록 출처)</li>
+      <li><a href="https://docs.riscv.org/reference/rva23/v1.0/index.html" target="_blank" rel="noopener">RVA23 Profile v1.0 (2024-10-17)</a> — <a href="https://docs.riscv.org/reference/rva23/v1.0/rva-profile-overview-body.html" target="_blank" rel="noopener">RVA Profiles Rationale</a>(네 종류의 옵션), <a href="https://docs.riscv.org/reference/rva23/v1.0/rva23-profiles.html" target="_blank" rel="noopener">RVA23 Profiles</a> (RVA23U64/S64 목록 출처)</li>
+      <li><a href="https://docs.riscv.org/reference/rvb23/v1.0/index.html" target="_blank" rel="noopener">RVB23 Profiles v1.0 (2024-10-17)</a> — <a href="https://docs.riscv.org/reference/rvb23/v1.0/intro.html" target="_blank" rel="noopener">Introduction</a>, <a href="https://docs.riscv.org/reference/rvb23/v1.0/rvb23.html" target="_blank" rel="noopener">RVB23 Profiles</a></li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/naming.html" target="_blank" rel="noopener">ISA Manual Vol. I — ISA Extension Naming Conventions</a> (v20260120)</li>
+      <li><a href="https://docs.kernel.org/arch/riscv/hwprobe.html" target="_blank" rel="noopener">Linux kernel documentation — RISC-V Hardware Probing Interface</a></li>
+      <li><a href="https://github.com/riscv-non-isa/riscv-c-api-doc" target="_blank" rel="noopener">RISC-V C API Specification</a> — <code>target_clones</code> / <code>target_version</code> 함수 다중 버전</li>
+      <li><a href="https://ubuntu.com/blog/risc-v-profiles-why-is-rva23-significant" target="_blank" rel="noopener">Canonical, “RISC-V profiles – why is RVA23 significant?”</a>, <a href="https://www.phoronix.com/news/Ubuntu-25.10-To-Require-RVA23" target="_blank" rel="noopener">Phoronix, Ubuntu 25.10 RVA23 기준 계획</a></li>
+      <li><a href="https://www.debian.org/News/2025/20250809.en.html" target="_blank" rel="noopener">Debian 13 “trixie” 릴리스 공지 (2025-08-09)</a>, <a href="https://wiki.debian.org/RISC-V" target="_blank" rel="noopener">Debian Wiki: RISC-V</a></li>
+      <li><a href="https://www.phoronix.com/news/Linux-7.0-SoC-Pulls" target="_blank" rel="noopener">Phoronix, Linux 7.0의 SpacemiT K3 메인라인 지원</a>, <a href="https://www.phoronix.com/news/Ubuntu-SpacemiT-K3" target="_blank" rel="noopener">Ubuntu의 SpacemiT K3 지원</a></li>
+    </ul>
+  </section>
+</main>
+
+<script>
+/* ---------------------------------------------------------------------------
+   프로파일 자료: 검사기와 상위 집합 탐색기가 함께 쓴다.
+   모든 목록은 docs.riscv.org 의 RISC-V Profiles v1.0, RVA23 v1.0, RVB23 v1.0
+   원문에서 옮겼다. B 는 Zba·Zbb·Zbs 로, Sha 는 하나의 항목으로 다룬다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const RVA20U64_MANDATORY = ["M", "A", "F", "D", "C", "Zicsr", "Zicntr", "Ziccif", "Ziccrse", "Ziccamoa", "Za128rs", "Zicclsm"];
+  const RVA22U64_MANDATORY = ["M", "A", "F", "D", "C", "Zicsr", "Zicntr", "Zihpm", "Ziccif", "Ziccrse", "Ziccamoa", "Zicclsm", "Za64rs",
+    "Zihintpause", "Zba", "Zbb", "Zbs", "Zic64b", "Zicbom", "Zicbop", "Zicboz", "Zfhmin", "Zkt"];
+  const RVA23U64_NEW = ["V", "Zvfhmin", "Zvbb", "Zvkt", "Zihintntl", "Zicond", "Zimop", "Zcmop", "Zcb", "Zfa", "Zawrs", "Supm"];
+  const RVA23U64_MANDATORY = RVA22U64_MANDATORY.concat(RVA23U64_NEW);
+  const RVA23S64_PRIVILEGED = ["Zifencei", "Ss1p13", "Svbare", "Sv39", "Svade", "Ssccptr", "Sstvecd", "Sstvala", "Sscounterenw", "Svpbmt", "Svinval",
+    "Svnapot", "Sstc", "Sscofpmf", "Ssnpm", "Ssu64xl", "Sha"];
+  const RVA22S64_PRIVILEGED = ["Zifencei", "Svbare", "Sv39", "Svade", "Ssccptr", "Sstvecd", "Sstvala", "Sscounterenw", "Svpbmt", "Svinval"];
+  const RVB23U64_MANDATORY = ["M", "A", "F", "D", "C", "Zba", "Zbb", "Zbs", "Zicsr", "Zicntr", "Zihpm", "Ziccif", "Ziccrse", "Ziccamoa", "Zicclsm",
+    "Za64rs", "Zihintpause", "Zic64b", "Zicbom", "Zicbop", "Zicboz", "Zkt", "Zihintntl", "Zicond", "Zimop", "Zcmop", "Zcb", "Zfa", "Zawrs"];
+
+  window.RiscvProfileData = Object.freeze({
+    PROFILES: [
+      { name: "RVI20U64", base: "RV64I", mandatory: [], note: "베이스만 필수" },
+      { name: "RVA20U64", base: "RV64I", mandatory: RVA20U64_MANDATORY },
+      { name: "RVA22U64", base: "RV64I", mandatory: RVA22U64_MANDATORY },
+      { name: "RVA23U64", base: "RV64I", mandatory: RVA23U64_MANDATORY },
+      { name: "RVA23S64", base: "RV64I", mandatory: RVA23U64_MANDATORY.concat(RVA23S64_PRIVILEGED) },
+      { name: "RVB23U64", base: "RV64I", mandatory: RVB23U64_MANDATORY },
+    ],
+    // 검사기의 확장 칩 묶음. description 은 마우스를 올렸을 때 보이는 설명이다.
+    EXTENSION_GROUPS: [
+      { title: "G · C (범용 묶음)", items: [["M", "정수 곱셈·나눗셈"], ["A", "원자적 연산"], ["F", "단정밀도 부동소수점"], ["D", "배정밀도 부동소수점"], ["C", "압축 명령어"], ["Zicsr", "CSR 명령"], ["Zifencei", "명령어 페치 펜스"]] },
+      { title: "카운터 · 힌트 · 정수", items: [["Zicntr", "기본 카운터·타이머"], ["Zihpm", "성능 카운터"], ["Zihintpause", "pause 힌트"], ["Zihintntl", "비시간적 지역성 힌트"], ["Zicond", "정수 조건 연산"], ["Zimop", "may-be-operations"], ["Zcmop", "압축 may-be-operations"], ["Zcb", "추가 압축 명령"], ["Zawrs", "예약 집합 대기"]] },
+      { title: "비트 조작 · 부동소수점 · 암호", items: [["Zba", "주소 계산"], ["Zbb", "기본 비트 조작"], ["Zbs", "단일 비트 연산"], ["Zfhmin", "반정밀도 최소"], ["Zfa", "추가 부동소수점 명령"], ["Zkt", "데이터 독립 실행 시간"]] },
+      { title: "캐시 블록 연산", items: [["Zicbom", "캐시 블록 관리"], ["Zicbop", "캐시 블록 프리페치"], ["Zicboz", "캐시 블록 0 채우기"], ["Zic64b", "캐시 블록 64바이트"]] },
+      { title: "메모리 속성 (프로파일 정의 이름)", items: [["Ziccif", "주 메모리에서 명령 페치·원자성"], ["Ziccrse", "LR/SC 전진 보장(RsrvEventual)"], ["Ziccamoa", "주 메모리에서 모든 AMO"], ["Zicclsm", "정렬 안 된 적재·저장 지원"], ["Za128rs", "예약 집합 최대 128바이트"], ["Za64rs", "예약 집합 최대 64바이트"]] },
+      { title: "벡터 · 포인터 마스킹", items: [["V", "벡터 확장"], ["Zvfhmin", "벡터 반정밀도 최소"], ["Zvbb", "벡터 기본 비트 조작"], ["Zvkt", "벡터 데이터 독립 실행 시간"], ["Supm", "U 모드 포인터 마스킹"], ["Ssnpm", "S 모드 포인터 마스킹 제어"]] },
+      { title: "특권 (S 모드)", items: [["Ss1p13", "특권 규격 1.13"], ["Svbare", "satp Bare 모드"], ["Sv39", "39비트 가상 메모리"], ["Svade", "A/D 비트 → 페이지 폴트"], ["Ssccptr", "하드웨어 페이지 테이블 읽기"], ["Sstvecd", "stvec Direct 모드"], ["Sstvala", "stval 에 필요한 값 기록"], ["Sscounterenw", "scounteren 쓰기 가능"], ["Svpbmt", "페이지 기반 메모리 타입"], ["Svinval", "세밀한 TLB 무효화"], ["Svnapot", "NAPOT 변환 연속성"], ["Sstc", "S 모드 타이머 인터럽트"], ["Sscofpmf", "카운터 오버플로·필터링"], ["Ssu64xl", "UXLEN=64 지원"], ["Sha", "증강 하이퍼바이저 (H 포함)"]] },
+    ],
+    // 다른 확장이 있으면 저절로 충족되는 관계: Za64rs 는 Za128rs 보다 엄격한 조건이다
+    IMPLICATIONS: { Za128rs: ["Za64rs"] },
+    PRESETS: {
+      none: { base: "RV64I", extensions: [] },
+      rv32imc: { base: "RV32I", extensions: ["M", "C", "Zicsr"] },
+      rv64gc: { base: "RV64I", extensions: ["M", "A", "F", "D", "C", "Zicsr", "Zifencei"] },
+      rva20: { base: "RV64I", extensions: RVA20U64_MANDATORY.concat(["Zifencei", "Svbare", "Sv39", "Svade", "Ssccptr", "Sstvecd", "Sstvala"]) },
+      rva22: { base: "RV64I", extensions: RVA22U64_MANDATORY.concat(RVA22S64_PRIVILEGED) },
+      rva23: { base: "RV64I", extensions: RVA23U64_MANDATORY.concat(RVA23S64_PRIVILEGED) },
+    },
+    // 상위 집합 탐색기: 단계마다 새로 필수가 된 것과 그 단계의 옵션
+    STEPS: [
+      { name: "RVI20U64", mandatory: [], added: ["RV64I (fence.tso 포함)"], options: ["M", "A", "F", "D", "C", "Zifencei", "Zicntr", "Zihpm"],
+        description: "범용 비특권 프로파일. 툴체인이 겨냥할 수 있는 가장 낮은 공통분모로, 베이스 RV64I만 필수다. 정렬 안 된 적재·저장은 지원하지 않을 수도 있다." },
+      { name: "RVA20U64", mandatory: RVA20U64_MANDATORY, added: RVA20U64_MANDATORY, options: ["Zihpm"],
+        description: "첫 응용 프로세서 프로파일. 사실상 RV64GC 리눅스 보드를 그대로 묘사하되, 이미 갖고 있던 메모리 성질(Ziccif 등)에 이름을 붙여 필수로 적었다." },
+      { name: "RVA22U64", mandatory: RVA22U64_MANDATORY, added: ["Zihpm", "Za64rs", "Zihintpause", "Zba", "Zbb", "Zbs", "Zic64b", "Zicbom", "Zicbop", "Zicboz", "Zfhmin", "Zkt"], options: ["Zfh", "V", "Zkn", "Zks"],
+        description: "비트 조작(B 계열), 캐시 블록 연산(CMO), 반정밀도 변환, 데이터 독립 실행 시간이 필수가 되었다. 예약 집합 크기 조건은 128바이트에서 64바이트로 강화되었다(Za64rs)." },
+      { name: "RVA23U64", mandatory: RVA23U64_MANDATORY, added: RVA23U64_NEW, options: ["Zvkng", "Zvksg", "Zabha", "Zacas", "Ziccamoc", "Zvbc", "Zama16b", "Zfh", "Zbc", "Zicfilp", "Zicfiss", "Zvfh", "Zfbfmin", "Zvfbfmin", "Zvfbfwma"],
+        description: "벡터(V)가 필수가 되었고, 조건 연산·추가 부동소수점·추가 압축 명령·포인터 마스킹까지 더해졌다. 스칼라 암호(Zkn·Zks)는 옵션에서도 빠지고 벡터 암호가 지역 옵션이 되었다." },
+    ],
+  });
+})();
+
+/* ---------------------------------------------------------------------------
+   프로파일 호환성 검사기: 칩을 눌러 확장을 켜고 끄면 프로파일마다 판정한다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const data = window.RiscvProfileData;
+  const groupsElement = document.getElementById("checker-groups");
+  const resultsElement = document.getElementById("checker-results");
+  const isaStringElement = document.getElementById("checker-isa-string");
+  // ISA 문자열에서 Z 확장은 관련 한 글자 범주 순서(IMAFDQLCBKJTPVH)로 정렬한다
+  const CATEGORY_ORDER = "IMAFDQLCBKJTPVH";
+  const SINGLE_LETTER_ORDER = "MAFDQCBV";
+  const selected = new Set();
+  let currentBase = "RV64I";
+
+  // 칩 만들기
+  groupsElement.innerHTML = data.EXTENSION_GROUPS.map((group) =>
+    '<div class="extension-group"><h4>' + group.title + '</h4><div class="chip-row">' +
+    group.items.map(([name, description]) => '<button class="extension-chip" data-extension="' + name + '" title="' + description + '">' + name + "</button>").join("") +
+    "</div></div>").join("");
+
+  // 결과 줄 만들기
+  resultsElement.innerHTML = data.PROFILES.map((profile, index) =>
+    '<div class="profile-row" data-index="' + index + '"><div class="row-head"><span class="profile-name">' + profile.name + '</span><span class="pill" data-role="status">—</span></div>' +
+    '<div class="progress-track"><div class="progress-fill" data-role="fill"></div></div><div class="missing-list" data-role="missing"></div></div>').join("");
+
+  function isSatisfied(extension) {
+    if (selected.has(extension)) return true;
+    const strongerExtensions = data.IMPLICATIONS[extension] || [];
+    return strongerExtensions.some((stronger) => selected.has(stronger));
+  }
+
+  function isaString() {
+    const letters = [...selected].filter((name) => name.length === 1).sort((first, second) => SINGLE_LETTER_ORDER.indexOf(first) - SINGLE_LETTER_ORDER.indexOf(second));
+    const zExtensions = [...selected].filter((name) => name.startsWith("Z")).sort((first, second) => {
+      const categoryDifference = CATEGORY_ORDER.indexOf(first[1].toUpperCase()) - CATEGORY_ORDER.indexOf(second[1].toUpperCase());
+      if (categoryDifference !== 0) return categoryDifference;
+      return first.localeCompare(second);
+    });
+    const sExtensions = [...selected].filter((name) => name.startsWith("S")).sort();
+    const prefix = currentBase.toLowerCase() + letters.join("").toLowerCase();
+    return [prefix].concat(zExtensions, sExtensions).map((part) => part.toLowerCase()).join("_");
+  }
+
+  function render() {
+    groupsElement.querySelectorAll(".extension-chip").forEach((chip) => {
+      const name = chip.dataset.extension;
+      chip.classList.toggle("on", selected.has(name));
+      chip.classList.toggle("implied", !selected.has(name) && isSatisfied(name));
+    });
+    const satisfiedNames = [];
+    data.PROFILES.forEach((profile, index) => {
+      const row = resultsElement.querySelector('[data-index="' + index + '"]');
+      const hasBase = currentBase === profile.base;
+      const missing = profile.mandatory.filter((extension) => !isSatisfied(extension));
+      const requiredCount = profile.mandatory.length + 1;
+      const satisfiedCount = requiredCount - missing.length - (hasBase ? 0 : 1);
+      const isCompatible = hasBase && missing.length === 0;
+      const fill = row.querySelector('[data-role="fill"]');
+      fill.style.width = (100 * satisfiedCount / requiredCount).toFixed(1) + "%";
+      fill.classList.toggle("complete", isCompatible);
+      const status = row.querySelector('[data-role="status"]');
+      status.className = "pill " + (isCompatible ? "ok" : "bad");
+      status.textContent = isCompatible ? "호환 ✓" : "미충족 " + (missing.length + (hasBase ? 0 : 1)) + "개";
+      const missingElement = row.querySelector('[data-role="missing"]');
+      if (isCompatible) {
+        missingElement.textContent = "필수 " + requiredCount + "개 모두 충족" + (profile.note ? " · " + profile.note : "");
+      } else {
+        const baseText = hasBase ? "" : "<b>베이스 " + profile.base + "</b> ";
+        missingElement.innerHTML = "빠짐: " + baseText + missing.map((name) => "<b>" + name + "</b>").join(" ");
+      }
+      if (isCompatible) satisfiedNames.push(profile.name);
+    });
+    isaStringElement.textContent = isaString();
+    document.getElementById("checker-count").textContent = selected.size;
+    document.getElementById("checker-satisfied").textContent = satisfiedNames.length ? satisfiedNames.join(", ") : "없음";
+  }
+
+  groupsElement.addEventListener("click", (event) => {
+    const chip = event.target.closest(".extension-chip");
+    if (!chip) return;
+    const name = chip.dataset.extension;
+    if (selected.has(name)) selected.delete(name);
+    else selected.add(name);
+    render();
+  });
+
+  const baseControl = book.segmented("checker-base", (value) => { currentBase = value; render(); });
+
+  function applyPreset(presetName) {
+    const preset = data.PRESETS[presetName];
+    selected.clear();
+    preset.extensions.forEach((extension) => selected.add(extension));
+    baseControl.set(preset.base);
+    document.querySelectorAll("#checker-presets .button").forEach((button) => button.classList.toggle("primary", button.dataset.preset === presetName));
+    render();
+  }
+  document.getElementById("checker-presets").addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-preset]");
+    if (button) applyPreset(button.dataset.preset);
+  });
+  applyPreset("rva23");
+})();
+
+/* ---------------------------------------------------------------------------
+   상위 집합 탐색기: RVI20U64 ⊂ RVA20U64 ⊂ RVA22U64 ⊂ RVA23U64 를 겹친 상자로 그린다.
+   좌표는 viewBox(520 × 400) 기준. 바깥 상자일수록 나중 프로파일이다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const data = window.RiscvProfileData;
+  const svg = document.getElementById("superset-svg");
+  const detail = document.getElementById("superset-detail");
+  const namespace = "http://www.w3.org/2000/svg";
+  const AUTOPLAY_INTERVAL_MILLISECONDS = 2600;
+  const RING_INSET = 44;
+  const RING_STYLES = ["f-surface", "f-teal-soft", "f-violet-soft", "f-accent-soft"];
+  const VIEW_WIDTH = 520;
+  const VIEW_HEIGHT = 400;
+  let currentStep = 0;
+  let autoplayTimer = null;
+
+  // 바깥(마지막 단계)부터 그려야 안쪽 상자가 위에 보인다
+  const rings = [];
+  for (let stepIndex = data.STEPS.length - 1; stepIndex >= 0; stepIndex -= 1) {
+    const inset = (data.STEPS.length - 1 - stepIndex) * RING_INSET;
+    const group = document.createElementNS(namespace, "g");
+    const rectangle = document.createElementNS(namespace, "rect");
+    const attributes = { x: 10 + inset, y: 10 + inset, width: VIEW_WIDTH - 20 - inset * 2, height: VIEW_HEIGHT - 20 - inset * 2, rx: 16 };
+    Object.entries(attributes).forEach(([name, value]) => rectangle.setAttribute(name, value));
+    rectangle.setAttribute("class", "ring " + RING_STYLES[stepIndex]);
+    group.appendChild(rectangle);
+    const label = document.createElementNS(namespace, "text");
+    label.setAttribute("x", 26 + inset);
+    label.setAttribute("y", 36 + inset);
+    label.setAttribute("class", "t-mono");
+    label.setAttribute("style", "font-size:15px;font-weight:700");
+    label.textContent = data.STEPS[stepIndex].name;
+    group.appendChild(label);
+    const countLabel = document.createElementNS(namespace, "text");
+    countLabel.setAttribute("x", VIEW_WIDTH - 26 - inset);
+    countLabel.setAttribute("y", 36 + inset);
+    countLabel.setAttribute("text-anchor", "end");
+    countLabel.setAttribute("class", "t-faint");
+    countLabel.textContent = "필수 " + data.STEPS[stepIndex].mandatory.length;
+    group.appendChild(countLabel);
+    group.addEventListener("click", (event) => { event.stopPropagation(); stopAutoplay(); stepControl.set(stepIndex); });
+    svg.appendChild(group);
+    rings[stepIndex] = rectangle;
+  }
+  // 가장 안쪽 상자 가운데에 베이스를 적는다
+  const centerLabel = document.createElementNS(namespace, "text");
+  centerLabel.setAttribute("x", VIEW_WIDTH / 2);
+  centerLabel.setAttribute("y", VIEW_HEIGHT / 2 + 12);
+  centerLabel.setAttribute("text-anchor", "middle");
+  centerLabel.setAttribute("class", "t-dim");
+  centerLabel.textContent = "RV64I";
+  svg.appendChild(centerLabel);
+
+  function showStep(stepIndex) {
+    currentStep = stepIndex;
+    const step = data.STEPS[stepIndex];
+    rings.forEach((ring, index) => {
+      ring.classList.toggle("selected", index === stepIndex);
+      // 고른 단계보다 바깥 상자는 흐리게 해서 "아직 없는 것"임을 보여 준다
+      ring.style.fillOpacity = index > stepIndex ? "0.25" : "1";
+    });
+    const previousCount = stepIndex > 0 ? data.STEPS[stepIndex - 1].mandatory.length : 0;
+    const chipDelaySeconds = 0.05;
+    detail.innerHTML = "<h4>" + step.name + "</h4><p>" + step.description + '</p><div class="label">이 단계에서 새로 필수가 된 것</div><div>' +
+      step.added.map((name, index) => '<span class="added-chip" style="animation-delay:' + (index * chipDelaySeconds).toFixed(2) + 's">' + name + "</span>").join("") +
+      '</div><div class="label">이 단계의 옵션</div><div>' +
+      step.options.map((name, index) => '<span class="added-chip option" style="animation-delay:' + (0.3 + index * chipDelaySeconds).toFixed(2) + 's">' + name + "</span>").join("") + "</div>";
+    document.getElementById("superset-total").textContent = step.mandatory.length;
+    document.getElementById("superset-added").textContent = "+" + (step.mandatory.length - previousCount);
+  }
+
+  const stepControl = book.segmented("superset-step", (value) => showStep(Number(value)));
+  const playButton = document.getElementById("superset-play");
+  function stopAutoplay() {
+    if (autoplayTimer) clearInterval(autoplayTimer);
+    autoplayTimer = null;
+    playButton.textContent = "재생";
+  }
+  function startAutoplay() {
+    stopAutoplay();
+    autoplayTimer = setInterval(() => stepControl.set((currentStep + 1) % data.STEPS.length), AUTOPLAY_INTERVAL_MILLISECONDS);
+    playButton.textContent = "멈춤";
+  }
+  playButton.addEventListener("click", () => { if (autoplayTimer) stopAutoplay(); else startAutoplay(); });
+  document.querySelectorAll("#superset-step button").forEach((button) => button.addEventListener("click", stopAutoplay));
+})();
+
+/* ---------------------------------------------------------------------------
+   바이너리 이식성 애니메이션: 같은 바이너리를 세 CPU에서 한 명령씩 실행한다.
+   지원하지 않는 확장의 명령을 만나면 그 CPU는 잘못된 명령 예외로 멈춘다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const canvas = document.getElementById("portability-canvas");
+  const description = document.getElementById("portability-description");
+  const NARROW_LAYOUT_WIDTH = 600;
+  const TRAP_FLASH_SPEED = 6;
+  const BASE_INSTRUCTIONS_PER_SECOND = 0.6;
+
+  // CPU 가 지원하는 확장. RVA22 CPU 는 RVA22U64 필수 집합, RVA23 CPU 는 RVA23U64 필수 집합을 가정한다.
+  const RV64GC_EXTENSIONS = ["I", "M", "A", "F", "D", "C"];
+  const RVA22_EXTENSIONS = RV64GC_EXTENSIONS.concat(["Zba", "Zbb", "Zbs", "Zicboz", "Zfhmin"]);
+  const RVA23_EXTENSIONS = RVA22_EXTENSIONS.concat(["V", "Zicond", "Zfa", "Zcb"]);
+  const CPUS = [
+    { name: "RVA23 CPU", extensions: RVA23_EXTENSIONS },
+    { name: "RVA22 CPU", extensions: RVA22_EXTENSIONS },
+    { name: "RV64GC CPU", extensions: RV64GC_EXTENSIONS },
+  ];
+  // 각 빌드가 만들어 내는 명령 흐름. extension 은 그 명령이 속한 확장이다.
+  const BUILDS = {
+    rva20: { title: "rva20u64 빌드", instructions: [["ld", "I"], ["mul", "M"], ["amoadd.w", "A"], ["fadd.d", "D"], ["c.addi", "C"], ["bnez", "I"]],
+      summary: "RVA20 기준으로 빌드하면 세 CPU 모두에서 돈다. 대신 RVA23 CPU 의 벡터 장치는 놀고 있다." },
+    rva22: { title: "rva22u64 빌드", instructions: [["ld", "I"], ["mul", "M"], ["sh2add", "Zba"], ["cpop", "Zbb"], ["cbo.zero", "Zicboz"], ["fadd.d", "D"]],
+      summary: "RVA22 기준 빌드는 Zba 의 sh2add 에서 RV64GC CPU 가 멈춘다. RVA23 CPU 는 RVA22 의 상위 집합이므로 문제없다." },
+    rva23: { title: "rva23u64 빌드", instructions: [["ld", "I"], ["mul", "M"], ["sh2add", "Zba"], ["czero.eqz", "Zicond"], ["vsetvli", "V"], ["vle32.v", "V"], ["fadd.d", "D"]],
+      summary: "RVA23 기준 빌드는 RVA22 CPU 에서 czero.eqz(Zicond)를, RV64GC CPU 에서 sh2add(Zba)를 만나는 순간 잘못된 명령 예외가 난다." },
+    fmv: { title: "RVA20 + FMV 빌드", instructions: [["ld", "I"], ["mul", "M"], ["hwprobe", "dispatch"], ["vsetvli | add", "V?"], ["vle32.v | lw", "V?"], ["fadd.d", "D"]],
+      summary: "공통 코드는 RVA20 으로, 뜨거운 함수만 여러 판으로 컴파일했다. 시작할 때 hwprobe 로 V 를 확인한 CPU 만 벡터 판을 고르고, 나머지는 기본 판을 쓴다." },
+  };
+
+  let buildName = "rva23";
+  let progress = 0;
+  let instructionsPerSecond = BASE_INSTRUCTIONS_PER_SECOND * 3;
+  let flashTime = 0;
+
+  function cellOutcome(cpu, instruction) {
+    const [mnemonic, extension] = instruction;
+    if (extension === "dispatch") return { isSupported: true, text: cpu.extensions.includes("V") ? "V 판 선택" : "기본 판" };
+    if (extension === "V?") {
+      const parts = mnemonic.split(" | ");
+      const hasVector = cpu.extensions.includes("V");
+      return { isSupported: true, text: hasVector ? parts[0] : parts[1] };
+    }
+    return { isSupported: cpu.extensions.includes(extension), text: mnemonic };
+  }
+  // CPU 마다 처음으로 지원하지 않는 명령의 위치(없으면 -1)
+  function trapIndex(cpu) {
+    const instructions = BUILDS[buildName].instructions;
+    return instructions.findIndex((instruction) => !cellOutcome(cpu, instruction).isSupported);
+  }
+
+  function updateReadout() {
+    const instructions = BUILDS[buildName].instructions;
+    const executedCount = Math.floor(progress);
+    CPUS.forEach((cpu, cpuIndex) => {
+      const firstTrap = trapIndex(cpu);
+      const element = document.getElementById("portability-status-" + cpuIndex);
+      if (firstTrap >= 0 && executedCount > firstTrap) element.textContent = "SIGILL";
+      else if (executedCount >= instructions.length) element.textContent = "완료 ✓";
+      else element.textContent = "실행 중";
+    });
+  }
+
+  function draw(context, width, height, colors) {
+    const build = BUILDS[buildName];
+    const instructions = build.instructions;
+    const isNarrow = width < NARROW_LAYOUT_WIDTH;
+    const executedCount = Math.floor(progress);
+    const fraction = progress - executedCount;
+    const padding = 12;
+    const headerSize = isNarrow ? 92 : 110;
+    // 넓은 화면: 행 = CPU, 열 = 명령. 좁은 화면: 행 = 명령, 열 = CPU.
+    const rowCount = isNarrow ? instructions.length : CPUS.length;
+    const columnCount = isNarrow ? CPUS.length : instructions.length;
+    const topHeader = isNarrow ? 34 : 46;
+    const cellWidth = (width - padding * 2 - headerSize) / columnCount;
+    const cellHeight = (height - padding * 2 - topHeader) / rowCount;
+    const fontSize = isNarrow ? 11.5 : 12.5;
+
+    book.drawText(context, build.title, padding, padding + 2, { size: 12, bold: true, color: colors.faint, baseline: "top" });
+    // 머리글
+    for (let column = 0; column < columnCount; column += 1) {
+      const centerX = padding + headerSize + cellWidth * (column + 0.5);
+      if (isNarrow) {
+        book.drawText(context, CPUS[column].name, centerX, padding + topHeader - 10, { size: 11.5, bold: true, color: colors.text, align: "center" });
+      } else {
+        const [mnemonic, extension] = instructions[column];
+        const isActiveColumn = column === executedCount;
+        book.drawText(context, mnemonic, centerX, padding + topHeader - 24, { size: fontSize, bold: true, mono: true, color: isActiveColumn ? colors.gold : colors.text, align: "center" });
+        book.drawText(context, extension === "dispatch" ? "FMV" : extension, centerX, padding + topHeader - 8, { size: 11, color: colors.faint, align: "center" });
+      }
+    }
+    for (let row = 0; row < rowCount; row += 1) {
+      const centerY = padding + topHeader + cellHeight * (row + 0.5);
+      if (isNarrow) {
+        const [mnemonic, extension] = instructions[row];
+        // 좁은 화면에서는 "vsetvli | add" 같은 두 갈래 이름을 짧게 줄여 칸을 넘지 않게 한다
+        const shortMnemonic = mnemonic.replace(" | ", "/");
+        book.drawText(context, shortMnemonic, padding, centerY - 7, { size: fontSize, bold: true, mono: true, color: row === executedCount ? colors.gold : colors.text });
+        book.drawText(context, extension === "dispatch" ? "FMV" : extension, padding, centerY + 9, { size: 10.5, color: colors.faint });
+      } else {
+        book.drawText(context, CPUS[row].name, padding, centerY, { size: 12.5, bold: true, color: colors.text });
+      }
+    }
+    // 칸
+    CPUS.forEach((cpu, cpuIndex) => {
+      const firstTrap = trapIndex(cpu);
+      instructions.forEach((instruction, instructionIndex) => {
+        const row = isNarrow ? instructionIndex : cpuIndex;
+        const column = isNarrow ? cpuIndex : instructionIndex;
+        const x = padding + headerSize + cellWidth * column + 3;
+        const y = padding + topHeader + cellHeight * row + 3;
+        const boxWidth = cellWidth - 6;
+        const boxHeight = cellHeight - 6;
+        const outcome = cellOutcome(cpu, instruction);
+        const isAfterTrap = firstTrap >= 0 && instructionIndex > firstTrap;
+        const isExecuted = instructionIndex < executedCount;
+        const isCurrent = instructionIndex === executedCount;
+        let fill = colors.surface;
+        let textColor = colors.faint;
+        let label = outcome.text;
+        if (isAfterTrap && isExecuted) { fill = colors.surface; textColor = colors.faint; label = "—"; }
+        else if (isExecuted && outcome.isSupported) { fill = colors.okSoft; textColor = colors.ok; label = "✓ " + outcome.text; }
+        else if (isExecuted && !outcome.isSupported) {
+          // 예외가 난 칸은 깜빡여서 눈에 띄게 한다
+          const pulse = 0.55 + 0.45 * Math.abs(Math.sin(flashTime * TRAP_FLASH_SPEED * 0.5));
+          context.globalAlpha = pulse;
+          fill = colors.badSoft; textColor = colors.bad; label = "✗ 예외";
+        }
+        book.roundedRectangle(context, x, y, boxWidth, boxHeight, 7);
+        context.fillStyle = fill;
+        context.fill();
+        if (isExecuted && !outcome.isSupported && !isAfterTrap) {
+          context.strokeStyle = colors.bad; context.lineWidth = 2; context.stroke();
+        }
+        context.globalAlpha = 1;
+        // 지금 실행하려는 칸: 금색 테두리와 차오르는 막대
+        const hasStopped = firstTrap >= 0 && instructionIndex > firstTrap;
+        if (isCurrent && !hasStopped) {
+          context.strokeStyle = colors.gold; context.lineWidth = 2; context.stroke();
+          context.fillStyle = colors.goldSoft;
+          context.fillRect(x + 2, y + boxHeight - 6, (boxWidth - 4) * fraction, 4);
+        }
+        const isCompact = boxWidth < 70;
+        const shownLabel = isCompact && label.length > 9 ? label.slice(0, 8) + "…" : label;
+        book.drawText(context, shownLabel, x + boxWidth / 2, y + boxHeight / 2, { size: isCompact ? 10.5 : 11.5, mono: true, bold: isExecuted, color: textColor, align: "center" });
+      });
+    });
+  }
+
+  const view = book.createCanvas(canvas, draw, { aspectRatio: 0.34, minimumHeight: 320, maximumHeight: 340 });
+
+  function describe() {
+    const build = BUILDS[buildName];
+    const executedCount = Math.floor(progress);
+    if (executedCount >= build.instructions.length) {
+      description.innerHTML = "<b>" + build.title + "</b> — " + build.summary;
+      return;
+    }
+    const [mnemonic, extension] = build.instructions[executedCount];
+    const extensionText = extension === "dispatch" ? "FMV 해석기" : extension === "V?" ? "V 또는 기본 판" : extension + " 확장";
+    description.innerHTML = "<b>" + build.title + "</b> · " + (executedCount + 1) + "번째 명령 <code>" + mnemonic + "</code> (" + extensionText + ")를 세 CPU에 보낸다.";
+  }
+
+  const loop = book.animationLoop(canvas, (deltaSeconds) => {
+    const instructionCount = BUILDS[buildName].instructions.length;
+    const endPause = 1.5;
+    progress += deltaSeconds * instructionsPerSecond;
+    flashTime += deltaSeconds;
+    // 끝까지 보여 준 뒤 잠깐 쉬었다가 처음부터 다시 돈다
+    if (progress > instructionCount + endPause) progress = 0;
+    view.redraw();
+    updateReadout();
+    describe();
+  });
+
+  function restart() {
+    progress = 0;
+    flashTime = 0;
+    view.redraw();
+    updateReadout();
+    describe();
+  }
+  book.segmented("portability-target", (value) => { buildName = value; restart(); });
+  book.range("portability-speed", (value) => { instructionsPerSecond = BASE_INSTRUCTIONS_PER_SECOND * value; }, (value) => value + "×");
+  const playButton = document.getElementById("portability-play");
+  function syncPlayButton() { playButton.textContent = loop.isRunning() ? "일시 정지" : "재생"; }
+  playButton.addEventListener("click", () => {
+    if (loop.isRunning()) loop.stop();
+    else loop.start();
+    syncPlayButton();
+  });
+  document.getElementById("portability-restart").addEventListener("click", restart);
+  syncPlayButton();
+  restart();
+})();
+</script>
+</body>
+</html>

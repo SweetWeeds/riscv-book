@@ -1,0 +1,1427 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>10 A 확장과 원자적 연산 · RISC-V Book</title>
+<meta name="description" content="여러 하트가 같은 메모리를 안전하게 나눠 쓰기 위한 A 확장(Zalrsc·Zaamo)의 LR/SC와 AMO, aq/rl 순서 비트, 스핀락, 그리고 Zacas·Zabha·Zawrs·Zalasr를 그림과 시뮬레이터로 익힌다.">
+<link rel="icon" href="../assets/img/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/style.css">
+<script src="../assets/js/book.js"></script>
+<script src="../assets/js/riscv.js"></script>
+<style>
+  /* Pretendard 의 합자(ligature)가 "0x" 를 "0×" 로 바꿔 16진수가 곱셈처럼 보이지 않게 한다 */
+  .chapter, .chapter svg text { font-variant-ligatures: none; }
+  .race-grid { display: grid; gap: 12px; grid-template-columns: minmax(0, 1fr); }
+  @media (min-width: 720px) { .race-grid { grid-template-columns: minmax(0, 1fr) 170px minmax(0, 1fr); } }
+  .hart-panel { border: 1px solid var(--border); border-radius: 12px; background: var(--canvas-bg); padding: 10px 0 12px; min-width: 0; }
+  .hart-panel h4 { margin: 0 12px 6px !important; font-size: 15px !important; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .hart-panel .listing { font-family: var(--mono); font-size: 13px; line-height: 1.55; overflow-x: auto; }
+  .hart-panel .listing .row { padding: 2px 12px; white-space: nowrap; color: var(--text-dim); }
+  .hart-panel .listing .row.current { background: var(--accent-2-soft); box-shadow: inset 3px 0 0 var(--accent-2); color: var(--text); }
+  .hart-panel .registers { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 12px 0; }
+  .hart-panel .registers .cell { flex: 1 1 64px; }
+  .hart-panel .button { margin: 10px 12px 0; width: calc(100% - 24px); }
+  .memory-panel { border: 1px solid var(--border); border-radius: 12px; background: var(--surface); padding: 12px; text-align: center; display: flex; flex-direction: column; justify-content: center; gap: 6px; }
+  .memory-panel .memory-value { font-family: var(--mono); font-size: 42px; font-weight: 800; color: var(--accent); line-height: 1.1; }
+  .memory-panel .memory-value.lost { color: var(--bad); }
+  .memory-panel small { color: var(--text-faint); font-size: 12.5px; }
+  .amo-layout { display: grid; gap: 14px; grid-template-columns: minmax(0, 1fr); }
+  @media (min-width: 720px) { .amo-layout { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
+  .amo-box { border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; background: var(--canvas-bg); min-width: 0; }
+  .amo-box h4 { margin: 0 0 8px !important; font-size: 14.5px !important; color: var(--text-dim); }
+  .amo-line { font-family: var(--mono); font-size: 13px; line-height: 1.7; overflow-x: auto; white-space: nowrap; }
+  .amo-line b { color: var(--accent); }
+  .amo-line .changed-value { color: var(--accent-2); font-weight: 700; }
+  .amo-inputs { display: flex; flex-wrap: wrap; gap: 12px; }
+  .amo-inputs input[type="text"] { width: 150px; }
+  .encoding-word { font-family: var(--mono); font-size: 15px; font-weight: 700; color: var(--accent); }
+</style>
+</head>
+<body data-chapter="atomic">
+<main class="chapter">
+  <header class="chapter-hero">
+    <div class="eyebrow">Chapter 10</div>
+    <h1>A 확장과 원자적 연산</h1>
+    <p class="lead">하트가 하나뿐이라면 <code>counter++</code>는 아무 문제가 없다. 그런데 두 하트가 같은 변수를 동시에 올리면 결과가 2가 아니라 1이 되는 일이 생긴다. 읽기와 쓰기 사이에 다른 하트가 끼어들기 때문이다. <strong>A 확장은 “읽고-바꾸고-쓰기”를 아무도 끼어들 수 없는 한 덩어리로 만드는 명령을 제공한다.</strong> 이 장에서는 LR/SC와 AMO라는 두 가지 방법, 순서를 정하는 aq/rl 비트, 그리고 그 위에 쌓아 올린 스핀락과 최신 확장(Zacas·Zabha·Zawrs·Zalasr)을 차례로 살펴본다.</p>
+    <ul class="objectives">
+      <li>두 하트가 같은 변수를 갱신할 때 “잃어버린 갱신”이 생기는 과정을 단계별로 설명한다.</li>
+      <li>A 확장이 Zalrsc(LR/SC)와 Zaamo(AMO) 두 부분으로 나뉜 이유를 안다.</li>
+      <li>aq·rl 비트가 만드는 acquire·release·순차 일관 순서를 구별한다.</li>
+      <li>LR/SC의 예약 집합, SC 성공·실패 규칙, 제약된 LR/SC 루프의 진행 보장을 이해한다.</li>
+      <li>AMO 명령의 인코딩(opcode 0101111, funct5)과 부호 있는/없는 max·min의 차이를 계산한다.</li>
+      <li>amoswap 기반 스핀락, 티켓 락, 그리고 Zawrs로 “잠들며 기다리는” 방법을 비교한다.</li>
+      <li>Zacas(비교-교환), Zabha(바이트·하프워드 AMO), Zalasr(load-acquire·store-release)의 역할을 안다.</li>
+    </ul>
+    <div class="spec-meta">
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/unpriv/a-st-ext.html" target="_blank" rel="noopener">"A" Extension v2.1</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/unpriv/zawrs.html" target="_blank" rel="noopener">Zawrs v1.01</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/unpriv/zacas.html" target="_blank" rel="noopener">Zacas v1.0</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/unpriv/zabha.html" target="_blank" rel="noopener">Zabha v1.0</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/unpriv/zalasr.html" target="_blank" rel="noopener">Zalasr v1.0</a>
+    </div>
+  </header>
+
+  <!-- ============================================================ -->
+  <section id="race">
+    <h2>counter++ 하나가 깨지는 순간</h2>
+    <p>C의 <code>counter++</code>는 RISC-V에서 세 명령이 된다. 메모리에서 읽고(<code>lw</code>), 레지스터에서 1을 더하고(<code>addi</code>), 다시 메모리에 쓴다(<code>sw</code>). 하트 하나만 있으면 이 세 명령은 늘 붙어서 실행되는 것처럼 보인다. 그러나 두 하트가 동시에 같은 <code>counter</code>를 올리면 세 명령 사이사이에 상대방의 명령이 끼어들 수 있다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 340" role="img" aria-label="두 하트의 load-add-store가 엇갈려 갱신 하나를 잃어버리는 시간표">
+        <defs>
+          <marker id="race-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--text-faint)"/></marker>
+          <marker id="race-arrow-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--bad)"/></marker>
+        </defs>
+        <!-- 행 이름 -->
+        <text x="20" y="72" class="t t-bold">하트 0</text>
+        <text x="20" y="152" class="t t-bold">하트 1</text>
+        <text x="20" y="246" class="t t-bold">메모리</text>
+        <text x="20" y="264" class="t-faint">counter</text>
+        <!-- 하트 0 -->
+        <g transform="translate(130,40)"><rect width="105" height="58" rx="9" class="f-accent-soft"/><text x="52" y="24" text-anchor="middle" class="t-mono">lw t0</text><text x="52" y="45" text-anchor="middle" class="t-dim">t0 = 0</text></g>
+        <g transform="translate(360,40)"><rect width="105" height="58" rx="9" class="f-accent-soft"/><text x="52" y="24" text-anchor="middle" class="t-mono">addi t0</text><text x="52" y="45" text-anchor="middle" class="t-dim">t0 = 1</text></g>
+        <g transform="translate(590,40)"><rect width="105" height="58" rx="9" class="f-accent-soft"/><text x="52" y="24" text-anchor="middle" class="t-mono">sw t0</text><text x="52" y="45" text-anchor="middle" class="t-dim">메모리 ← 1</text></g>
+        <!-- 하트 1 -->
+        <g transform="translate(245,120)"><rect width="105" height="58" rx="9" class="f-violet-soft"/><text x="52" y="24" text-anchor="middle" class="t-mono">lw t0</text><text x="52" y="45" text-anchor="middle" class="t-dim">t0 = 0</text></g>
+        <g transform="translate(475,120)"><rect width="105" height="58" rx="9" class="f-violet-soft"/><text x="52" y="24" text-anchor="middle" class="t-mono">addi t0</text><text x="52" y="45" text-anchor="middle" class="t-dim">t0 = 1</text></g>
+        <g transform="translate(705,120)"><rect width="105" height="58" rx="9" class="f-bad-soft"/><text x="52" y="24" text-anchor="middle" class="t-mono">sw t0</text><text x="52" y="45" text-anchor="middle" class="t-bad">메모리 ← 1</text></g>
+        <!-- 메모리 값 -->
+        <g class="t-mono">
+          <rect x="130" y="226" width="680" height="44" rx="10" class="f-surface"/>
+          <text x="182" y="253" text-anchor="middle" class="t-mono">0</text>
+          <text x="297" y="253" text-anchor="middle" class="t-mono">0</text>
+          <text x="412" y="253" text-anchor="middle" class="t-mono">0</text>
+          <text x="527" y="253" text-anchor="middle" class="t-mono">0</text>
+          <text x="642" y="253" text-anchor="middle" class="t-mono">1</text>
+          <text x="757" y="253" text-anchor="middle" class="t-bad" style="font-size:16px">1 (기대: 2)</text>
+        </g>
+        <!-- 읽기·쓰기 화살표 -->
+        <path d="M182 224 V102" class="s-line s-dashed" marker-end="url(#race-arrow)"/>
+        <path d="M297 224 V182" class="s-line s-dashed" marker-end="url(#race-arrow)"/>
+        <path d="M642 100 V222" class="s-accent" marker-end="url(#race-arrow)"/>
+        <path d="M757 180 V222" class="s-bad" marker-end="url(#race-arrow-bad)"/>
+        <!-- 시간 축과 움직이는 주사선 -->
+        <path d="M130 300 H820" class="s-line" marker-end="url(#race-arrow)"/>
+        <text x="826" y="304" class="t-faint">시간</text>
+        <g>
+          <line x1="0" y1="-266" x2="0" y2="0" stroke="var(--accent-2)" stroke-width="2" stroke-dasharray="4 4" opacity="0.7"/>
+          <circle r="6" fill="var(--accent-2)"/>
+          <animateMotion dur="7s" begin="-0.4s" repeatCount="indefinite" path="M140 300 H810"/>
+        </g>
+        <text x="470" y="328" text-anchor="middle" class="t-dim">두 하트 모두 0을 읽었기 때문에, 두 번의 ++ 가 메모리에는 한 번만 남는다</text>
+      </svg></div>
+      <figcaption><b>그림 10-1.</b> 잃어버린 갱신(lost update). 두 하트가 같은 값 0을 먼저 읽어 두면, 각자 1을 계산해 1을 쓴다. 금색 세로선이 시간을 따라 움직이며 메모리 값 변화를 보여 준다. 하트 1의 마지막 <code>sw</code>가 하트 0의 결과를 덮어써 버린다.</figcaption>
+    </figure>
+
+    <p>이런 상황을 <span class="term">경쟁 상태</span><span class="english">(race condition)</span>라 한다. 결과가 실행 순서라는 “운”에 좌우된다. 문제의 뿌리는 읽기와 쓰기가 <b>떨어져 있다</b>는 데 있다. 해결책은 둘 중 하나다.</p>
+    <ol>
+      <li><b>낙관적으로 시도하고, 끼어들었으면 다시 한다</b> — 읽을 때 “찜”해 두고, 쓸 때 그동안 아무도 건드리지 않았는지 확인한다. 이것이 <b>LR/SC</b>다.</li>
+      <li><b>읽기-계산-쓰기를 메모리 쪽에서 한 번에 한다</b> — “이 주소에 1을 더하고 원래 값을 알려 달라”는 하나의 명령을 보낸다. 이것이 <b>AMO</b>다.</li>
+    </ol>
+    <div class="callout tip"><strong>하트 하나에서도 원자성이 필요할 때가 있다</strong><p>인터럽트 처리기가 같은 변수를 건드리거나, DMA 장치가 메모리를 쓰는 경우에도 같은 문제가 생긴다. 하지만 RISC-V 규격이 원자적 명령을 정의하는 주된 목적은 “같은 메모리 공간에서 도는 여러 하트 사이의 동기화”다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="family">
+    <h2>A 확장의 구성: Zalrsc + Zaamo, 그리고 친척들</h2>
+    <p>오랫동안 A 확장은 한 덩어리였다. 현재 규격(A v2.1)은 이것을 두 개의 하위 확장으로 나눠 정의한다. <b>“The A extension comprises instructions provided by the Zaamo and Zalrsc extensions.”</b> 나눈 이유는 구현 비용이 다르기 때문이다. LR/SC는 보통 캐시에서 예약을 추적해야 해서 캐시가 없는 마이크로컨트롤러에는 부담이고, AMO는 버스나 메모리 컨트롤러 쪽에서 처리할 수 있다. 그래서 작은 코어는 Zaamo만 구현할 수 있게 했다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 330" role="img" aria-label="A 확장과 관련 확장의 관계">
+        <defs><marker id="family-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--text-faint)"/></marker></defs>
+        <rect x="200" y="20" width="460" height="150" rx="16" class="f-gold-soft"/>
+        <text x="430" y="46" text-anchor="middle" class="t-gold" style="font-size:17px">A 확장 v2.1 = Zalrsc + Zaamo</text>
+        <g transform="translate(220,62)"><rect width="200" height="92" rx="12" class="f-elev"/><text x="100" y="26" text-anchor="middle" class="t t-bold">Zalrsc</text><text x="100" y="48" text-anchor="middle" class="t-mono">LR.W · SC.W</text><text x="100" y="68" text-anchor="middle" class="t-mono">LR.D · SC.D (RV64)</text><text x="100" y="86" text-anchor="middle" class="t-faint">예약 기반 · 캐시 필요</text></g>
+        <g transform="translate(440,62)"><rect width="200" height="92" rx="12" class="f-elev"/><text x="100" y="26" text-anchor="middle" class="t t-bold">Zaamo</text><text x="100" y="48" text-anchor="middle" class="t-mono">AMOSWAP · AMOADD</text><text x="100" y="68" text-anchor="middle" class="t-mono">AND·OR·XOR·MAX·MIN</text><text x="100" y="86" text-anchor="middle" class="t-faint">.W / .D · 캐시 없어도 됨</text></g>
+        <!-- 친척 -->
+        <g transform="translate(20,220)"><rect width="190" height="90" rx="12" class="f-teal-soft"/><text x="95" y="26" text-anchor="middle" class="t t-bold">Zawrs v1.01</text><text x="95" y="48" text-anchor="middle" class="t-mono">WRS.NTO · WRS.STO</text><text x="95" y="70" text-anchor="middle" class="t-faint">LR 예약 위에서 잠들기</text></g>
+        <g transform="translate(232,220)"><rect width="190" height="90" rx="12" class="f-accent-soft"/><text x="95" y="26" text-anchor="middle" class="t t-bold">Zacas v1.0</text><text x="95" y="48" text-anchor="middle" class="t-mono">AMOCAS.W/D/Q</text><text x="95" y="70" text-anchor="middle" class="t-faint">비교-교환 · Zaamo 필요</text></g>
+        <g transform="translate(444,220)"><rect width="190" height="90" rx="12" class="f-accent-soft"/><text x="95" y="26" text-anchor="middle" class="t t-bold">Zabha v1.0</text><text x="95" y="48" text-anchor="middle" class="t-mono">AMO*.B · AMO*.H</text><text x="95" y="70" text-anchor="middle" class="t-faint">바이트·하프워드 · Zaamo 필요</text></g>
+        <g transform="translate(656,220)"><rect width="190" height="90" rx="12" class="f-violet-soft"/><text x="95" y="26" text-anchor="middle" class="t t-bold">Zalasr v1.0</text><text x="95" y="48" text-anchor="middle" class="t-mono">L{B|H|W|D}.AQ</text><text x="95" y="68" text-anchor="middle" class="t-mono">S{B|H|W|D}.RL</text><text x="95" y="84" text-anchor="middle" class="t-faint">독립 구현 가능</text></g>
+        <!-- 의존 화살표 -->
+        <path d="M115 218 C115 190 250 190 300 156" class="s-line s-dashed" marker-end="url(#family-arrow)"/>
+        <path d="M327 218 C327 196 480 196 520 156" class="s-line" marker-end="url(#family-arrow)"/>
+        <path d="M539 218 L548 158" class="s-line" marker-end="url(#family-arrow)"/>
+        <text x="200" y="214" class="t-faint">LR 예약을 기다림</text>
+        <text x="700" y="196" text-anchor="middle" class="t-faint">A의 공백을 메움</text>
+      </svg></div>
+      <figcaption><b>그림 10-2.</b> A 확장과 그 주변. 실선 화살표는 규격이 밝힌 의존 관계(Zacas·Zabha → Zaamo), 점선은 “함께 써야 쓸모 있음”(Zawrs는 LR이 만든 예약 집합을 기다린다)을 뜻한다. Zalasr는 다른 원자 확장 없이도 구현할 수 있다.</figcaption>
+    </figure>
+
+    <div class="table-wrap"><table>
+      <thead><tr><th>확장</th><th>버전 (v20260120)</th><th>주요 명령</th><th>한 줄 요약</th></tr></thead>
+      <tbody>
+        <tr><td><b>A</b></td><td>2.1</td><td>Zalrsc + Zaamo 전부</td><td>G(= IMAFD_Zicsr_Zifencei)에 포함되는 표준 원자 확장</td></tr>
+        <tr><td><b>Zalrsc</b></td><td>(A의 일부)</td><td><code>lr.w/d</code>, <code>sc.w/d</code></td><td>예약을 걸고, 아무도 안 건드렸으면 쓴다</td></tr>
+        <tr><td><b>Zaamo</b></td><td>(A의 일부)</td><td><code>amo&lt;op&gt;.w/d</code></td><td>읽기-연산-쓰기를 한 명령으로</td></tr>
+        <tr><td><b>Zawrs</b></td><td>1.01</td><td><code>wrs.nto</code>, <code>wrs.sto</code></td><td>예약 집합이 바뀔 때까지 저전력 대기</td></tr>
+        <tr><td><b>Zacas</b></td><td>1.0</td><td><code>amocas.w/d/q</code></td><td>비교 후 같으면 교환 (128비트까지)</td></tr>
+        <tr><td><b>Zabha</b></td><td>1.0</td><td><code>amo&lt;op&gt;.b/h</code>, <code>amocas.b/h</code></td><td>8·16비트 원자 연산</td></tr>
+        <tr><td><b>Zalasr</b></td><td>1.0</td><td><code>lw.aq</code>, <code>sw.rl</code> 등</td><td>순서 표시가 붙은 단독 원자 load·store</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="ordering">
+    <h2>aq와 rl: 원자 명령에 붙는 순서 표시</h2>
+    <p>원자성만으로는 부족하다. 잠금을 얻은 뒤의 읽기·쓰기가 잠금을 얻기 <b>전으로</b> 당겨져 보이면 잠금이 아무 소용이 없다. RISC-V의 메모리 모델(RVWMO, <a href="memory-model.html">11장</a>)은 느슨해서, 서로 다른 주소에 대한 접근은 다른 하트가 보기에 순서가 바뀔 수 있다. 그래서 모든 원자 명령에는 순서를 조이는 두 비트, <b>aq</b>(acquire)와 <b>rl</b>(release)가 있다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 330" role="img" aria-label="acquire, release, 순차 일관 원자 명령이 막는 재배치 방향">
+        <defs>
+          <marker id="order-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--ok)"/></marker>
+          <marker id="order-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--bad)"/></marker>
+        </defs>
+        <!-- 세 열 -->
+        <g transform="translate(20,20)">
+          <text x="125" y="16" text-anchor="middle" class="t-accent">aq = 1 (acquire)</text>
+          <rect x="20" y="36" width="210" height="44" rx="8" class="f-surface"/><text x="125" y="63" text-anchor="middle" class="t-dim">앞선 메모리 접근</text>
+          <rect x="10" y="126" width="230" height="44" rx="10" class="f-gold-soft"/><text x="125" y="153" text-anchor="middle" class="t-mono">amoswap.w.aq</text>
+          <rect x="20" y="216" width="210" height="44" rx="8" class="f-surface"/><text x="125" y="243" text-anchor="middle" class="t-dim">뒤따르는 메모리 접근</text>
+          <path d="M70 84 V120" class="s-ok flow-dash" marker-end="url(#order-ok)"/>
+          <text x="80" y="106" class="t-ok" style="font-size:12px">아래로 OK</text>
+          <path d="M180 212 V176" class="s-bad" marker-end="url(#order-bad)"/>
+          <text x="190" y="200" class="t-bad" style="font-size:12px">위로 ✕</text>
+          <text x="125" y="292" text-anchor="middle" class="t-faint">뒤의 접근은 앞으로 못 넘어온다</text>
+        </g>
+        <g transform="translate(305,20)">
+          <text x="125" y="16" text-anchor="middle" class="t-accent">rl = 1 (release)</text>
+          <rect x="20" y="36" width="210" height="44" rx="8" class="f-surface"/><text x="125" y="63" text-anchor="middle" class="t-dim">앞선 메모리 접근</text>
+          <rect x="10" y="126" width="230" height="44" rx="10" class="f-gold-soft"/><text x="125" y="153" text-anchor="middle" class="t-mono">amoswap.w.rl</text>
+          <rect x="20" y="216" width="210" height="44" rx="8" class="f-surface"/><text x="125" y="243" text-anchor="middle" class="t-dim">뒤따르는 메모리 접근</text>
+          <path d="M70 84 V120" class="s-bad" marker-end="url(#order-bad)"/>
+          <text x="80" y="106" class="t-bad" style="font-size:12px">아래로 ✕</text>
+          <path d="M180 212 V176" class="s-ok flow-dash" marker-end="url(#order-ok)"/>
+          <text x="190" y="200" class="t-ok" style="font-size:12px">위로 OK</text>
+          <text x="125" y="292" text-anchor="middle" class="t-faint">앞의 접근은 뒤로 못 넘어간다</text>
+        </g>
+        <g transform="translate(590,20)">
+          <text x="125" y="16" text-anchor="middle" class="t-accent">aq = rl = 1</text>
+          <rect x="20" y="36" width="210" height="44" rx="8" class="f-surface"/><text x="125" y="63" text-anchor="middle" class="t-dim">앞선 메모리 접근</text>
+          <rect x="10" y="126" width="230" height="44" rx="10" class="f-gold-soft"/><text x="125" y="153" text-anchor="middle" class="t-mono">amoadd.w.aqrl</text>
+          <rect x="20" y="216" width="210" height="44" rx="8" class="f-surface"/><text x="125" y="243" text-anchor="middle" class="t-dim">뒤따르는 메모리 접근</text>
+          <path d="M70 84 V120" class="s-bad" marker-end="url(#order-bad)"/>
+          <text x="80" y="106" class="t-bad" style="font-size:12px">✕</text>
+          <path d="M180 212 V176" class="s-bad" marker-end="url(#order-bad)"/>
+          <text x="190" y="200" class="t-bad" style="font-size:12px">✕</text>
+          <text x="125" y="292" text-anchor="middle" class="t-faint">양쪽 모두 막힌다 (순차 일관)</text>
+        </g>
+      </svg></div>
+      <figcaption><b>그림 10-3.</b> aq·rl은 “한쪽 방향 울타리”다. 녹색 흐르는 화살표는 다른 하트가 보기에 허용되는 재배치, 빨간 화살표는 금지되는 재배치다. acquire는 뒤의 접근이 앞으로 새는 것을, release는 앞의 접근이 뒤로 새는 것을 막는다.</figcaption>
+    </figure>
+
+    <div class="table-wrap"><table>
+      <thead><tr><th>aq</th><th>rl</th><th>의미</th><th>대표 용도</th></tr></thead>
+      <tbody>
+        <tr><td>0</td><td>0</td><td>추가 순서 제약 없음 (원자성만)</td><td>통계 카운터, 병렬 합산</td></tr>
+        <tr><td>1</td><td>0</td><td><b>acquire</b>: 이 하트의 뒤따르는 메모리 접근은 이 명령보다 먼저 일어난 것으로 관찰될 수 없다</td><td>잠금 획득</td></tr>
+        <tr><td>0</td><td>1</td><td><b>release</b>: 이 명령은 이 하트의 앞선 메모리 접근보다 먼저 일어난 것으로 관찰될 수 없다</td><td>잠금 해제</td></tr>
+        <tr><td>1</td><td>1</td><td><b>순차 일관</b>(sequentially consistent): 앞뒤 어느 쪽과도 재배치되지 않는다</td><td>C++ <code>memory_order_seq_cst</code> RMW</td></tr>
+      </tbody>
+    </table></div>
+    <div class="callout spec"><strong>규격 원문에서</strong>
+      <blockquote>“If only the aq bit is set, the atomic memory operation is treated as an acquire access, i.e., no following memory operations on this RISC-V hart can be observed to take place before the acquire memory operation.”</blockquote>
+      <p><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/a-st-ext.html" target="_blank" rel="noopener">Unprivileged ISA, "A" Extension — Specifying Ordering of Atomic Instructions</a> — 순서 표시는 원자 명령이 접근하는 주소 영역(메모리 또는 I/O) 한쪽에만 적용된다. 두 영역을 함께 묶으려면 FENCE를 쓴다.</p></div>
+    <div class="callout deep"><strong>왜 FENCE 대신 비트로?</strong><p>규격 해설에 따르면 <code>fence r,rw</code>로도 acquire를, <code>fence rw,w</code>로도 release를 만들 수 있다. 하지만 FENCE는 앞뒤의 <b>모든</b> 읽기/쓰기를 묶어 버려서 필요 이상으로 순서를 조인다. aq/rl은 “이 명령 하나를 기준으로 한쪽 방향만” 막으므로 하드웨어가 더 자유롭게 재배치할 수 있다. RVWMO 쪽 이야기는 <a href="memory-model.html">11장</a>에서 자세히 다룬다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="lr-sc">
+    <h2>LR/SC: 찜해 두고, 아무도 안 건드렸으면 쓴다</h2>
+    <p><code>lr.w rd, (rs1)</code>(load-reserved)는 주소의 워드를 읽어 <code>rd</code>에 부호 확장해 넣고, 그 워드를 포함하는 <span class="term">예약 집합</span><span class="english">(reservation set)</span>을 등록한다. <code>sc.w rd, rs2, (rs1)</code>(store-conditional)는 예약이 아직 유효할 때만 <code>rs2</code>를 메모리에 쓴다. 성공하면 <code>rd</code>에 <b>0</b>을, 실패하면 <b>0이 아닌 값</b>을 쓰고 메모리는 건드리지 않는다. 성공이든 실패든 SC를 실행하면 이 하트의 예약은 사라진다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 250" role="img" aria-label="AMO opcode를 쓰는 원자 명령의 32비트 형식">
+        <!-- 비트 번호 -->
+        <g class="t-faint" font-size="11">
+          <text x="40" y="34">31</text><text x="150" y="34" text-anchor="end">27</text>
+          <text x="162" y="34">26</text><text x="212" y="34">25</text>
+          <text x="260" y="34">24</text><text x="370" y="34" text-anchor="end">20</text>
+          <text x="382" y="34">19</text><text x="492" y="34" text-anchor="end">15</text>
+          <text x="504" y="34">14</text><text x="584" y="34" text-anchor="end">12</text>
+          <text x="596" y="34">11</text><text x="706" y="34" text-anchor="end">7</text>
+          <text x="718" y="34">6</text><text x="828" y="34" text-anchor="end">0</text>
+        </g>
+        <rect x="36" y="42" width="120" height="58" class="f-violet-soft"/><text x="96" y="68" text-anchor="middle" class="t t-bold">funct5</text><text x="96" y="88" text-anchor="middle" class="t-faint">연산 종류</text>
+        <rect x="156" y="42" width="50" height="58" class="f-gold-soft"/><text x="181" y="76" text-anchor="middle" class="t t-bold">aq</text>
+        <rect x="206" y="42" width="50" height="58" class="f-gold-soft"/><text x="231" y="76" text-anchor="middle" class="t t-bold">rl</text>
+        <rect x="256" y="42" width="120" height="58" class="f-teal-soft"/><text x="316" y="68" text-anchor="middle" class="t t-bold">rs2</text><text x="316" y="88" text-anchor="middle" class="t-faint">원본 값 (LR은 0)</text>
+        <rect x="376" y="42" width="120" height="58" class="f-teal-soft"/><text x="436" y="68" text-anchor="middle" class="t t-bold">rs1</text><text x="436" y="88" text-anchor="middle" class="t-faint">주소</text>
+        <rect x="496" y="42" width="92" height="58" class="f-violet-soft"/><text x="542" y="68" text-anchor="middle" class="t t-bold">funct3</text><text x="542" y="88" text-anchor="middle" class="t-faint">폭</text>
+        <rect x="588" y="42" width="120" height="58" class="f-teal-soft"/><text x="648" y="68" text-anchor="middle" class="t t-bold">rd</text><text x="648" y="88" text-anchor="middle" class="t-faint">결과(옛 값)</text>
+        <rect x="708" y="42" width="120" height="58" class="f-accent-soft"/><text x="768" y="68" text-anchor="middle" class="t t-bold">opcode</text><text x="768" y="88" text-anchor="middle" class="t-mono">0101111</text>
+        <!-- funct3 폭 -->
+        <text x="36" y="134" class="t t-bold">funct3 (폭)</text>
+        <text x="36" y="156" class="t-mono">000 = .B (Zabha)   001 = .H (Zabha)   010 = .W   011 = .D (RV64)   100 = .Q (amocas.q 전용)</text>
+        <!-- 예 -->
+        <text x="36" y="196" class="t t-bold">예</text>
+        <text x="36" y="218" class="t-mono">lr.w t0, (a0)             = 0x100522af   funct5=00010 aq=0 rl=0 rs2=00000 rs1=a0 010 rd=t0</text>
+        <text x="36" y="240" class="t-mono">amoadd.w.aq a0, a1, (a2)  = 0x04b6252f   funct5=00000 aq=1 rl=0 rs2=a1 rs1=a2 010 rd=a0</text>
+      </svg></div>
+      <figcaption><b>그림 10-4.</b> AMO 주 opcode(<code>0101111</code>)를 쓰는 원자 명령의 형식. R형과 같지만 funct7 자리를 funct5 + aq + rl로 쪼갰다. LR은 rs2 자리를 0으로 둔다. 폭(funct3)은 일반 load/store와 같은 규칙으로 B·H·W·D를 고른다.</figcaption>
+    </figure>
+
+    <h3>예약 집합은 “워드 하나”보다 클 수 있다</h3>
+    <p>규격은 예약 집합의 크기를 정하지 않는다. 주소한 워드(또는 더블워드)의 바이트를 모두 포함하기만 하면 얼마든지 크게 잡아도 된다. 실제 구현은 보통 <b>캐시 줄 하나</b>를 예약한다. 그러면 같은 캐시 줄의 <b>다른 변수</b>에 다른 하트가 써도 SC는 실패한다. 이를 <span class="term">거짓 공유</span><span class="english">(false sharing)</span>에 의한 실패라 부르며, 잠금 변수를 캐시 줄 단위로 띄워 두는 이유다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 300" role="img" aria-label="예약 집합과 다른 하트의 쓰기로 SC가 실패하는 과정">
+        <defs>
+          <marker id="reserve-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker>
+          <marker id="reserve-arrow-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--bad)"/></marker>
+        </defs>
+        <!-- 메모리 워드들 -->
+        <text x="30" y="132" class="t t-bold">메모리</text>
+        <rect x="140" y="104" width="560" height="56" rx="10" fill="none" stroke="var(--accent-2)" stroke-width="2.5" stroke-dasharray="8 5" class="pulse"/>
+        <text x="420" y="96" text-anchor="middle" class="t-gold">하트 0의 예약 집합 (예: 캐시 줄 하나)</text>
+        <g class="t-mono">
+          <rect x="150" y="114" width="80" height="36" rx="6" class="f-accent-soft"/><text x="190" y="137" text-anchor="middle" class="t-mono">A</text>
+          <rect x="240" y="114" width="80" height="36" rx="6" class="f-surface"/><text x="280" y="137" text-anchor="middle" class="t-mono">A+4</text>
+          <rect x="330" y="114" width="80" height="36" rx="6" class="f-bad-soft"/><text x="370" y="137" text-anchor="middle" class="t-mono">A+8</text>
+          <rect x="420" y="114" width="80" height="36" rx="6" class="f-surface"/><text x="460" y="137" text-anchor="middle" class="t-mono">A+12</text>
+          <rect x="510" y="114" width="80" height="36" rx="6" class="f-surface"/><text x="550" y="137" text-anchor="middle" class="t-mono">…</text>
+          <rect x="600" y="114" width="90" height="36" rx="6" class="f-surface"/><text x="645" y="137" text-anchor="middle" class="t-mono">A+60</text>
+          <rect x="720" y="114" width="90" height="36" rx="6" class="f-surface"/><text x="765" y="137" text-anchor="middle" class="t-mono">A+64</text>
+        </g>
+        <!-- 하트 0 -->
+        <g transform="translate(60,10)"><rect width="250" height="52" rx="10" class="f-accent-soft"/><text x="125" y="22" text-anchor="middle" class="t t-bold">① 하트 0: lr.w t0, (A)</text><text x="125" y="42" text-anchor="middle" class="t-dim">값을 읽고 예약 등록</text></g>
+        <path d="M190 64 V108" class="s-accent" marker-end="url(#reserve-arrow)"/>
+        <!-- 하트 1 -->
+        <g transform="translate(290,206)"><rect width="250" height="52" rx="10" class="f-bad-soft"/><text x="125" y="22" text-anchor="middle" class="t t-bold">② 하트 1: sw t1, (A+8)</text><text x="125" y="42" text-anchor="middle" class="t-dim">다른 변수지만 같은 집합</text></g>
+        <path d="M370 204 V156" class="s-bad flow-dash" marker-end="url(#reserve-arrow-bad)"/>
+        <!-- SC -->
+        <g transform="translate(560,10)"><rect width="270" height="52" rx="10" class="f-surface"/><text x="135" y="22" text-anchor="middle" class="t t-bold">③ 하트 0: sc.w t2, t0, (A)</text><text x="135" y="42" text-anchor="middle" class="t-bad">예약 무효 → 실패, t2 ≠ 0</text></g>
+        <text x="430" y="290" text-anchor="middle" class="t-faint">다른 하트가 예약 집합에 쓴 것이 LR과 SC 사이에 관찰되면 SC는 반드시 실패한다</text>
+      </svg></div>
+      <figcaption><b>그림 10-5.</b> 예약 집합과 SC 실패. 하트 1은 <code>A+8</code>에 썼을 뿐이지만, 그 바이트가 하트 0의 예약 집합 안에 있으므로 하트 0의 SC는 실패한다. 반대로 집합 밖(<code>A+64</code>)에 쓴 것은 SC에 영향을 주지 않는다.</figcaption>
+    </figure>
+
+    <div class="callout spec"><strong>규격 원문에서</strong>
+      <blockquote>“If the SC.W succeeds, the instruction writes the word in rs2 to memory, and it writes zero to rd. If the SC.W fails, the instruction does not write to memory, and it writes a nonzero value to rd.”</blockquote>
+      <p><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/a-st-ext.html" target="_blank" rel="noopener">Unprivileged ISA, "Zalrsc" Extension</a> — 실패 코드 1은 “이유 불명의 실패”로 정해져 있고 다른 값은 예약되어 있다. 이식성 있는 소프트웨어는 “0이 아니면 실패”로만 판단해야 한다.</p></div>
+
+    <h3>SC가 반드시 실패하는 경우</h3>
+    <ul>
+      <li>SC의 주소가 가장 최근 LR의 예약 집합 안에 없을 때</li>
+      <li>LR과 SC 사이에 <b>다른 하트</b>가 예약 집합에 쓴 것이 관찰될 때</li>
+      <li>LR과 SC 사이에 하트가 아닌 장치(DMA 등)가 LR이 접근한 바이트에 쓴 것이 관찰될 때</li>
+      <li>LR과 SC 사이에 프로그램 순서상 <b>다른 SC</b>(주소 무관)가 있을 때</li>
+    </ul>
+    <p>또한 구현은 아무 이유 없이 SC를 가끔 실패시켜도 된다(아래의 진행 보장만 지키면). 그래서 SC는 늘 <b>재시도 루프</b> 안에 둔다. 규격이 예로 든 비교-교환(CAS) 함수가 그 전형이다.</p>
+    <div class="codebox" data-title="규격 예제 — LR/SC로 만든 compare-and-swap" id="cas-source"></div>
+    <p>인라인으로 넣으면 비교-교환의 핵심은 <code>lr.w</code>, <code>bne</code>, <code>sc.w</code>, <code>bnez</code> 네 명령뿐이다.</p>
+
+    <h3>제약된 LR/SC 루프와 진행 보장</h3>
+    <p>LR/SC의 약점은 <span class="term">라이브락</span><span class="english">(livelock)</span>이다. 두 하트가 서로의 예약을 계속 깨면 둘 다 영원히 실패할 수 있다. 규격은 다음 조건을 만족하는 <b>제약된 LR/SC 루프</b><span class="english">(constrained LR/SC loop)</span>에 한해 “결국 누군가는 빠져나간다”고 보장한다.</p>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>조건</th><th>내용</th></tr></thead>
+      <tbody>
+        <tr><td>길이</td><td>루프는 LR/SC 시퀀스와 재시도 코드로만 이루어지며, 메모리에 연속으로 놓인 <b>최대 16개 명령</b>(기본 ISA 기준 64바이트)</td></tr>
+        <tr><td>LR과 SC 사이</td><td>기본 <b>I</b> 명령만. 단, load·store, 뒤로 가는 점프, 성립하는 뒤로 가는 분기, <code>JALR</code>, <code>FENCE</code>, SYSTEM 명령은 금지. C(Zca)·Zcb의 압축형은 허용</td></tr>
+        <tr><td>재시도 코드</td><td>시퀀스를 반복하기 위한 뒤로 가는 점프·분기는 허용, 그 밖에는 위와 같은 제약</td></tr>
+        <tr><td>메모리 영역</td><td>LR/SC 주소가 <b>LR/SC eventuality</b> 속성을 가진 영역에 있어야 함 (실행 환경이 알려 줌)</td></tr>
+        <tr><td>주소와 크기</td><td>SC는 같은 하트가 실행한 가장 최근 LR과 <b>같은 유효 주소·같은 데이터 크기</b></td></tr>
+      </tbody>
+    </table></div>
+    <p>이 조건을 지키면, 하트 H가 루프에 들어간 뒤 결국 다음 중 하나가 일어난다: H 또는 다른 하트가 그 예약 집합에 성공적인 SC를 하거나, 다른 하트·장치가 그 집합에 일반 store나 AMO를 하거나, H가 루프를 빠져나가는 분기를 하거나, H가 트랩된다. 곱셈·나눗셈과 부동소수점을 금지한 이유는 그 명령이 없는 구현에서 운영체제가 에뮬레이션할 때 예약이 깨지기 때문이다.</p>
+    <div class="callout warn"><strong>제약을 벗어난 LR/SC는 영원히 실패할 수도 있다</strong><p>조건을 어긴 <b>비제약</b>(unconstrained) LR/SC는 어떤 구현에서는 성공하지만, 다른 구현에서는 한 번도 성공하지 않아도 규격 위반이 아니다. 이식성 있는 코드는 반복 실패를 감지해 다른 방법으로 넘어가야 한다. 예를 들어 LR과 SC 사이에서 함수를 호출하거나 다른 변수를 읽으면 이미 제약을 벗어난다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="race-lab">
+    <h2>직접 경쟁시켜 보기</h2>
+    <p>아래 시뮬레이터에서 두 하트가 같은 <code>counter</code>(처음 값 0)를 하나씩 올린다. 어느 하트를 먼저 한 걸음 움직일지 <b>여러분이 정한다</b>. 세 가지 방법(일반 load/add/store, <code>amoadd.w</code>, LR/SC 루프)을 바꿔 가며, 어떤 순서에서 갱신이 사라지는지, LR/SC에서는 SC가 언제 실패하는지 확인해 보자.</p>
+
+    <div class="sim" id="race-sim">
+      <div class="sim-head"><span class="sim-tag">SIMULATOR</span><h3>두 하트 경쟁 시뮬레이터</h3></div>
+      <div class="sim-pad">
+        <div class="race-grid">
+          <div class="hart-panel" id="race-hart-0"></div>
+          <div class="memory-panel">
+            <small>공유 메모리</small>
+            <div><span class="t-mono" style="font-family:var(--mono)">counter</span></div>
+            <div class="memory-value" id="race-memory-value">0</div>
+            <small id="race-memory-note">기대값: 2</small>
+          </div>
+          <div class="hart-panel" id="race-hart-1"></div>
+        </div>
+      </div>
+      <div class="step-description" id="race-description">방법을 고르고 각 하트의 <b>한 단계</b> 버튼을 원하는 순서로 눌러 보자.</div>
+      <div class="sim-controls">
+        <div class="control"><span>방법</span>
+          <div class="segmented" id="race-mode">
+            <button data-value="plain" class="on">lw · addi · sw</button>
+            <button data-value="amo">amoadd.w</button>
+            <button data-value="lrsc">LR/SC 루프</button>
+          </div>
+        </div>
+        <div class="control"><span>순서 자동</span>
+          <div class="button-row">
+            <button class="button" id="race-alternate">번갈아 끝까지</button>
+            <button class="button" id="race-reset">처음으로</button>
+          </div>
+        </div>
+        <div class="control"><span>통계</span>
+          <div class="button-row"><button class="button primary" id="race-trials">무작위 순서 10,000번</button></div>
+        </div>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">최종 counter</span><span class="value" id="race-final">—</span></div>
+        <div class="stat"><span class="key">SC 실패 횟수</span><span class="value" id="race-sc-failures">0</span></div>
+        <div class="stat"><span class="key">무작위 실험: 갱신 손실 비율</span><span class="value" id="race-trial-result">—</span></div>
+      </div>
+      <div class="log-box" id="race-log" aria-live="polite"></div>
+      <div class="sim-note">“lw · addi · sw”에서 <b>하트 0 → 하트 1 → 하트 0 → 하트 1 …</b> 순서로 눌러 그림 10-1을 재현하자. 같은 순서를 LR/SC로 해 보면 하트 1의 SC가 실패하고(t2 = 1) 루프를 한 번 더 돈 뒤 결과가 2가 된다. 무작위 실험 버튼으로 세 방법의 손실 비율을 비교하자.</div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="amo">
+    <h2>AMO: 읽고-연산하고-쓰기를 한 명령으로</h2>
+    <p><span class="term">AMO</span><span class="english">(atomic memory operation)</span>는 <code>rs1</code>의 주소에서 값을 읽어 <code>rd</code>에 넣고, 그 값과 <code>rs2</code>에 이항 연산을 적용한 결과를 같은 주소에 다시 쓴다. 이 전체가 하나의 메모리 연산으로 원자적으로 일어난다. RV64에서 <code>.w</code> AMO는 <code>rd</code>에 넣는 32비트 값을 부호 확장하고 <code>rs2</code>의 위쪽 32비트는 무시한다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 300" role="img" aria-label="amoadd.w가 메모리에서 원자적으로 읽고 더하고 쓰는 과정">
+        <defs>
+          <path id="amo-path-request" d="M190 110 H520"/>
+          <path id="amo-path-return" d="M520 190 H190"/>
+          <marker id="amo-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker>
+          <marker id="amo-arrow-gold" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent-2)"/></marker>
+        </defs>
+        <!-- 하트 -->
+        <g transform="translate(20,60)">
+          <rect width="170" height="180" rx="14" class="f-accent-soft"/>
+          <text x="85" y="28" text-anchor="middle" class="t t-bold">하트</text>
+          <text x="85" y="56" text-anchor="middle" class="t-mono">amoadd.w</text>
+          <text x="85" y="74" text-anchor="middle" class="t-mono">a0, a1, (a2)</text>
+          <rect x="18" y="96" width="134" height="30" rx="6" class="f-elev"/><text x="85" y="116" text-anchor="middle" class="t-mono">a1 (rs2) = 3</text>
+          <rect x="18" y="136" width="134" height="30" rx="6" class="f-gold-soft"/><text x="85" y="156" text-anchor="middle" class="t-mono">a0 (rd) ← 5</text>
+        </g>
+        <!-- 요청/응답 경로 -->
+        <use href="#amo-path-request" class="s-accent flow-dash" marker-end="url(#amo-arrow)"/>
+        <use href="#amo-path-return" class="s-gold flow-dash" marker-end="url(#amo-arrow-gold)"/>
+        <text x="355" y="100" text-anchor="middle" class="t-accent" style="font-size:13px">요청: 주소, 연산(add), 값 3</text>
+        <text x="355" y="214" text-anchor="middle" class="t-gold" style="font-size:13px">응답: 옛 값 5</text>
+        <circle r="6" fill="var(--accent)"><animateMotion dur="2.4s" begin="-0.2s" repeatCount="indefinite"><mpath href="#amo-path-request"/></animateMotion></circle>
+        <circle r="6" fill="var(--accent-2)"><animateMotion dur="2.4s" begin="-1.4s" repeatCount="indefinite"><mpath href="#amo-path-return"/></animateMotion></circle>
+        <!-- 메모리 쪽 원자 단위 -->
+        <g transform="translate(530,30)">
+          <rect width="310" height="240" rx="16" fill="none" stroke="var(--accent-2)" stroke-width="2" stroke-dasharray="7 5"/>
+          <text x="155" y="24" text-anchor="middle" class="t-gold">원자적 단위 (다른 접근이 끼어들 수 없음)</text>
+          <rect x="20" y="44" width="120" height="56" rx="10" class="f-surface"/><text x="80" y="68" text-anchor="middle" class="t-dim">① 읽기</text><text x="80" y="88" text-anchor="middle" class="t-mono">mem = 5</text>
+          <rect x="170" y="44" width="120" height="56" rx="10" class="f-violet-soft"/><text x="230" y="68" text-anchor="middle" class="t-dim">② 연산</text><text x="230" y="88" text-anchor="middle" class="t-mono">5 + 3 = 8</text>
+          <rect x="95" y="140" width="120" height="56" rx="10" class="f-ok-soft"/><text x="155" y="164" text-anchor="middle" class="t-dim">③ 쓰기</text><text x="155" y="184" text-anchor="middle" class="t-mono">mem ← 8</text>
+          <path d="M142 72 H166" class="s-line" marker-end="url(#amo-arrow)"/>
+          <path d="M230 102 C230 130 200 140 190 140" class="s-line" marker-end="url(#amo-arrow)"/>
+          <rect x="125" y="208" width="60" height="22" rx="5" class="f-gold-soft blink-highlight"/><text x="155" y="224" text-anchor="middle" class="t-mono" style="font-size:12px">락</text>
+        </g>
+      </svg></div>
+      <figcaption><b>그림 10-6.</b> <code>amoadd.w a0, a1, (a2)</code>의 흐름. 하트는 “주소·연산·값”을 보내고, 읽기→연산→쓰기는 원자적 단위 안에서 한 번에 끝난다. <code>rd</code>로 돌아오는 것은 <b>연산 전의 옛 값</b>이다. 단순한 구현은 이것을 내부적으로 LR/SC처럼 처리하고, 큰 시스템은 메모리 컨트롤러나 공유 캐시에서 직접 처리하기도 한다.</figcaption>
+    </figure>
+
+    <div class="table-wrap"><table class="instruction-table">
+      <thead><tr><th>명령 (.W / .D)</th><th>funct5</th><th>메모리에 남는 새 값</th><th>비고</th></tr></thead>
+      <tbody>
+        <tr><td>lr</td><td><code>00010</code></td><td>(쓰지 않음)</td><td>rs2 = 0, 예약 등록</td></tr>
+        <tr><td>sc</td><td><code>00011</code></td><td>rs2 (성공 시에만)</td><td>rd = 0 성공 / ≠0 실패</td></tr>
+        <tr><td>amoswap</td><td><code>00001</code></td><td>rs2</td><td>잠금 획득·해제</td></tr>
+        <tr><td>amoadd</td><td><code>00000</code></td><td>mem + rs2</td><td>카운터, 티켓 발급</td></tr>
+        <tr><td>amoxor</td><td><code>00100</code></td><td>mem ^ rs2</td><td>비트 뒤집기</td></tr>
+        <tr><td>amoand</td><td><code>01100</code></td><td>mem &amp; rs2</td><td>비트 지우기</td></tr>
+        <tr><td>amoor</td><td><code>01000</code></td><td>mem | rs2</td><td>비트 세우기</td></tr>
+        <tr><td>amomin</td><td><code>10000</code></td><td>min(mem, rs2) 부호 있음</td><td></td></tr>
+        <tr><td>amomax</td><td><code>10100</code></td><td>max(mem, rs2) 부호 있음</td><td></td></tr>
+        <tr><td>amominu</td><td><code>11000</code></td><td>min(mem, rs2) 부호 없음</td><td></td></tr>
+        <tr><td>amomaxu</td><td><code>11100</code></td><td>max(mem, rs2) 부호 없음</td><td></td></tr>
+        <tr><td>amocas (Zacas)</td><td><code>00101</code></td><td>mem == rd 이면 rs2</td><td>funct3 010/011/100 = W/D/Q</td></tr>
+      </tbody>
+    </table></div>
+    <p>모든 AMO는 주소가 피연산자 크기에 맞게 <b>자연 정렬</b>되어 있어야 한다(워드는 4바이트, 더블워드는 8바이트 경계). 정렬되지 않으면 주소 정렬 예외나 접근 폴트가 난다. 다만 특권 규격의 <i>misaligned atomicity granule</i> PMA가 있으면, 그 크기 안에 모두 들어가는 접근은 예외 없이 원자적으로 실행될 수 있다.</p>
+
+    <div class="sim" id="amo-sim">
+      <div class="sim-head"><span class="sim-tag">SIMULATOR</span><h3>AMO 놀이터 (32비트)</h3></div>
+      <div class="sim-pad">
+        <div class="amo-layout">
+          <div class="amo-box">
+            <h4>실행 전후</h4>
+            <div class="amo-line" id="amo-before"></div>
+            <div class="amo-line" id="amo-after" style="margin-top:8px"></div>
+          </div>
+          <div class="amo-box">
+            <h4>인코딩</h4>
+            <div class="amo-line" id="amo-assembly"></div>
+            <div class="encoding-word" id="amo-word">0x00000000</div>
+            <div class="amo-line" id="amo-fields" style="margin-top:6px"></div>
+          </div>
+        </div>
+      </div>
+      <div class="step-description" id="amo-description"></div>
+      <div class="sim-controls">
+        <div class="control"><span>연산</span>
+          <div class="segmented" id="amo-operation">
+            <button data-value="swap" class="on">swap</button><button data-value="add">add</button><button data-value="and">and</button><button data-value="or">or</button><button data-value="xor">xor</button>
+            <button data-value="min">min</button><button data-value="max">max</button><button data-value="minu">minu</button><button data-value="maxu">maxu</button>
+          </div>
+        </div>
+        <div class="control"><span>값 (10진수 또는 0x16진수)</span>
+          <div class="amo-inputs">
+            <label class="control"><span>메모리 [a2]</span><input type="text" id="amo-memory-input" value="0xffffffff" spellcheck="false"></label>
+            <label class="control"><span>a1 (rs2)</span><input type="text" id="amo-source-input" value="1" spellcheck="false"></label>
+          </div>
+        </div>
+        <div class="control"><span>순서 비트</span>
+          <div class="button-row">
+            <label class="checkbox"><input type="checkbox" id="amo-acquire"> aq</label>
+            <label class="checkbox"><input type="checkbox" id="amo-release"> rl</label>
+          </div>
+        </div>
+        <div class="control"><span>예제</span>
+          <div class="button-row">
+            <button class="button" data-preset="-1|1|max">-1 과 1 (max)</button>
+            <button class="button" data-preset="0x80000000|0x7fffffff|minu">0x80000000 (minu)</button>
+            <button class="button" data-preset="0|1|swap">잠금 획득</button>
+            <button class="button" data-preset="0x7fffffff|1|add">덧셈 넘침</button>
+          </div>
+        </div>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">rd (a0) ← 옛 값</span><span class="value" id="amo-result-register">—</span></div>
+        <div class="stat"><span class="key">메모리 새 값</span><span class="value" id="amo-result-memory">—</span></div>
+        <div class="stat"><span class="key">signed 해석</span><span class="value" id="amo-result-signed">—</span></div>
+        <div class="stat"><span class="key">unsigned 해석</span><span class="value" id="amo-result-unsigned">—</span></div>
+      </div>
+      <div class="sim-note">“-1 과 1” 예제에서 연산을 <b>max</b>와 <b>maxu</b>로 바꿔 보자. 같은 비트 0xffffffff가 부호 있는 비교에서는 -1(가장 작음), 부호 없는 비교에서는 4294967295(가장 큼)로 해석되어 결과가 정반대가 된다. aq/rl을 켜면 인코딩의 비트 26·25가 바뀌는 것도 확인하자.</div>
+    </div>
+
+    <div class="callout tip"><strong>rd = x0 이면 “값은 필요 없다”</strong><p>병렬 합산처럼 옛 값이 필요 없으면 <code>amoadd.w x0, t1, (a0)</code>로 쓴다. 규격 해설은 큰 구현이 이 경우 옛 값을 돌려보내는 과정을 생략하고 메모리 쪽에서 처리하는 최적화를 할 수 있다고 설명한다. AMO가 LR/SC보다 많은 코어에서 더 잘 확장되는 이유다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="locks">
+    <h2>잠금 만들기: 스핀락, 티켓 락, 그리고 잠들며 기다리기</h2>
+    <p>규격은 AMO의 쓰임새를 보여 주려고 <b>test-and-test-and-set</b> 스핀락 예제를 싣고 있다. 먼저 평범한 <code>lw</code>로 잠금이 풀렸는지 보고(test), 풀려 보이면 그때 <code>amoswap.w.aq</code>로 1을 써 넣으며 옛 값을 확인한다(test-and-set). 옛 값이 0이었으면 내가 잠금을 얻은 것이다.</p>
+    <div class="codebox" data-title="규격 예제 — 상호 배제 (a0 = 잠금 변수 주소)" id="spinlock-source"></div>
+    <p>획득 쪽 AMO에는 <b>aq</b>가 붙어 임계 구역의 접근이 잠금 획득보다 앞당겨 보이지 않게 하고, 해제 쪽 AMO에는 <b>rl</b>이 붙어 임계 구역의 접근이 해제보다 늦게 보이지 않게 한다. 규격은 잠금 해제도 <code>sw</code> 대신 <code>amoswap</code>으로 하길 권한다. 그래야 <span class="term">투기적 잠금 생략</span><span class="english">(speculative lock elision)</span> 같은 하드웨어 최적화가 잠금 패턴을 알아보기 쉽다.</p>
+
+    <h3>티켓 락: 줄 서서 기다리기</h3>
+    <p>단순 스핀락은 공정하지 않다. 운 좋은 하트가 계속 잠금을 가져갈 수 있다. <b>티켓 락</b>은 은행 번호표처럼 순서를 보장한다. 들어올 때 <code>amoadd.w</code>로 번호표를 하나 뽑고, “지금 부르는 번호”가 내 번호가 될 때까지 기다린다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 260" role="img" aria-label="amoadd로 번호표를 뽑는 티켓 락">
+        <defs><marker id="ticket-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker></defs>
+        <g transform="translate(300,20)">
+          <rect width="260" height="96" rx="14" class="f-gold-soft"/>
+          <text x="130" y="26" text-anchor="middle" class="t t-bold">잠금 구조체 (메모리)</text>
+          <rect x="16" y="40" width="108" height="44" rx="8" class="f-elev"/><text x="70" y="58" text-anchor="middle" class="t-faint">next_ticket</text><text x="70" y="77" text-anchor="middle" class="t-mono t-bold">7</text>
+          <rect x="136" y="40" width="108" height="44" rx="8" class="f-elev"/><text x="190" y="58" text-anchor="middle" class="t-faint">now_serving</text><text x="190" y="77" text-anchor="middle" class="t-mono t-bold">5</text>
+        </g>
+        <g transform="translate(40,170)"><rect width="180" height="70" rx="12" class="f-ok-soft"/><text x="90" y="28" text-anchor="middle" class="t t-bold">하트 2 · 번호 5</text><text x="90" y="50" text-anchor="middle" class="t-ok">임계 구역 안</text></g>
+        <g transform="translate(340,170)"><rect width="180" height="70" rx="12" class="f-surface"/><text x="90" y="28" text-anchor="middle" class="t t-bold">하트 0 · 번호 6</text><text x="90" y="50" text-anchor="middle" class="t-dim">now_serving 이 6이길 대기</text></g>
+        <g transform="translate(640,170)"><rect width="180" height="70" rx="12" class="f-accent-soft"/><text x="90" y="28" text-anchor="middle" class="t t-bold">하트 1 · 새로 옴</text><text x="90" y="50" text-anchor="middle" class="t-mono">amoadd.w → 7</text></g>
+        <path d="M730 168 C730 120 640 90 566 72" class="s-accent flow-dash" marker-end="url(#ticket-arrow)"/>
+        <text x="700" y="112" class="t-accent" style="font-size:12px">번호표 뽑기 (원자적)</text>
+        <path d="M430 168 V122" class="s-line s-dashed" marker-end="url(#ticket-arrow)"/>
+        <text x="440" y="150" class="t-faint">lw 로 계속 확인</text>
+        <path d="M130 168 C130 120 250 100 296 90" class="s-ok" marker-end="url(#ticket-arrow)"/>
+        <text x="160" y="164" class="t-ok" style="font-size:12px">끝나면 now_serving++</text>
+      </svg></div>
+      <figcaption><b>그림 10-7.</b> 티켓 락. 번호표를 뽑는 동작만 <code>amoadd.w</code>로 원자적이면 된다. <code>now_serving</code>은 잠금을 가진 하트만 올리므로 경쟁이 없다. 들어온 순서대로 잠금을 얻으니 굶주림(starvation)이 없다.</figcaption>
+    </figure>
+    <div class="codebox" data-title="티켓 락 스케치 (a0 = &amp;next_ticket, a0+4 = &amp;now_serving)" id="ticket-source"></div>
+
+    <h3>돌며 기다리기 vs 잠들며 기다리기 (Zawrs)</h3>
+    <p>스핀락의 대기 루프는 아무 일도 하지 않으면서 명령을 계속 실행한다. 전력도 쓰고, SMT 코어라면 옆 하트의 실행 자원도 빼앗는다. <b>Zawrs</b>는 이 낭비를 줄인다. <code>lr.w</code>로 잠금 변수에 예약을 걸어 둔 뒤 <code>wrs.nto</code>(no timeout)를 실행하면, 하트는 <b>예약이 유효하고 대기 중인 인터럽트가 없는 동안</b> 저전력 상태로 멈춘다. 다른 하트가 잠금 변수에 쓰면 예약이 깨지고 하트가 깨어난다. <code>wrs.sto</code>(short timeout)는 구현이 정한 짧은 시간이 지나면 스스로 깨어난다.</p>
+
+    <div class="sim" id="spinlock-sim">
+      <div class="sim-head"><span class="sim-tag animation">ANIMATION</span><h3>세 하트의 잠금 쟁탈전</h3></div>
+      <div class="sim-view"><canvas id="spinlock-canvas" aria-label="세 하트가 하나의 잠금을 두고 경쟁하는 애니메이션"></canvas></div>
+      <div class="sim-controls">
+        <div class="control"><span>대기 방식</span>
+          <div class="segmented" id="spinlock-mode">
+            <button data-value="spin" class="on">lw 로 돌기 (스핀)</button>
+            <button data-value="zawrs">lr.w + wrs.nto (Zawrs)</button>
+          </div>
+        </div>
+        <label class="control"><span>속도 <output id="spinlock-speed-output"></output></span><input type="range" id="spinlock-speed" min="1" max="6" value="3"></label>
+        <div class="control"><span>재생</span>
+          <div class="button-row"><button class="button primary" id="spinlock-toggle">멈춤</button><button class="button" id="spinlock-reset">처음으로</button></div>
+        </div>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">잠금 소유자</span><span class="value" id="spinlock-owner">없음</span></div>
+        <div class="stat"><span class="key">잠금 획득 횟수</span><span class="value" id="spinlock-acquisitions">0</span></div>
+        <div class="stat"><span class="key">대기 중 실행한 읽기 (lw/lr)</span><span class="value" id="spinlock-waiting-reads">0</span></div>
+        <div class="stat"><span class="key">획득 1회당 대기 읽기</span><span class="value" id="spinlock-ratio">—</span></div>
+      </div>
+      <div class="sim-note">스핀 모드에서 파란 점(대기 읽기)이 끝없이 오가는 모습과 “획득 1회당 대기 읽기” 숫자를 보고, Zawrs 모드로 바꿔 비교하자. Zawrs에서는 기다리는 하트가 흐리게 잠들어 있다가, 누군가 잠금 변수에 <b>쓸 때</b>(획득 amoswap이든 해제 amoswap이든) 깨어나 다시 확인한다. 실제 하드웨어에서 스핀 읽기는 대개 자기 캐시에서 처리되지만, 그동안 코어가 명령을 실행하며 전력을 쓰는 것은 같다.</div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="new-extensions">
+    <h2>최신 원자 확장: Zacas, Zabha, Zawrs, Zalasr</h2>
+    <h3>Zacas — 하드웨어 비교-교환</h3>
+    <p>A 확장 설계자들은 처음에 CAS 대신 LR/SC를 택했다. 규격 해설은 그 이유로 CAS의 <span class="term">ABA 문제</span><span class="english">(ABA problem)</span>, 피연산자가 셋이라 새 형식이 필요한 점 등을 든다. 그러나 CAS 기반 알고리즘이 널리 쓰이고 많은 코어에서 더 잘 확장되기 때문에 Zacas가 추가되었다. <code>amocas.w rd, rs2, (rs1)</code>은 메모리 값을 읽어 <code>rd</code>의 <b>기대값</b>과 비교하고, 같으면 <code>rs2</code>를 쓴다. 어느 경우든 읽은 값은 <code>rd</code>에 돌아온다.</p>
+    <div class="codebox" data-title="Zacas 규격의 동작 정의 (RV32의 AMOCAS.W)">temp = mem[X(rs1)]
+if ( temp == X(rd) )
+    mem[X(rs1)] = X(rs2)
+X(rd) = temp</div>
+    <ul>
+      <li><b>AMOCAS.D</b>는 RV32에서 <b>레지스터 쌍</b>(rd, rd+1)을 쓴다. 첫 레지스터는 짝수여야 하며, 홀수 번호 인코딩은 예약되어 있다. x0을 쌍으로 지정하면 원본은 둘 다 0으로 읽히고 결과는 버려진다.</li>
+      <li><b>AMOCAS.Q</b>(RV64 전용)는 128비트를 비교·교환한다. 포인터와 수정 횟수를 함께 바꿔 ABA 문제를 피하는 무잠금 큐에 쓰인다.</li>
+      <li>실패한 AMOCAS는 쓰기를 하지 않거나 <b>옛 값을 다시 쓸 수도</b> 있다. 그래서 항상 쓰기 권한을 요구한다. 성공했을 때만 rl의 release 의미가 있고, aq의 acquire 의미는 성공·실패와 무관하다.</li>
+    </ul>
+
+    <h3>Zabha — 바이트와 하프워드 AMO</h3>
+    <p>A 확장에는 8·16비트 AMO가 없어서 컴파일러가 워드 AMO나 LR/SC 루프로 흉내를 냈다. 이 방법은 코드가 길어지고, I/O 영역에서는 옆 바이트까지 건드리는 부작용이 있으며, 큰 시스템에서 공정성 문제가 생긴다. Zabha는 <code>amo&lt;op&gt;.b/h</code>를 funct3 = 000(B), 001(H)로 추가하고, Zacas도 있으면 <code>amocas.b/h</code>까지 제공한다. 결과는 늘 부호 확장된다. LR/SC의 바이트·하프워드 버전은 “쓸모가 적다”며 넣지 않았다.</p>
+
+    <h3>Zawrs — 예약 집합 위에서 잠들기</h3>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 300" role="img" aria-label="Zawrs를 쓰는 대기 루프의 흐름과 WRS 명령 인코딩">
+        <defs><marker id="zawrs-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker></defs>
+        <g transform="translate(20,20)"><rect width="170" height="56" rx="10" class="f-accent-soft"/><text x="85" y="24" text-anchor="middle" class="t-mono">lr.w t0, (a0)</text><text x="85" y="44" text-anchor="middle" class="t-faint">값 읽기 + 예약</text></g>
+        <path d="M192 48 H226" class="s-accent" marker-end="url(#zawrs-arrow)"/>
+        <g transform="translate(230,20)"><rect width="170" height="56" rx="10" class="f-surface"/><text x="85" y="24" text-anchor="middle" class="t-mono">beqz t0, done</text><text x="85" y="44" text-anchor="middle" class="t-faint">원하는 값이면 탈출</text></g>
+        <path d="M402 48 H436" class="s-accent" marker-end="url(#zawrs-arrow)"/>
+        <g transform="translate(440,20)"><rect width="170" height="56" rx="10" class="f-teal-soft"/><text x="85" y="24" text-anchor="middle" class="t-mono">wrs.nto</text><text x="85" y="44" text-anchor="middle" class="t-faint">저전력 정지</text></g>
+        <g transform="translate(650,8)"><rect width="190" height="80" rx="10" class="f-elev"/><text x="95" y="22" text-anchor="middle" class="t-dim">깨어나는 조건</text><text x="95" y="42" text-anchor="middle" class="t" style="font-size:12.5px">예약 집합에 쓰기 (예약 무효)</text><text x="95" y="60" text-anchor="middle" class="t" style="font-size:12.5px">대기 인터럽트 관찰</text><text x="95" y="76" text-anchor="middle" class="t-faint">(.sto: 짧은 시간 경과)</text></g>
+        <path d="M612 48 H646" class="s-line s-dashed"/>
+        <path d="M525 80 C525 130 105 130 105 82" class="s-accent flow-dash" marker-end="url(#zawrs-arrow)"/>
+        <text x="315" y="146" text-anchor="middle" class="t-accent" style="font-size:12.5px">깨어나면 처음부터 다시 확인 (거짓으로 깰 수도 있으므로)</text>
+        <!-- 인코딩 -->
+        <g transform="translate(20,184)">
+          <text x="0" y="0" class="t t-bold">인코딩 (SYSTEM opcode 1110011, funct3 = 0, rs1 = rd = 0)</text>
+          <g class="t-faint" font-size="11"><text x="4" y="22">31</text><text x="300" y="22" text-anchor="end">20</text><text x="312" y="22">19</text><text x="400" y="22" text-anchor="end">15</text><text x="412" y="22">14</text><text x="470" y="22" text-anchor="end">12</text><text x="482" y="22">11</text><text x="570" y="22" text-anchor="end">7</text><text x="582" y="22">6</text><text x="690" y="22" text-anchor="end">0</text></g>
+          <rect x="0" y="28" width="306" height="40" class="f-violet-soft"/><text x="153" y="53" text-anchor="middle" class="t-mono">funct12</text>
+          <rect x="306" y="28" width="100" height="40" class="f-surface"/><text x="356" y="53" text-anchor="middle" class="t-mono">00000</text>
+          <rect x="406" y="28" width="70" height="40" class="f-surface"/><text x="441" y="53" text-anchor="middle" class="t-mono">000</text>
+          <rect x="476" y="28" width="100" height="40" class="f-surface"/><text x="526" y="53" text-anchor="middle" class="t-mono">00000</text>
+          <rect x="576" y="28" width="120" height="40" class="f-accent-soft"/><text x="636" y="53" text-anchor="middle" class="t-mono">1110011</text>
+          <text x="0" y="92" class="t-mono">wrs.nto : funct12 = 0x00d  →  0x00d00073</text>
+          <text x="420" y="92" class="t-mono">wrs.sto : funct12 = 0x01d  →  0x01d00073</text>
+        </g>
+      </svg></div>
+      <figcaption><b>그림 10-8.</b> Zawrs 대기 루프와 인코딩. WRS 명령은 예약 집합이 유효하고 인터럽트가 없는 동안에만 멈추며, 구현은 아무 때나 깨어나도 되므로 반드시 다시 확인하는 루프 안에서 쓴다. 인터럽트에 대한 재개 규칙은 WFI와 같다.</figcaption>
+    </figure>
+    <p>WRS는 모든 특권 모드에서 쓸 수 있다. WFI와 달리 <b>사용자 모드에서 쓰라고 만든 명령</b>이다. 다만 <code>mstatus.TW</code>가 1이면 M 모드가 아닌 모드에서 실행한 <code>wrs.nto</code>가 구현이 정한 시간 안에 끝나지 않을 때 illegal-instruction 예외가 난다(가상화 환경에서는 <code>hstatus.VTW</code>에 따라 virtual-instruction 예외). 운영체제가 “너무 오래 자는” 하트를 되찾을 수 있게 한 장치다.</p>
+
+    <h3>Zalasr — 단독 load-acquire / store-release</h3>
+    <p>A 확장의 LR과 SC는 짝으로만 쓰도록 설계되어 있다. 그래서 C++의 <code>atomic_load(acquire)</code>는 지금까지 <code>lw; fence r,rw</code>, <code>atomic_store(release)</code>는 <code>fence rw,w; sw</code>로 번역했다. Zalasr는 이를 한 명령으로 만든다.</p>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>명령</th><th>funct5</th><th>필수 비트</th><th>규칙</th></tr></thead>
+      <tbody>
+        <tr><td><code>l{b|h|w|d}.{aq|aqrl} rd, (rs1)</code></td><td><code>00110</code></td><td>aq = 1 (rs2 = 0)</td><td>aq가 0인 인코딩은 예약. <code>ld.aq</code>는 RV64 전용</td></tr>
+        <tr><td><code>s{b|h|w|d}.{rl|aqrl} rs2, (rs1)</code></td><td><code>00111</code></td><td>rl = 1 (rd = 0)</td><td>rl이 0인 인코딩은 예약. <code>sd.rl</code>은 RV64 전용</td></tr>
+      </tbody>
+    </table></div>
+    <p>예를 들어 <code>lw.aq a0, (a1)</code>은 <code>0x3405a52f</code>, <code>sw.rl a0, (a1)</code>은 <code>0x3aa5a02f</code>다. 규격은 “Zaamo, Zabha, Zalasr를 함께 쓰면 모든 C++ 원자 연산을 단일 명령으로 지원할 수 있다”고 정리한다. 비트가 하나도 없는 버전은 정렬된 일반 load/store로 충분하고, load-release나 store-acquire는 언어 메모리 모델에서 쓰이지 않아 넣지 않았다.</p>
+    <div class="callout history"><strong>v20260120에서 새로 들어온 확장</strong><p>이 책이 기준으로 삼는 ISA 매뉴얼 v20260120 서문의 변경 사항 첫 줄이 “Addition of the Zalasr extension for Load-Acquire/Store-Release operations”다. 같은 문서의 확장 목록에서 Zalasr 1.0은 Ratified 상태로 실려 있다.</p></div>
+  </section>
+
+  <section class="keypoints" id="summary">
+    <h2>핵심 정리</h2>
+    <ol>
+      <li>읽기와 쓰기 사이에 다른 하트가 끼어들면 <b>잃어버린 갱신</b>이 생긴다. A 확장은 이를 막는 원자 명령을 제공하며, <b>Zalrsc(LR/SC) + Zaamo(AMO)</b>로 이루어진다.</li>
+      <li>모든 원자 명령에는 <b>aq</b>·<b>rl</b> 비트가 있다. aq는 뒤의 접근이 앞으로, rl은 앞의 접근이 뒤로 새는 것을 막고, 둘 다면 순차 일관이다.</li>
+      <li><b>LR</b>은 예약 집합을 등록하고, <b>SC</b>는 예약이 유효할 때만 쓴다. 성공하면 rd = 0, 실패하면 0이 아닌 값. SC는 성패와 무관하게 예약을 없앤다.</li>
+      <li>최대 16개 명령·기본 I 명령만·LR과 SC 사이에 load/store 없음 등 조건을 지킨 <b>제약된 LR/SC 루프</b>만 진행이 보장된다.</li>
+      <li>AMO는 opcode <code>0101111</code>, funct5로 연산을 고른다(swap 00001, add 00000, xor 00100, and 01100, or 01000, min 10000, max 10100, minu 11000, maxu 11100). rd에는 <b>옛 값</b>이 돌아온다.</li>
+      <li>스핀락은 <code>amoswap.w.aq</code>로 얻고 <code>amoswap.w.rl x0, x0</code>로 푼다. <b>Zawrs</b>의 <code>wrs.nto/sto</code>는 LR 예약 위에서 저전력으로 기다리게 한다.</li>
+      <li><b>Zacas</b>는 AMOCAS.W/D/Q(비교-교환), <b>Zabha</b>는 8·16비트 AMO, <b>Zalasr</b>는 단독 load-acquire/store-release를 더한다.</li>
+    </ol>
+  </section>
+
+  <section id="quiz">
+    <h2>확인 퀴즈</h2>
+    <div class="quiz">
+      <div class="quiz-question"><p><code>sc.w t2, t0, (a0)</code> 실행 후 t2가 0이었다. 무슨 뜻인가?</p><div class="options">
+        <button class="option" data-correct>SC가 성공해 t0의 값이 메모리에 쓰였다</button>
+        <button class="option">SC가 실패해 메모리는 그대로다</button>
+        <button class="option">메모리의 옛 값이 0이었다</button>
+        <button class="option">예약이 아직 유효하다</button>
+      </div><div class="quiz-explanation">SC는 성공하면 rd에 0을, 실패하면 0이 아닌 값을 쓴다. 성공·실패와 무관하게 SC 실행 뒤에는 예약이 사라진다.</div></div>
+      <div class="quiz-question"><p>A 확장을 둘로 나눈 하위 확장의 조합으로 옳은 것은?</p><div class="options">
+        <button class="option">Zacas + Zabha</button>
+        <button class="option" data-correct>Zalrsc + Zaamo</button>
+        <button class="option">Zawrs + Zalasr</button>
+        <button class="option">Zicsr + Zifencei</button>
+      </div><div class="quiz-explanation">A v2.1은 LR/SC를 담은 Zalrsc와 AMO를 담은 Zaamo로 이루어진다. 캐시가 없는 작은 코어는 Zaamo만 구현할 수 있다.</div></div>
+      <div class="quiz-question"><p>메모리 값이 <code>0xffffffff</code>, rs2가 1일 때 <code>amomaxu.w</code> 후 메모리에 남는 값은?</p><div class="options">
+        <button class="option">0x00000001</button>
+        <button class="option" data-correct>0xffffffff</button>
+        <button class="option">0x00000000</button>
+        <button class="option">0xfffffffe</button>
+      </div><div class="quiz-explanation">부호 없는 비교에서 0xffffffff는 4294967295로 가장 크다. 부호 있는 amomax.w라면 -1 &lt; 1이므로 1이 남는다.</div></div>
+      <div class="quiz-question"><p>잠금 해제에 <code>amoswap.w.rl x0, x0, (a0)</code>를 쓰는 이유로 가장 알맞은 것은?</p><div class="options">
+        <button class="option">해제를 더 빨리 다른 하트에 보이게 하려고</button>
+        <button class="option" data-correct>임계 구역 안의 접근이 해제보다 늦게 관찰되지 않게 하려고</button>
+        <button class="option">해제 후의 접근이 해제보다 먼저 보이지 않게 하려고</button>
+        <button class="option">옛 값을 확인하려고</button>
+      </div><div class="quiz-explanation">rl(release)은 “앞선 접근이 이 명령 뒤로 새는 것”을 막는다. 임계 구역의 쓰기가 잠금이 풀린 뒤에 보이면 다른 하트가 반쯤 갱신된 데이터를 볼 수 있다.</div></div>
+      <div class="quiz-question"><p>다음 중 <b>제약된 LR/SC 루프</b>의 LR과 SC 사이에 둘 수 있는 명령은?</p><div class="options">
+        <button class="option"><code>lw t1, 0(a1)</code></button>
+        <button class="option"><code>mul t0, t0, t1</code></button>
+        <button class="option" data-correct><code>addi t0, t0, 1</code></button>
+        <button class="option"><code>fence rw, rw</code></button>
+      </div><div class="quiz-explanation">LR과 SC 사이에는 기본 I 명령만 허용되며 load·store, FENCE, SYSTEM, 뒤로 가는 분기 등은 빠진다. mul은 M 확장이라 허용되지 않는다.</div></div>
+      <div class="quiz-question"><p>Zawrs의 <code>wrs.nto</code>를 실행한 하트가 깨어나는 조건이 <b>아닌</b> 것은?</p><div class="options">
+        <button class="option">다른 하트가 예약 집합에 썼다</button>
+        <button class="option">대기 중인 인터럽트가 관찰되었다</button>
+        <button class="option" data-correct>다른 하트가 예약 집합의 값을 읽었다</button>
+        <button class="option">구현이 임의로 정지를 끝냈다</button>
+      </div><div class="quiz-explanation">읽기는 예약을 깨지 않는다. 쓰기로 예약이 무효가 되거나 인터럽트가 대기 중이면 깨어나며, 구현은 아무 이유로든 가끔 깨어날 수 있다.</div></div>
+      <div class="quiz-question"><p>RV32에서 <code>amocas.d</code>가 64비트 기대값을 읽어 오는 곳은?</p><div class="options">
+        <button class="option">rs2 하나</button>
+        <button class="option" data-correct>짝수 번호에서 시작하는 레지스터 쌍 rd, rd+1</button>
+        <button class="option">메모리의 다음 주소</button>
+        <button class="option">fcsr</button>
+      </div><div class="quiz-explanation">RV32의 AMOCAS.D와 RV64의 AMOCAS.Q는 기대값(rd, rd+1)과 새 값(rs2, rs2+1)을 레지스터 쌍으로 다루며, 첫 레지스터는 짝수여야 한다.</div></div>
+    </div>
+  </section>
+
+  <section id="references">
+    <h2>더 읽을거리</h2>
+    <ul class="references">
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/a-st-ext.html" target="_blank" rel="noopener">"A" Extension for Atomic Instructions, Version 2.1</a> (Unprivileged ISA v20260120)</li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/zawrs.html" target="_blank" rel="noopener">"Zawrs" Extension for Wait-on-Reservation-Set instructions, Version 1.01</a></li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/zacas.html" target="_blank" rel="noopener">"Zacas" Extension for Atomic Compare-and-Swap (CAS) Instructions, Version 1.0.0</a></li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/zabha.html" target="_blank" rel="noopener">"Zabha" Extension for Byte and Halfword Atomic Memory Operations, Version 1.0</a></li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/zalasr.html" target="_blank" rel="noopener">"Zalasr" Atomic Load-Acquire and Store-Release Instructions, Version 1.0</a></li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/rvwmo.html" target="_blank" rel="noopener">RVWMO Memory Consistency Model</a> — 원자성 공리(Atomicity Axiom)의 정확한 정의 (<a href="memory-model.html">11장</a>)</li>
+      <li>Maged M. Michael, Michael L. Scott, “Simple, Fast, and Practical Non-Blocking and Blocking Concurrent Queue Algorithms” (PODC 1996) — Zacas 규격의 AMOCAS.Q 큐 예제가 따르는 알고리즘</li>
+    </ul>
+  </section>
+</main>
+
+<script>
+/* ---------------------------------------------------------------------------
+   코드 상자: 규격 예제를 구문 강조해서 보여 준다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const Riscv = window.Riscv;
+  const CAS_SOURCE = [
+    "# a0 holds address of memory location",
+    "# a1 holds expected value",
+    "# a2 holds desired value",
+    "# a0 holds return value, 0 if successful, !0 otherwise",
+    "cas:",
+    "    lr.w t0, (a0)        # Load original value.",
+    "    bne t0, a1, fail     # Doesn't match, so fail.",
+    "    sc.w t0, a2, (a0)    # Try to update.",
+    "    bnez t0, cas         # Retry if store-conditional failed.",
+    "    li a0, 0             # Set return to success.",
+    "    jr ra                # Return.",
+    "fail:",
+    "    li a0, 1             # Set return to failure.",
+    "    jr ra                # Return.",
+  ].join("\n");
+  const SPINLOCK_SOURCE = [
+    "    li           t0, 1        # Initialize swap value.",
+    "again:",
+    "    lw           t1, (a0)     # Check if lock is held.",
+    "    bnez         t1, again    # Retry if held.",
+    "    amoswap.w.aq t1, t0, (a0) # Attempt to acquire lock.",
+    "    bnez         t1, again    # Retry if held.",
+    "    # ...",
+    "    # Critical section.",
+    "    # ...",
+    "    amoswap.w.rl x0, x0, (a0) # Release lock by storing 0.",
+  ].join("\n");
+  const TICKET_SOURCE = [
+    "lock:",
+    "    li       t0, 1",
+    "    amoadd.w t1, t0, (a0)       # t1 = 내 번호표 (next_ticket++)",
+    "    addi     t3, a0, 4          # t3 = &now_serving",
+    "wait:",
+    "    lw       t2, 0(t3)          # 지금 부르는 번호",
+    "    bne      t2, t1, wait       # 내 차례가 아니면 다시 확인",
+    "    fence    r, rw              # acquire: 임계 구역을 이 뒤에 묶는다",
+    "    # ... 임계 구역 ...",
+    "unlock:",
+    "    addi     t3, a0, 4",
+    "    li       t0, 1",
+    "    amoadd.w.rl x0, t0, (t3)    # now_serving++ (release)",
+  ].join("\n");
+  document.getElementById("cas-source").innerHTML = Riscv.highlightAssembly(CAS_SOURCE);
+  document.getElementById("spinlock-source").innerHTML = Riscv.highlightAssembly(SPINLOCK_SOURCE);
+  document.getElementById("ticket-source").innerHTML = Riscv.highlightAssembly(TICKET_SOURCE);
+})();
+
+/* ---------------------------------------------------------------------------
+   두 하트 경쟁 시뮬레이터
+   - 각 방법(plain/amo/lrsc)의 프로그램을 "명령 객체" 배열로 정의하고,
+     사용자가 고른 하트만 한 명령씩 실행한다.
+   - 다른 하트가 counter 에 쓰면(일반 store, AMO, 성공한 SC) 내 예약은 깨진다.
+     규격의 "다른 하트의 store 가 LR 과 SC 사이에 관찰되면 SC 는 반드시 실패" 규칙이다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const HART_COUNT = 2;
+  const EXPECTED_FINAL_VALUE = 2;
+  const SC_FAILURE_CODE = 1;
+  const TRIAL_COUNT = 10000;
+  const STEP_LIMIT_PER_TRIAL = 400;
+  const ALTERNATE_STEP_MILLISECONDS = 650;
+  const LOG_LINE_LIMIT = 40;
+
+  // 다른 하트의 예약을 깨면서 counter 에 쓴다
+  function writeCounter(machineState, writerIndex, value) {
+    machineState.counter = value | 0;
+    machineState.harts.forEach((hart, hartIndex) => {
+      if (hartIndex !== writerIndex) hart.hasReservation = false;
+    });
+  }
+
+  const PROGRAMS = {
+    plain: [
+      { text: "lw   t0, 0(a0)", execute(machineState, hartIndex) {
+        const hart = machineState.harts[hartIndex];
+        hart.registers.t0 = machineState.counter;
+        return "t0 ← 메모리 counter = " + hart.registers.t0;
+      } },
+      { text: "addi t0, t0, 1", execute(machineState, hartIndex) {
+        const hart = machineState.harts[hartIndex];
+        hart.registers.t0 = (hart.registers.t0 + 1) | 0;
+        return "t0 = " + hart.registers.t0 + " (아직 레지스터 안에만 있다)";
+      } },
+      { text: "sw   t0, 0(a0)", execute(machineState, hartIndex) {
+        const hart = machineState.harts[hartIndex];
+        writeCounter(machineState, hartIndex, hart.registers.t0);
+        return "메모리 counter ← " + hart.registers.t0;
+      } },
+    ],
+    amo: [
+      { text: "li   t1, 1", execute(machineState, hartIndex) {
+        machineState.harts[hartIndex].registers.t1 = 1;
+        return "t1 = 1";
+      } },
+      { text: "amoadd.w t0, t1, (a0)", execute(machineState, hartIndex) {
+        const hart = machineState.harts[hartIndex];
+        const oldValue = machineState.counter;
+        writeCounter(machineState, hartIndex, oldValue + hart.registers.t1);
+        hart.registers.t0 = oldValue;
+        return "원자적으로 읽고 더해 씀: counter " + oldValue + " → " + machineState.counter + ", t0 ← 옛 값 " + oldValue;
+      } },
+    ],
+    lrsc: [
+      { text: "retry: lr.w t0, (a0)", execute(machineState, hartIndex) {
+        const hart = machineState.harts[hartIndex];
+        hart.registers.t0 = machineState.counter;
+        hart.hasReservation = true;
+        return "t0 ← " + hart.registers.t0 + ", counter 에 예약 등록";
+      } },
+      { text: "       addi t0, t0, 1", execute(machineState, hartIndex) {
+        const hart = machineState.harts[hartIndex];
+        hart.registers.t0 = (hart.registers.t0 + 1) | 0;
+        return "t0 = " + hart.registers.t0;
+      } },
+      { text: "       sc.w t2, t0, (a0)", execute(machineState, hartIndex) {
+        const hart = machineState.harts[hartIndex];
+        let message;
+        if (hart.hasReservation) {
+          writeCounter(machineState, hartIndex, hart.registers.t0);
+          hart.registers.t2 = 0;
+          message = "예약 유효 → <b>성공</b>: counter ← " + hart.registers.t0 + ", t2 = 0";
+        } else {
+          hart.registers.t2 = SC_FAILURE_CODE;
+          machineState.scFailureCount += 1;
+          message = "예약이 깨져 있음 → <b>실패</b>: 메모리는 그대로, t2 = " + SC_FAILURE_CODE;
+        }
+        // 성공이든 실패든 SC 를 실행하면 이 하트의 예약은 사라진다
+        hart.hasReservation = false;
+        return message;
+      } },
+      { text: "       bnez t2, retry", execute(machineState, hartIndex) {
+        const hart = machineState.harts[hartIndex];
+        if (hart.registers.t2 !== 0) {
+          hart.programCounter = -1; // 아래에서 1을 더해 0번(retry)으로 돌아간다
+          return "t2 ≠ 0 → retry 로 돌아가 다시 시도";
+        }
+        return "t2 = 0 → 루프 탈출";
+      } },
+    ],
+  };
+
+  function createMachineState() {
+    const harts = [];
+    for (let hartIndex = 0; hartIndex < HART_COUNT; hartIndex += 1) {
+      harts.push({ programCounter: 0, registers: { t0: 0, t1: 0, t2: 0 }, hasReservation: false });
+    }
+    return { counter: 0, harts, scFailureCount: 0 };
+  }
+
+  function isHartDone(machineState, mode, hartIndex) {
+    return machineState.harts[hartIndex].programCounter >= PROGRAMS[mode].length;
+  }
+
+  function stepHart(machineState, mode, hartIndex) {
+    const hart = machineState.harts[hartIndex];
+    const instruction = PROGRAMS[mode][hart.programCounter];
+    const message = instruction.execute(machineState, hartIndex);
+    hart.programCounter += 1;
+    return { instruction, message };
+  }
+
+  // 무작위 순서로 끝까지 돌린 최종 counter 를 돌려준다 (시각화 없이 통계용)
+  function runRandomTrial(mode) {
+    const machineState = createMachineState();
+    for (let stepCount = 0; stepCount < STEP_LIMIT_PER_TRIAL; stepCount += 1) {
+      const runnable = [];
+      for (let hartIndex = 0; hartIndex < HART_COUNT; hartIndex += 1) {
+        if (!isHartDone(machineState, mode, hartIndex)) runnable.push(hartIndex);
+      }
+      if (runnable.length === 0) break;
+      const chosen = runnable[Math.floor(Math.random() * runnable.length)];
+      stepHart(machineState, mode, chosen);
+    }
+    return machineState.counter;
+  }
+
+  /* ---------- 화면 ---------- */
+  const memoryValue = document.getElementById("race-memory-value");
+  const memoryNote = document.getElementById("race-memory-note");
+  const description = document.getElementById("race-description");
+  const logBox = document.getElementById("race-log");
+  const finalReadout = document.getElementById("race-final");
+  const failureReadout = document.getElementById("race-sc-failures");
+  const trialReadout = document.getElementById("race-trial-result");
+  const hartPanels = [document.getElementById("race-hart-0"), document.getElementById("race-hart-1")];
+  const HART_COLORS = ["var(--accent)", "var(--violet)"];
+
+  let mode = "plain";
+  let machineState = createMachineState();
+  let logLines = [];
+  let alternateTimer = null;
+  let nextAlternateHart = 0;
+
+  hartPanels.forEach((panel, hartIndex) => {
+    panel.innerHTML =
+      '<h4><span style="color:' + HART_COLORS[hartIndex] + '">하트 ' + hartIndex + '</span><span class="pill" data-role="reservation">예약 없음</span></h4>' +
+      '<div class="listing" data-role="listing"></div>' +
+      '<div class="registers" data-role="registers"></div>' +
+      '<button class="button primary" data-role="step">하트 ' + hartIndex + " 한 단계</button>";
+    panel.querySelector('[data-role="step"]').addEventListener("click", () => {
+      stopAlternate();
+      performStep(hartIndex);
+    });
+  });
+
+  function performStep(hartIndex) {
+    if (isHartDone(machineState, mode, hartIndex)) return;
+    const result = stepHart(machineState, mode, hartIndex);
+    const line = "하트 " + hartIndex + " │ " + result.instruction.text.trim().padEnd(24, " ") + " │ " + result.message.replace(/<[^>]+>/g, "");
+    logLines.push(line);
+    if (logLines.length > LOG_LINE_LIMIT) logLines.shift();
+    description.innerHTML = "<b>하트 " + hartIndex + "</b>: <code>" + result.instruction.text.trim() + "</code> — " + result.message;
+    render();
+  }
+
+  function render() {
+    const program = PROGRAMS[mode];
+    hartPanels.forEach((panel, hartIndex) => {
+      const hart = machineState.harts[hartIndex];
+      const isDone = isHartDone(machineState, mode, hartIndex);
+      panel.querySelector('[data-role="listing"]').innerHTML = program.map((instruction, index) =>
+        '<div class="row' + (index === hart.programCounter ? " current" : "") + '">' + instruction.text + "</div>").join("") +
+        '<div class="row' + (isDone ? " current" : "") + '">' + (isDone ? "✓ 완료" : "&nbsp;") + "</div>";
+      const reservationPill = panel.querySelector('[data-role="reservation"]');
+      reservationPill.textContent = hart.hasReservation ? "예약 유효" : "예약 없음";
+      reservationPill.className = "pill" + (hart.hasReservation ? " gold" : "");
+      reservationPill.hidden = mode !== "lrsc";
+      const SHOWN_REGISTERS_BY_MODE = { plain: ["t0"], amo: ["t0", "t1"], lrsc: ["t0", "t2"] };
+      const shownRegisters = SHOWN_REGISTERS_BY_MODE[mode];
+      panel.querySelector('[data-role="registers"]').innerHTML = shownRegisters.map((name) =>
+        '<div class="cell"><div class="cell-name"><span>' + name + '</span></div><div class="cell-value">' + hart.registers[name] + "</div></div>").join("");
+      panel.querySelector('[data-role="step"]').disabled = isDone;
+    });
+    memoryValue.textContent = machineState.counter;
+    const isAllDone = machineState.harts.every((hart, hartIndex) => isHartDone(machineState, mode, hartIndex));
+    const isLost = isAllDone && machineState.counter !== EXPECTED_FINAL_VALUE;
+    memoryValue.classList.toggle("lost", isLost);
+    if (isAllDone) {
+      memoryNote.textContent = isLost ? "갱신 하나를 잃었다!" : "기대값 2와 같다 ✓";
+      finalReadout.textContent = machineState.counter + (isLost ? " ✕" : " ✓");
+    } else {
+      memoryNote.textContent = "기대값: 2";
+      finalReadout.textContent = "—";
+    }
+    failureReadout.textContent = machineState.scFailureCount;
+    logBox.textContent = logLines.length ? logLines.join("\n") : "(아직 실행한 명령이 없다)";
+    logBox.scrollTop = logBox.scrollHeight;
+  }
+
+  function reset() {
+    stopAlternate();
+    machineState = createMachineState();
+    logLines = [];
+    nextAlternateHart = 0;
+    description.innerHTML = "방법을 고르고 각 하트의 <b>한 단계</b> 버튼을 원하는 순서로 눌러 보자.";
+    render();
+  }
+
+  // 하트 0, 1 을 번갈아 한 단계씩 실행한다. 끝난 하트는 건너뛴다.
+  function alternateStep() {
+    const isAllDone = machineState.harts.every((hart, hartIndex) => isHartDone(machineState, mode, hartIndex));
+    if (isAllDone) { stopAlternate(); return; }
+    let hartIndex = nextAlternateHart;
+    if (isHartDone(machineState, mode, hartIndex)) hartIndex = 1 - hartIndex;
+    performStep(hartIndex);
+    nextAlternateHart = 1 - hartIndex;
+  }
+  function stopAlternate() {
+    if (alternateTimer) clearInterval(alternateTimer);
+    alternateTimer = null;
+    document.getElementById("race-alternate").textContent = "번갈아 끝까지";
+  }
+  document.getElementById("race-alternate").addEventListener("click", () => {
+    if (alternateTimer) { stopAlternate(); return; }
+    const isAllDone = machineState.harts.every((hart, hartIndex) => isHartDone(machineState, mode, hartIndex));
+    if (isAllDone) reset();
+    alternateStep();
+    alternateTimer = setInterval(alternateStep, ALTERNATE_STEP_MILLISECONDS);
+    document.getElementById("race-alternate").textContent = "멈춤";
+  });
+  document.getElementById("race-reset").addEventListener("click", reset);
+  document.getElementById("race-trials").addEventListener("click", () => {
+    let lostCount = 0;
+    for (let trialIndex = 0; trialIndex < TRIAL_COUNT; trialIndex += 1) {
+      if (runRandomTrial(mode) !== EXPECTED_FINAL_VALUE) lostCount += 1;
+    }
+    const percent = (lostCount / TRIAL_COUNT) * 100;
+    trialReadout.textContent = percent.toFixed(1) + "% (" + lostCount + "/" + TRIAL_COUNT + ")";
+  });
+  book.segmented("race-mode", (value) => {
+    mode = value;
+    trialReadout.textContent = "—";
+    reset();
+  });
+})();
+
+/* ---------------------------------------------------------------------------
+   AMO 놀이터: 32비트 값으로 각 AMO 의 결과와 인코딩을 계산한다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const AMO_OPCODE = 0b0101111;
+  const WORD_WIDTH_FUNCT3 = 0b010;
+  const DESTINATION_REGISTER = 10; // a0
+  const SOURCE_REGISTER = 11; // a1
+  const ADDRESS_REGISTER = 12; // a2
+  const FUNCT5_SHIFT = 27;
+  const ACQUIRE_SHIFT = 26;
+  const RELEASE_SHIFT = 25;
+  const RS2_SHIFT = 20;
+  const RS1_SHIFT = 15;
+  const FUNCT3_SHIFT = 12;
+  const RD_SHIFT = 7;
+
+  const OPERATIONS = {
+    swap: { funct5: 0b00001, describe: "새 값 = rs2", compute: (memoryValue, sourceValue) => sourceValue },
+    add: { funct5: 0b00000, describe: "새 값 = mem + rs2 (2^32 로 감싸짐)", compute: (memoryValue, sourceValue) => (memoryValue + sourceValue) | 0 },
+    and: { funct5: 0b01100, describe: "새 값 = mem AND rs2", compute: (memoryValue, sourceValue) => memoryValue & sourceValue },
+    or: { funct5: 0b01000, describe: "새 값 = mem OR rs2", compute: (memoryValue, sourceValue) => memoryValue | sourceValue },
+    xor: { funct5: 0b00100, describe: "새 값 = mem XOR rs2", compute: (memoryValue, sourceValue) => memoryValue ^ sourceValue },
+    min: { funct5: 0b10000, describe: "새 값 = 부호 있는 최솟값", compute: (memoryValue, sourceValue) => Math.min(memoryValue | 0, sourceValue | 0) },
+    max: { funct5: 0b10100, describe: "새 값 = 부호 있는 최댓값", compute: (memoryValue, sourceValue) => Math.max(memoryValue | 0, sourceValue | 0) },
+    minu: { funct5: 0b11000, describe: "새 값 = 부호 없는 최솟값", compute: (memoryValue, sourceValue) => (Math.min(memoryValue >>> 0, sourceValue >>> 0)) | 0 },
+    maxu: { funct5: 0b11100, describe: "새 값 = 부호 없는 최댓값", compute: (memoryValue, sourceValue) => (Math.max(memoryValue >>> 0, sourceValue >>> 0)) | 0 },
+  };
+
+  const memoryInput = document.getElementById("amo-memory-input");
+  const sourceInput = document.getElementById("amo-source-input");
+  const acquireBox = document.getElementById("amo-acquire");
+  const releaseBox = document.getElementById("amo-release");
+  let operationName = "swap";
+
+  // "0x..." 16진수, "-5" 같은 10진수를 32비트 정수로 바꾼다. 해석할 수 없으면 null.
+  function parseWord(text) {
+    const trimmed = String(text).trim().toLowerCase();
+    if (/^-?0x[0-9a-f]+$/.test(trimmed)) {
+      const isNegative = trimmed.startsWith("-");
+      const magnitude = BigInt(trimmed.replace("-", ""));
+      const value = isNegative ? -magnitude : magnitude;
+      return Number(BigInt.asIntN(32, value));
+    }
+    if (/^-?\d+$/.test(trimmed)) return Number(BigInt.asIntN(32, BigInt(trimmed)));
+    return null;
+  }
+  const hex = (value) => book.toHex(value >>> 0, 32);
+  const binaryGroups = (value) => book.toBinary(value >>> 0, 32, 8);
+
+  function render() {
+    const memoryValue = parseWord(memoryInput.value);
+    const sourceValue = parseWord(sourceInput.value);
+    memoryInput.style.outline = memoryValue === null ? "2px solid var(--bad)" : "";
+    sourceInput.style.outline = sourceValue === null ? "2px solid var(--bad)" : "";
+    if (memoryValue === null || sourceValue === null) return;
+    const operation = OPERATIONS[operationName];
+    const newValue = operation.compute(memoryValue, sourceValue) | 0;
+    const isAcquire = acquireBox.checked;
+    const isRelease = releaseBox.checked;
+    let suffix = "";
+    if (isAcquire && isRelease) suffix = ".aqrl";
+    else if (isAcquire) suffix = ".aq";
+    else if (isRelease) suffix = ".rl";
+    const mnemonic = "amo" + operationName + ".w" + suffix;
+
+    document.getElementById("amo-before").innerHTML =
+      "mem[a2] = <b>" + hex(memoryValue) + "</b><br>" + binaryGroups(memoryValue) + "<br>a1 (rs2) = <b>" + hex(sourceValue) + "</b><br>" + binaryGroups(sourceValue);
+    document.getElementById("amo-after").innerHTML =
+      "a0 (rd) ← <span class=\"changed-value\">" + hex(memoryValue) + "</span> (옛 값)<br>mem[a2] ← <span class=\"changed-value\">" + hex(newValue) + "</span><br>" + binaryGroups(newValue);
+
+    const word = ((operation.funct5 << FUNCT5_SHIFT) | ((isAcquire ? 1 : 0) << ACQUIRE_SHIFT) | ((isRelease ? 1 : 0) << RELEASE_SHIFT) |
+      (SOURCE_REGISTER << RS2_SHIFT) | (ADDRESS_REGISTER << RS1_SHIFT) | (WORD_WIDTH_FUNCT3 << FUNCT3_SHIFT) |
+      (DESTINATION_REGISTER << RD_SHIFT) | AMO_OPCODE) >>> 0;
+    document.getElementById("amo-assembly").innerHTML = "<b>" + mnemonic + "</b> a0, a1, (a2)";
+    document.getElementById("amo-word").textContent = hex(word);
+    document.getElementById("amo-fields").innerHTML =
+      "funct5=" + book.toBinary(operation.funct5, 5) + " aq=" + (isAcquire ? 1 : 0) + " rl=" + (isRelease ? 1 : 0) +
+      "<br>rs2=01011 rs1=01100 funct3=010<br>rd=01010 opcode=0101111";
+
+    document.getElementById("amo-result-register").textContent = hex(memoryValue);
+    document.getElementById("amo-result-memory").textContent = hex(newValue);
+    document.getElementById("amo-result-signed").textContent = (memoryValue | 0) + " → " + (newValue | 0);
+    document.getElementById("amo-result-unsigned").textContent = (memoryValue >>> 0) + " → " + (newValue >>> 0);
+
+    let note = operation.describe + ". ";
+    if (operationName === "max" || operationName === "maxu" || operationName === "min" || operationName === "minu") {
+      const signedOrder = (memoryValue | 0) > (sourceValue | 0);
+      const unsignedOrder = (memoryValue >>> 0) > (sourceValue >>> 0);
+      if (signedOrder !== unsignedOrder) note += "이 두 값은 <b>부호 있는 비교와 부호 없는 비교의 크기 순서가 반대</b>다. 짝이 되는 명령(" + (operationName.endsWith("u") ? operationName.slice(0, -1) : operationName + "u") + ")으로 바꾸면 결과가 달라진다.";
+      else note += "이 두 값은 부호 있는/없는 비교의 순서가 같다. 최상위 비트가 다른 값을 넣어 보자.";
+    } else if (operationName === "swap") {
+      note += "잠금에 쓰면: 옛 값이 0이면 잠금 획득 성공, 1이면 이미 누가 가지고 있다.";
+    } else if (operationName === "add") {
+      note += "rd 로 돌아오는 옛 값을 쓰면 fetch-and-add, rd 를 x0 로 두면 순수한 원자 덧셈이 된다.";
+    } else {
+      note += "I/O 레지스터의 특정 비트만 원자적으로 세우거나(or) 지우거나(and) 뒤집는(xor) 데 쓴다.";
+    }
+    if (isAcquire || isRelease) note += " 순서 비트는 결과 값에는 영향이 없고, 다른 하트가 관찰하는 순서만 바꾼다.";
+    document.getElementById("amo-description").innerHTML = note;
+  }
+
+  const operationControl = book.segmented("amo-operation", (value) => { operationName = value; render(); });
+  [memoryInput, sourceInput].forEach((input) => input.addEventListener("input", render));
+  [acquireBox, releaseBox].forEach((box) => box.addEventListener("change", render));
+  document.querySelectorAll("#amo-sim [data-preset]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const parts = button.dataset.preset.split("|");
+      memoryInput.value = parts[0];
+      sourceInput.value = parts[1];
+      operationControl.set(parts[2]);
+    });
+  });
+  render();
+})();
+
+/* ---------------------------------------------------------------------------
+   스핀락 애니메이션: 세 하트가 잠금 하나를 두고 경쟁한다.
+   - 메모리 접근은 하트와 잠금 사이를 오가는 "꾸러미(packet)"로 그린다.
+   - 꾸러미가 메모리에 닿는 순간 원자적으로 읽기/교환/쓰기가 일어난다.
+   - Zawrs 모드: lr.w 로 예약 → 잠금이 1이면 wrs.nto 로 잠든다.
+     잠금 변수에 누가 쓰면(획득 amoswap 이든 해제 amoswap 이든) 예약이 깨져 모두 깨어난다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const HART_COUNT = 3;
+  const PACKET_TRAVEL_SECONDS = 0.32;
+  // 스핀 읽기는 보통 자기 캐시에서 끝나므로 다른 접근보다 빨리 오가게 그린다
+  const SPIN_READ_TRAVEL_SECONDS = 0.16;
+  const SPIN_PAUSE_SECONDS = 0.05;
+  const OUTSIDE_MINIMUM_SECONDS = 0.8;
+  const OUTSIDE_RANGE_SECONDS = 2.2;
+  const CRITICAL_MINIMUM_SECONDS = 1.6;
+  const CRITICAL_RANGE_SECONDS = 0.9;
+  const TOKEN_TRAVEL_SECONDS = 0.4;
+
+  const canvasElement = document.getElementById("spinlock-canvas");
+  const ownerReadout = document.getElementById("spinlock-owner");
+  const acquisitionReadout = document.getElementById("spinlock-acquisitions");
+  const waitingReadReadout = document.getElementById("spinlock-waiting-reads");
+  const ratioReadout = document.getElementById("spinlock-ratio");
+
+  let mode = "spin";
+  let speed = 3;
+  let world = null;
+
+  const randomBetween = (minimum, range) => minimum + Math.random() * range;
+
+  function createWorld() {
+    const harts = [];
+    for (let hartIndex = 0; hartIndex < HART_COUNT; hartIndex += 1) {
+      harts.push({
+        state: "outside",
+        timer: randomBetween(0.2, 1.2) + hartIndex * 0.15,
+        packet: null,
+        label: "바깥 일",
+        sleepPhase: 0,
+      });
+    }
+    return { lockValue: 0, owner: -1, harts, acquisitions: 0, waitingReads: 0, tokenPosition: { hartIndex: -1, progress: 1 }, flash: 0 };
+  }
+
+  function sendPacket(hart, kind) {
+    hart.packet = { kind, progress: 0, isReturning: false, result: null };
+  }
+
+  // 잠금 변수에 쓰기가 일어나면 Zawrs 로 잠든 하트의 예약이 깨져 깨어난다
+  function wakeSleepers(writerIndex) {
+    world.harts.forEach((hart, hartIndex) => {
+      if (hartIndex !== writerIndex && hart.state === "sleeping") {
+        hart.state = "waiting";
+        hart.label = "깨어남 → lr.w 다시";
+        sendPacket(hart, "lr");
+      }
+    });
+  }
+
+  // 꾸러미가 메모리에 닿았을 때 원자적으로 일어나는 일
+  function arriveAtMemory(hart, hartIndex) {
+    const packet = hart.packet;
+    world.flash = 1;
+    if (packet.kind === "read" || packet.kind === "lr") {
+      packet.result = world.lockValue;
+      world.waitingReads += 1;
+    } else if (packet.kind === "swap") {
+      packet.result = world.lockValue;
+      world.lockValue = 1;
+      wakeSleepers(hartIndex);
+    } else if (packet.kind === "release") {
+      world.lockValue = 0;
+      world.owner = -1;
+      world.tokenPosition = { hartIndex, progress: 1, isReturning: true };
+      wakeSleepers(hartIndex);
+    }
+  }
+
+  // 꾸러미가 하트로 돌아왔을 때의 판단
+  function arriveAtHart(hart, hartIndex) {
+    const packet = hart.packet;
+    hart.packet = null;
+    if (packet.kind === "read") {
+      if (packet.result === 0) { hart.label = "풀렸다! amoswap.w.aq"; sendPacket(hart, "swap"); }
+      else { hart.label = "lw → 1, 다시 확인"; hart.state = "pausing"; hart.timer = SPIN_PAUSE_SECONDS; }
+    } else if (packet.kind === "lr") {
+      if (packet.result === 0) { hart.label = "풀렸다! amoswap.w.aq"; sendPacket(hart, "swap"); }
+      else { hart.label = "wrs.nto 로 잠듦"; hart.state = "sleeping"; }
+    } else if (packet.kind === "swap") {
+      if (packet.result === 0) {
+        hart.state = "critical";
+        hart.timer = randomBetween(CRITICAL_MINIMUM_SECONDS, CRITICAL_RANGE_SECONDS);
+        hart.label = "임계 구역";
+        world.owner = hartIndex;
+        world.acquisitions += 1;
+        world.tokenPosition = { hartIndex, progress: 0, isReturning: false };
+      } else if (mode === "spin") {
+        hart.label = "옛 값 1 → 실패, 다시 돌기"; hart.state = "pausing"; hart.timer = SPIN_PAUSE_SECONDS;
+      } else {
+        hart.label = "옛 값 1 → lr.w 다시"; sendPacket(hart, "lr");
+      }
+    } else if (packet.kind === "release") {
+      hart.state = "outside";
+      hart.timer = randomBetween(OUTSIDE_MINIMUM_SECONDS, OUTSIDE_RANGE_SECONDS);
+      hart.label = "바깥 일";
+    }
+  }
+
+  function update(deltaSeconds) {
+    const scaledDelta = deltaSeconds * speed / 3;
+    world.flash = Math.max(0, world.flash - scaledDelta * 3);
+    if (world.tokenPosition.progress < 1) world.tokenPosition.progress = Math.min(1, world.tokenPosition.progress + scaledDelta / TOKEN_TRAVEL_SECONDS);
+    world.harts.forEach((hart, hartIndex) => {
+      hart.sleepPhase += scaledDelta;
+      if (hart.packet) {
+        const travelSeconds = hart.packet.kind === "read" ? SPIN_READ_TRAVEL_SECONDS : PACKET_TRAVEL_SECONDS;
+        hart.packet.progress += scaledDelta / travelSeconds;
+        if (hart.packet.progress >= 1) {
+          if (!hart.packet.isReturning) {
+            arriveAtMemory(hart, hartIndex);
+            hart.packet.isReturning = true;
+            hart.packet.progress = 0;
+          } else {
+            arriveAtHart(hart, hartIndex);
+          }
+        }
+        return;
+      }
+      if (hart.state === "outside" || hart.state === "pausing" || hart.state === "critical") {
+        hart.timer -= scaledDelta;
+        if (hart.timer > 0) return;
+        if (hart.state === "critical") {
+          hart.label = "amoswap.w.rl 로 해제";
+          hart.state = "releasing";
+          sendPacket(hart, "release");
+        } else {
+          hart.state = "waiting";
+          if (mode === "spin") { hart.label = "lw 로 확인"; sendPacket(hart, "read"); }
+          else { hart.label = "lr.w 로 확인 + 예약"; sendPacket(hart, "lr"); }
+        }
+      }
+    });
+    canvas.redraw();
+  }
+
+  const PACKET_COLORS = { read: "accent", lr: "teal", swap: "gold", release: "ok" };
+  const LABEL_FONT_SIZE = 12.5;
+  const MINIMUM_LABEL_FONT_SIZE = 8;
+  const LABEL_PADDING = 10;
+
+  // 좁은 화면에서도 상태 글자가 하트 상자 밖으로 넘치지 않도록 글자 크기를 줄인다
+  function fitFontSize(context, text, maximumWidth, startSize, colors) {
+    let size = startSize;
+    while (size > MINIMUM_LABEL_FONT_SIZE) {
+      context.font = "400 " + size + "px " + colors.font;
+      if (context.measureText(text).width <= maximumWidth) break;
+      size -= 0.5;
+    }
+    return size;
+  }
+  const PACKET_TAGS = { read: "lw", lr: "lr", swap: "swap", release: "rl" };
+
+  function draw(context, width, height, colors) {
+    if (!world) return;
+    const lockWidth = Math.min(200, width * 0.36);
+    const lockHeight = 62;
+    const lockX = width / 2 - lockWidth / 2;
+    const lockY = 22;
+    const hartWidth = Math.min(190, (width - 40) / 3 - 10);
+    const hartHeight = 74;
+    const hartY = height - hartHeight - 40;
+    const hartCenters = [];
+    for (let hartIndex = 0; hartIndex < HART_COUNT; hartIndex += 1) hartCenters.push(width * (hartIndex * 2 + 1) / (HART_COUNT * 2));
+    const isNarrow = width < 520;
+
+    // 경로선
+    hartCenters.forEach((centerX) => {
+      context.save();
+      context.strokeStyle = colors.border;
+      context.setLineDash([4, 5]);
+      context.lineWidth = 1.5;
+      context.beginPath();
+      context.moveTo(centerX, hartY);
+      context.lineTo(width / 2, lockY + lockHeight);
+      context.stroke();
+      context.restore();
+    });
+
+    // 잠금 변수
+    context.save();
+    book.roundedRectangle(context, lockX, lockY, lockWidth, lockHeight, 12);
+    context.fillStyle = world.lockValue ? colors.goldSoft : colors.surface;
+    context.fill();
+    context.lineWidth = 1.5 + world.flash * 2.5;
+    context.strokeStyle = world.lockValue ? colors.gold : colors.border;
+    context.stroke();
+    context.restore();
+    book.drawText(context, "lock (메모리)", width / 2, lockY + 18, { size: 12, color: colors.dim, align: "center" });
+    book.drawText(context, "= " + world.lockValue, width / 2, lockY + 42, { size: 20, bold: true, mono: true, color: world.lockValue ? colors.gold : colors.text, align: "center" });
+
+    // 하트들
+    world.harts.forEach((hart, hartIndex) => {
+      const centerX = hartCenters[hartIndex];
+      const boxX = centerX - hartWidth / 2;
+      const isSleeping = hart.state === "sleeping";
+      const isCritical = hart.state === "critical" || hart.state === "releasing";
+      context.save();
+      context.globalAlpha = isSleeping ? 0.45 : 1;
+      book.roundedRectangle(context, boxX, hartY, hartWidth, hartHeight, 12);
+      context.fillStyle = isCritical ? colors.okSoft : (hart.state === "outside" ? colors.surface : colors.accentSoft);
+      context.fill();
+      context.lineWidth = isCritical ? 2.5 : 1.2;
+      context.strokeStyle = isCritical ? colors.ok : colors.border;
+      context.stroke();
+      context.restore();
+      book.drawText(context, "하트 " + hartIndex, centerX, hartY + 20, { size: 14, bold: true, color: colors.text, align: "center" });
+      const labelSize = fitFontSize(context, hart.label, hartWidth - LABEL_PADDING, LABEL_FONT_SIZE, colors);
+      book.drawText(context, hart.label, centerX, hartY + 46, { size: labelSize, color: isCritical ? colors.ok : colors.dim, align: "center" });
+      if (isSleeping) {
+        const bob = Math.sin(hart.sleepPhase * 3) * 3;
+        book.drawText(context, "z z z", centerX + hartWidth / 2 - 22, hartY - 10 + bob, { size: 13, bold: true, color: colors.teal, align: "center" });
+      }
+      // 꾸러미
+      if (hart.packet) {
+        const fraction = book.easeInOut(Math.min(1, hart.packet.progress));
+        const startX = centerX;
+        const startY = hartY;
+        const endX = width / 2;
+        const endY = lockY + lockHeight;
+        const travel = hart.packet.isReturning ? 1 - fraction : fraction;
+        const packetX = book.linearInterpolate(startX, endX, travel);
+        const packetY = book.linearInterpolate(startY, endY, travel);
+        context.beginPath();
+        context.arc(packetX, packetY, 7, 0, Math.PI * 2);
+        context.fillStyle = colors[PACKET_COLORS[hart.packet.kind]];
+        context.fill();
+        let tagText = PACKET_TAGS[hart.packet.kind];
+        if (hart.packet.isReturning && hart.packet.result !== null) tagText = String(hart.packet.result);
+        if (!isNarrow) book.drawText(context, tagText, packetX + 11, packetY, { size: 11, mono: true, bold: true, color: colors.dim });
+      }
+    });
+
+    // 잠금 토큰: 소유자에게 날아가고, 해제되면 돌아온다
+    const token = world.tokenPosition;
+    if (token.hartIndex >= 0) {
+      const fraction = book.easeInOut(token.progress);
+      const hartX = hartCenters[token.hartIndex];
+      const hartTokenY = hartY + hartHeight + 18;
+      const lockTokenX = lockX + lockWidth + 16;
+      const lockTokenY = lockY + lockHeight / 2;
+      let tokenX;
+      let tokenY;
+      if (token.isReturning) {
+        tokenX = book.linearInterpolate(hartX, lockTokenX, fraction);
+        tokenY = book.linearInterpolate(hartTokenY, lockTokenY, fraction);
+      } else {
+        tokenX = book.linearInterpolate(lockTokenX, hartX, fraction);
+        tokenY = book.linearInterpolate(lockTokenY, hartTokenY, fraction);
+      }
+      context.save();
+      book.roundedRectangle(context, tokenX - 24, tokenY - 10, 48, 20, 6);
+      context.fillStyle = colors.gold;
+      context.fill();
+      context.restore();
+      book.drawText(context, "LOCK", tokenX, tokenY + 1, { size: 11, bold: true, mono: true, color: colors.background, align: "center" });
+    }
+
+    // 범례
+    if (!isNarrow) {
+      const legend = mode === "spin"
+        ? [["lw 대기 읽기", colors.accent], ["amoswap.w.aq", colors.gold], ["amoswap.w.rl (해제)", colors.ok]]
+        : [["lr.w (예약)", colors.teal], ["amoswap.w.aq", colors.gold], ["amoswap.w.rl (해제)", colors.ok]];
+      legend.forEach((entry, index) => {
+        const legendY = 20 + index * 18;
+        context.beginPath();
+        context.arc(16, legendY, 5, 0, Math.PI * 2);
+        context.fillStyle = entry[1];
+        context.fill();
+        book.drawText(context, entry[0], 28, legendY, { size: 11.5, color: colors.dim });
+      });
+    }
+
+    ownerReadout.textContent = world.owner >= 0 ? "하트 " + world.owner : "없음";
+    acquisitionReadout.textContent = world.acquisitions;
+    waitingReadReadout.textContent = world.waitingReads;
+    ratioReadout.textContent = world.acquisitions ? (world.waitingReads / world.acquisitions).toFixed(1) : "—";
+  }
+
+  world = createWorld();
+  const canvas = book.createCanvas(canvasElement, draw, { aspectRatio: 0.52, minimumHeight: 300, maximumHeight: 420 });
+  const loop = book.animationLoop(canvasElement, update);
+  const toggleButton = document.getElementById("spinlock-toggle");
+  toggleButton.textContent = loop.isRunning() ? "멈춤" : "재생";
+  toggleButton.addEventListener("click", () => {
+    if (loop.isRunning()) { loop.stop(); toggleButton.textContent = "재생"; }
+    else { loop.start(); toggleButton.textContent = "멈춤"; }
+  });
+  document.getElementById("spinlock-reset").addEventListener("click", () => { world = createWorld(); canvas.redraw(); });
+  book.segmented("spinlock-mode", (value) => { mode = value; world = createWorld(); canvas.redraw(); });
+  book.range("spinlock-speed", (value) => { speed = value; }, (value) => "×" + (value / 3).toFixed(1));
+})();
+</script>
+</body>
+</html>

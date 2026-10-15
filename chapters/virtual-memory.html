@@ -1,0 +1,2011 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>19 가상 메모리: Sv32부터 Sv57까지 · RISC-V Book</title>
+<meta name="description" content="satp와 페이지 테이블 워크, PTE 비트, 슈퍼페이지, 권한 검사와 페이지 폴트, TLB·ASID·SFENCE.VMA, Svnapot·Svpbmt·Svinval을 그림과 시뮬레이터로 익힌다.">
+<link rel="icon" href="../assets/img/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/style.css">
+<script src="../assets/js/book.js"></script>
+<script src="../assets/js/riscv.js"></script>
+<style>
+  .vm-scroll { overflow-x: auto; }
+  .vm-scroll > svg { display: block; width: 100%; height: auto; min-width: 640px; }
+  .walk-controls select { font: inherit; font-family: var(--font); font-size: 14px; color: var(--text); background: var(--canvas-bg); border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px; max-width: 100%; }
+  .walk-controls .address-input { width: 15em; max-width: 100%; }
+  .checkbox-row { display: flex; flex-wrap: wrap; gap: 14px; padding-top: 6px; }
+  .tlb-sequence { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+  .sequence-chip { font-family: var(--mono); font-size: 12.5px; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface); color: var(--text-dim); white-space: nowrap; }
+  .sequence-chip.switch { background: var(--violet-soft); color: var(--violet); border-color: transparent; font-weight: 700; }
+  .sequence-chip.current { outline: 2px solid var(--accent-2); outline-offset: 1px; }
+  .sequence-chip.hit { background: var(--ok-soft); color: var(--ok); border-color: var(--ok); }
+  .sequence-chip.miss { background: var(--bad-soft); color: var(--bad); border-color: var(--bad); }
+  .tlb-table td, .tlb-table th { font-family: var(--mono); white-space: nowrap; }
+  .tlb-table tr.hit td { background: var(--ok-soft); }
+  .tlb-table tr.inserted td { background: var(--accent-2-soft); }
+  .tlb-table tr.flushed td { background: var(--bad-soft); text-decoration: line-through; color: var(--text-faint); }
+  .tlb-table tr.empty td { color: var(--text-faint); }
+  .tlb-table .owner-a { color: var(--accent); font-weight: 700; }
+  .tlb-table .owner-b { color: var(--teal); font-weight: 700; }
+  .tlb-table .owner-kernel { color: var(--accent-2); font-weight: 700; }
+  .fence-row .button { font-family: var(--mono); font-size: 13px; }
+  .step-description .t-bad { color: var(--bad); }
+  .step-description .t-ok { color: var(--ok); }
+  .bit-table td:first-child, .bit-table td:nth-child(2) { white-space: nowrap; }
+</style>
+</head>
+<body data-chapter="virtual-memory">
+<main class="chapter">
+  <header class="chapter-hero">
+    <div class="eyebrow">Chapter 19</div>
+    <h1>가상 메모리: Sv32부터 Sv57까지</h1>
+    <p class="lead">프로그램이 쓰는 주소는 진짜 메모리 칩의 주소가 아니다. 하트는 load·store·명령어 인출을 할 때마다 <strong>가상 주소</strong>를 <strong>물리 주소</strong>로 바꾸는데, 그 변환표가 메모리에 놓인 <strong>페이지 테이블</strong>이다. 이 장에서는 RISC-V 특권 규격이 정한 페이지 기반 가상 메모리 Sv32·Sv39·Sv48·Sv57을 비트 단위로 해부하고, 규격의 변환 알고리즘을 시뮬레이터로 한 단계씩 따라간다.</p>
+    <ul class="objectives">
+      <li>가상 메모리가 주는 격리·요구 페이징·공유를 그림으로 설명한다.</li>
+      <li>satp의 MODE·ASID·PPN 필드와 Sv32/Sv39/Sv48/Sv57의 주소 분할, 정규형 주소 규칙을 읽는다.</li>
+      <li>PTE의 V·R·W·X·U·G·A·D 비트와 N·PBMT 비트의 뜻, 잎과 포인터의 차이를 안다.</li>
+      <li>규격의 주소 변환 알고리즘을 따라가며 물리 주소나 페이지 폴트를 직접 계산한다.</li>
+      <li>슈퍼페이지·Svnapot, SUM·MXR, Svade·Svadu가 변환 결과를 어떻게 바꾸는지 안다.</li>
+      <li>TLB와 ASID, SFENCE.VMA의 rs1/rs2 조합, Svinval·Svvptc·Svpbmt의 역할을 이해한다.</li>
+    </ul>
+    <div class="spec-meta">
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/priv/supervisor.html" target="_blank" rel="noopener">Supervisor-Level ISA</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/priv/supervisor.html#satp" target="_blank" rel="noopener">satp</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/priv/supervisor.html#sv39" target="_blank" rel="noopener">Sv39</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/priv/supervisor.html#sfence.vma" target="_blank" rel="noopener">SFENCE.VMA</a>
+    </div>
+  </header>
+
+  <!-- ============================================================ -->
+  <section id="why">
+    <h2>왜 가상 메모리인가</h2>
+    <p>운영체제 위에서 도는 프로그램은 저마다 “0번지부터 시작하는 넓은 메모리를 혼자 쓴다”고 믿는다. 실제로는 수십 개의 프로세스가 한 개의 DRAM을 나눠 쓰고 있다. 이 착각을 만들어 주는 장치가 <span class="term">가상 메모리</span><span class="english">(virtual memory)</span>다. 하트가 내놓는 모든 주소는 <span class="term">가상 주소</span><span class="english">(VA)</span>이고, 하드웨어가 이를 <span class="term">물리 주소</span><span class="english">(PA)</span>로 바꿔서 메모리에 접근한다.</p>
+    <p>변환은 바이트 단위가 아니라 <span class="term">페이지</span><span class="english">(page)</span> 단위로 한다. RISC-V의 기본 페이지는 <b>4 KiB</b>다. 가상 주소 공간을 4 KiB 조각(페이지)으로, 물리 메모리를 같은 크기의 조각(<span class="term">프레임</span><span class="english">(frame)</span>)으로 자르고, “가상 페이지 몇 번은 물리 프레임 몇 번”이라는 대응표를 프로세스마다 하나씩 둔다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 410" role="img" aria-label="두 프로세스의 가상 페이지가 물리 프레임과 디스크에 대응되는 모습">
+        <defs>
+          <marker id="why-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--text-faint)"/></marker>
+          <path id="why-path-a-code" d="M200 78 C 270 78, 275 152, 345 152"/>
+          <path id="why-path-a-data" d="M200 122 C 270 122, 275 272, 345 272"/>
+          <path id="why-path-a-heap" d="M200 166 C 270 166, 275 72, 345 72"/>
+          <path id="why-path-a-library" d="M200 210 C 270 210, 275 192, 345 192"/>
+          <path id="why-path-a-stack" d="M200 298 C 270 298, 275 372, 345 372"/>
+          <path id="why-path-b-code" d="M660 78 C 590 78, 585 232, 515 232"/>
+          <path id="why-path-b-data" d="M660 122 C 590 122, 585 112, 515 112"/>
+          <path id="why-path-b-heap" d="M660 166 C 590 166, 585 312, 515 312"/>
+          <path id="why-path-b-library" d="M660 210 C 590 210, 585 192, 515 192"/>
+          <path id="why-path-b-stack" d="M660 298 C 590 298, 585 372, 515 372"/>
+        </defs>
+        <text x="115" y="34" text-anchor="middle" class="t-accent">프로세스 A (ASID 1)</text>
+        <text x="430" y="34" text-anchor="middle" class="t t-bold">물리 메모리 (DRAM)</text>
+        <text x="745" y="34" text-anchor="middle" class="t-teal" style="font-size:14px">프로세스 B (ASID 2)</text>
+        <!-- 프로세스 A 가상 페이지 -->
+        <g>
+          <rect x="30" y="60" width="170" height="36" rx="8" class="f-accent-soft"/><text x="115" y="83" text-anchor="middle" class="t">코드</text>
+          <rect x="30" y="104" width="170" height="36" rx="8" class="f-accent-soft"/><text x="115" y="127" text-anchor="middle" class="t">데이터</text>
+          <rect x="30" y="148" width="170" height="36" rx="8" class="f-accent-soft"/><text x="115" y="171" text-anchor="middle" class="t">힙</text>
+          <rect x="30" y="192" width="170" height="36" rx="8" class="f-gold-soft"/><text x="115" y="215" text-anchor="middle" class="t">공유 라이브러리</text>
+          <rect x="30" y="236" width="170" height="36" rx="8" fill="none" stroke="var(--border)" stroke-dasharray="5 4"/><text x="115" y="259" text-anchor="middle" class="t-faint">매핑 없음 (V=0)</text>
+          <rect x="30" y="280" width="170" height="36" rx="8" class="f-accent-soft" stroke-dasharray="5 4"/><text x="115" y="303" text-anchor="middle" class="t">스택 (아직 디스크)</text>
+        </g>
+        <!-- 프로세스 B 가상 페이지 -->
+        <g>
+          <rect x="660" y="60" width="170" height="36" rx="8" class="f-teal-soft"/><text x="745" y="83" text-anchor="middle" class="t">코드</text>
+          <rect x="660" y="104" width="170" height="36" rx="8" class="f-teal-soft"/><text x="745" y="127" text-anchor="middle" class="t">데이터</text>
+          <rect x="660" y="148" width="170" height="36" rx="8" class="f-teal-soft"/><text x="745" y="171" text-anchor="middle" class="t">힙</text>
+          <rect x="660" y="192" width="170" height="36" rx="8" class="f-gold-soft"/><text x="745" y="215" text-anchor="middle" class="t">공유 라이브러리</text>
+          <rect x="660" y="236" width="170" height="36" rx="8" fill="none" stroke="var(--border)" stroke-dasharray="5 4"/><text x="745" y="259" text-anchor="middle" class="t-faint">매핑 없음 (V=0)</text>
+          <rect x="660" y="280" width="170" height="36" rx="8" class="f-teal-soft" stroke-dasharray="5 4"/><text x="745" y="303" text-anchor="middle" class="t">스택 (아직 디스크)</text>
+        </g>
+        <!-- 물리 프레임 -->
+        <g>
+          <rect x="345" y="56" width="170" height="32" rx="6" class="f-accent-soft"/><text x="430" y="77" text-anchor="middle" class="t-dim">프레임 0 · A 힙</text>
+          <rect x="345" y="96" width="170" height="32" rx="6" class="f-teal-soft"/><text x="430" y="117" text-anchor="middle" class="t-dim">프레임 1 · B 데이터</text>
+          <rect x="345" y="136" width="170" height="32" rx="6" class="f-accent-soft"/><text x="430" y="157" text-anchor="middle" class="t-dim">프레임 2 · A 코드</text>
+          <rect x="345" y="176" width="170" height="32" rx="6" class="f-gold-soft"/><text x="430" y="197" text-anchor="middle" class="t-dim">프레임 3 · 공유 코드</text>
+          <rect x="345" y="216" width="170" height="32" rx="6" class="f-teal-soft"/><text x="430" y="237" text-anchor="middle" class="t-dim">프레임 4 · B 코드</text>
+          <rect x="345" y="256" width="170" height="32" rx="6" class="f-accent-soft"/><text x="430" y="277" text-anchor="middle" class="t-dim">프레임 5 · A 데이터</text>
+          <rect x="345" y="296" width="170" height="32" rx="6" class="f-teal-soft"/><text x="430" y="317" text-anchor="middle" class="t-dim">프레임 6 · B 힙</text>
+          <rect x="345" y="350" width="170" height="44" rx="10" class="f-surface"/><text x="430" y="371" text-anchor="middle" class="t t-bold">디스크 (스왑)</text><text x="430" y="387" text-anchor="middle" class="t-faint">폴트가 나면 불러온다</text>
+        </g>
+        <!-- 대응선 -->
+        <use href="#why-path-a-code" class="s-accent flow-dash"/>
+        <use href="#why-path-a-data" class="s-accent flow-dash"/>
+        <use href="#why-path-a-heap" class="s-accent flow-dash"/>
+        <use href="#why-path-a-library" class="s-gold flow-dash"/>
+        <use href="#why-path-a-stack" class="s-bad s-dashed"/>
+        <use href="#why-path-b-code" class="s-line flow-dash" style="stroke: var(--teal)"/>
+        <use href="#why-path-b-data" class="s-line flow-dash" style="stroke: var(--teal)"/>
+        <use href="#why-path-b-heap" class="s-line flow-dash" style="stroke: var(--teal)"/>
+        <use href="#why-path-b-library" class="s-gold flow-dash"/>
+        <use href="#why-path-b-stack" class="s-bad s-dashed"/>
+        <circle r="5" fill="var(--accent-2)"><animateMotion dur="2.6s" begin="-0.4s" repeatCount="indefinite"><mpath href="#why-path-a-code"/></animateMotion></circle>
+        <circle r="5" fill="var(--accent-2)"><animateMotion dur="2.6s" begin="-1.3s" repeatCount="indefinite"><mpath href="#why-path-a-library"/></animateMotion></circle>
+        <circle r="5" fill="var(--accent-2)"><animateMotion dur="2.6s" begin="-0.9s" repeatCount="indefinite"><mpath href="#why-path-b-library"/></animateMotion></circle>
+        <circle r="5" fill="var(--accent-2)"><animateMotion dur="2.6s" begin="-2.0s" repeatCount="indefinite"><mpath href="#why-path-b-code"/></animateMotion></circle>
+      </svg></div>
+      <figcaption><b>그림 19-1.</b> 두 프로세스가 같은 가상 주소를 써도 서로 다른 물리 프레임으로 간다(격리). 공유 라이브러리는 두 프로세스의 페이지가 같은 프레임 3을 가리킨다(공유). 스택처럼 아직 메모리에 없는 페이지는 접근할 때 페이지 폴트가 나고, 운영체제가 디스크에서 불러온 뒤 매핑을 채운다(요구 페이징).</figcaption>
+    </figure>
+
+    <div class="table-wrap"><table>
+      <thead><tr><th>얻는 것</th><th>어떻게</th><th>예</th></tr></thead>
+      <tbody>
+        <tr><td><b>격리</b></td><td>프로세스마다 다른 페이지 테이블. 남의 프레임은 아예 표에 없다.</td><td>버그 난 프로그램이 커널이나 다른 프로그램을 덮어쓰지 못한다</td></tr>
+        <tr><td><b>요구 페이징</b></td><td>V=0인 항목에 접근하면 페이지 폴트 → OS가 그때 프레임을 채운다</td><td>실행 파일을 다 읽지 않고 시작, 스왑, 메모리 초과 할당</td></tr>
+        <tr><td><b>공유</b></td><td>여러 표가 같은 프레임을 가리킨다</td><td>공유 라이브러리, 공유 메모리, fork 뒤 copy-on-write</td></tr>
+        <tr><td><b>보호</b></td><td>페이지마다 읽기·쓰기·실행·사용자 권한 비트</td><td>코드 영역 쓰기 금지, 데이터 영역 실행 금지(W^X)</td></tr>
+        <tr><td><b>연속된 착각</b></td><td>흩어진 프레임을 연속된 가상 주소로 보여 준다</td><td>큰 배열을 할당할 때 물리적으로 붙은 메모리가 필요 없다</td></tr>
+      </tbody>
+    </table></div>
+    <div class="callout history"><strong>4 KiB를 고른 이유</strong><p>규격의 해설은 “오랜 숙고 끝에 RV32와 RV64 모두 관례적인 4 KiB 페이지로 정했다”고 적는다. 큰 페이지는 TLB 한 칸이 덮는 범위를 넓히지만 내부 단편화로 메모리를 낭비한다. 기존 운영체제와 장치 드라이버를 옮기기 쉽게 4 KiB를 기본으로 두고, 큰 페이지가 필요할 때는 <b>슈퍼페이지</b>(이 장 뒤쪽)로 해결한다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="satp">
+    <h2>satp: 변환을 켜는 스위치</h2>
+    <p>가상 메모리를 켜고 끄는 것은 S 모드 CSR 하나, <code>satp</code><span class="english">(Supervisor Address Translation and Protection)</span>, CSR 주소 <code>0x180</code>다. 이 레지스터에는 세 가지가 들어 있다. 어떤 변환 방식을 쓸지(<b>MODE</b>), 지금 주소 공간의 이름표(<b>ASID</b>), 그리고 루트 페이지 테이블의 물리 주소를 4 KiB로 나눈 값(<b>PPN</b>)이다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 236" role="img" aria-label="RV32와 RV64의 satp 비트 배치">
+        <text x="20" y="66" class="t t-bold">SXLEN=32</text><text x="20" y="84" class="t-faint">RV32</text><rect x="130" y="44" width="100" height="48" class="f-gold-soft"/><text x="180" y="73" text-anchor="middle" class="t t-bold" style="font-size:13px">MODE</text><text x="180" y="38" text-anchor="middle" class="t-faint" font-family="var(--mono)" style="font-size:11px">31</text><text x="180" y="107" text-anchor="middle" class="t-dim" style="font-size:11.5px">1</text><rect x="230" y="44" width="220" height="48" class="f-violet-soft"/><text x="340" y="73" text-anchor="middle" class="t t-bold" style="font-size:13px">ASID</text><text x="233" y="38" text-anchor="start" class="t-faint" style="font-size:11px">30</text><text x="447" y="38" text-anchor="end" class="t-faint" style="font-size:11px">22</text><text x="340" y="107" text-anchor="middle" class="t-dim" style="font-size:11.5px">9</text><rect x="450" y="44" width="380" height="48" class="f-accent-soft"/><text x="640" y="65" text-anchor="middle" class="t t-bold" style="font-size:13px">PPN</text><text x="640" y="81" text-anchor="middle" class="t-faint" style="font-size:11px">루트 페이지 테이블의 물리 페이지 번호</text><text x="453" y="38" text-anchor="start" class="t-faint" style="font-size:11px">21</text><text x="827" y="38" text-anchor="end" class="t-faint" style="font-size:11px">0</text><text x="640" y="107" text-anchor="middle" class="t-dim" style="font-size:11.5px">22</text><text x="20" y="176" class="t t-bold">SXLEN=64</text><text x="20" y="194" class="t-faint">RV64</text><rect x="130" y="154" width="100" height="48" class="f-gold-soft"/><text x="180" y="183" text-anchor="middle" class="t t-bold" style="font-size:13px">MODE</text><text x="133" y="148" text-anchor="start" class="t-faint" style="font-size:11px">63</text><text x="227" y="148" text-anchor="end" class="t-faint" style="font-size:11px">60</text><text x="180" y="217" text-anchor="middle" class="t-dim" style="font-size:11.5px">4</text><rect x="230" y="154" width="220" height="48" class="f-violet-soft"/><text x="340" y="183" text-anchor="middle" class="t t-bold" style="font-size:13px">ASID</text><text x="233" y="148" text-anchor="start" class="t-faint" style="font-size:11px">59</text><text x="447" y="148" text-anchor="end" class="t-faint" style="font-size:11px">44</text><text x="340" y="217" text-anchor="middle" class="t-dim" style="font-size:11.5px">16</text><rect x="450" y="154" width="380" height="48" class="f-accent-soft"/><text x="640" y="175" text-anchor="middle" class="t t-bold" style="font-size:13px">PPN</text><text x="640" y="191" text-anchor="middle" class="t-faint" style="font-size:11px">루트 페이지 테이블의 물리 페이지 번호</text><text x="453" y="148" text-anchor="start" class="t-faint" style="font-size:11px">43</text><text x="827" y="148" text-anchor="end" class="t-faint" style="font-size:11px">0</text><text x="640" y="217" text-anchor="middle" class="t-dim" style="font-size:11.5px">44</text>
+      </svg></div>
+      <figcaption><b>그림 19-2.</b> satp의 비트 배치. 아래 숫자는 필드 폭(비트)이다. 세 필드 모두 WARL이라 아무 값이나 쓸 수 있지만 구현이 지원하는 값만 남는다. PPN에 주소가 아니라 “페이지 번호”를 넣기 때문에 RV32도 22비트 PPN으로 34비트(16 GiB) 물리 주소 공간을 가리킬 수 있다.</figcaption>
+    </figure>
+
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>SXLEN</th><th class="number">MODE 값</th><th>이름</th><th>뜻</th></tr></thead>
+      <tbody>
+        <tr><td>32</td><td class="number">0</td><td>Bare</td><td>변환·보호 없음 (VA = PA)</td></tr>
+        <tr><td>32</td><td class="number">1</td><td>Sv32</td><td>32비트 가상 주소, 2단계 페이지 테이블</td></tr>
+        <tr><td>64</td><td class="number">0</td><td>Bare</td><td>변환·보호 없음</td></tr>
+        <tr><td>64</td><td class="number">1–7</td><td>—</td><td>표준용 예약</td></tr>
+        <tr><td>64</td><td class="number">8</td><td>Sv39</td><td>39비트 가상 주소, 3단계</td></tr>
+        <tr><td>64</td><td class="number">9</td><td>Sv48</td><td>48비트 가상 주소, 4단계</td></tr>
+        <tr><td>64</td><td class="number">10</td><td>Sv57</td><td>57비트 가상 주소, 5단계</td></tr>
+        <tr><td>64</td><td class="number">11</td><td>Sv64</td><td>예약 (앞으로 정의할 64비트 방식)</td></tr>
+        <tr><td>64</td><td class="number">12–13</td><td>—</td><td>표준용 예약</td></tr>
+        <tr><td>64</td><td class="number">14–15</td><td>—</td><td>사용자 정의(custom)용</td></tr>
+      </tbody>
+    </table></div>
+    <p>satp에는 소프트웨어가 알아 두면 편리한 성질이 몇 가지 있다.</p>
+    <ul>
+      <li><b>지원하지 않는 MODE를 쓰면 쓰기 전체가 무시된다.</b> 어느 필드도 바뀌지 않는다. 그래서 커널은 Sv57을 써 보고 다시 읽어서, 값이 남아 있으면 그 모드를 지원한다고 판단할 수 있다.</li>
+      <li><b>ASID 비트 수(ASIDLEN)는 구현마다 다르고 0일 수도 있다.</b> ASID 필드에 모두 1을 쓰고 다시 읽어 보면 몇 비트가 구현되었는지 알 수 있다. 최대값(ASIDMAX)은 Sv32에서 9, Sv39·Sv48·Sv57에서 16이다.</li>
+      <li><b>satp는 실효 특권 모드가 S나 U일 때만 “활성”이다.</b> M 모드의 접근은 변환되지 않는다(단, <code>mstatus.MPRV=1</code>이면 M 모드의 load/store가 MPP 모드의 권한으로 변환된다).</li>
+      <li><b>satp를 써도 TLB가 비워지지 않는다.</b> 페이지 테이블을 고쳤거나 ASID를 재사용한다면 <code>sfence.vma</code>가 따로 필요하다. 반대로 MODE를 Bare↔다른 모드로 바꾸거나 ASID를 바꾸는 것 자체는 즉시 효력이 있다.</li>
+    </ul>
+    <div class="callout deep"><strong>ASID와 PPN을 한 레지스터에 둔 이유</strong><p>문맥 전환 때 ASID와 루트 테이블을 따로따로 바꾸면, 그 사이의 짧은 순간에 “새 ASID + 옛 테이블”이나 “옛 ASID + 새 테이블” 조합으로 변환이 일어나 남의 주소 공간 항목이 TLB에 섞일 수 있다. 한 CSR에 두면 <code>csrw satp</code> 한 번으로 둘이 원자적으로 바뀐다.</p></div>
+    <div class="codebox assembly" data-title="context_switch.s — Sv39 주소 공간으로 바꾸기">    # a0 = 새 루트 페이지 테이블의 물리 주소, a1 = 새 ASID
+    srli  t0, a0, 12        # PPN = 물리 주소 / 4096
+    slli  t1, a1, 44        # ASID를 비트 59:44 자리로
+    or    t0, t0, t1
+    li    t1, 8             # MODE = 8 (Sv39)
+    slli  t1, t1, 60        # MODE를 비트 63:60 자리로
+    or    t0, t0, t1
+    csrw  satp, t0          # 세 필드가 한꺼번에 바뀐다</div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="address-format">
+    <h2>가상 주소의 모양: Sv32·Sv39·Sv48·Sv57</h2>
+    <p>4 KiB 페이지에서 주소의 아래 12비트는 페이지 안의 위치, 즉 <span class="term">페이지 오프셋</span><span class="english">(page offset)</span>이고 변환 없이 그대로 물리 주소로 넘어간다. 나머지 위쪽 비트가 <span class="term">가상 페이지 번호</span><span class="english">(VPN)</span>다. VPN을 한 번에 큰 표로 찾지 않고 여러 조각으로 나눠, 조각 하나가 페이지 테이블 한 단계의 색인이 되도록 한다. 이것이 <b>다단계(radix-tree) 페이지 테이블</b>이다.</p>
+    <p>조각의 크기는 “페이지 테이블 하나는 정확히 한 페이지”라는 원칙에서 나온다. Sv39의 PTE는 8바이트이므로 4096 ÷ 8 = <b>512개 = 2<sup>9</sup></b>, 그래서 VPN 조각은 9비트다. Sv32의 PTE는 4바이트라서 한 표에 1024개 = 2<sup>10</sup>, 조각이 10비트다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 362" role="img" aria-label="Sv32, Sv39, Sv48, Sv57 가상 주소와 Sv39 물리 주소의 비트 분할">
+        <text x="12" y="54" class="t t-bold">Sv32</text><text x="12" y="72" class="t-faint">VA 32비트</text><rect x="112" y="34" width="230.6" height="44" class="f-accent-soft"/><text x="227.3" y="61" text-anchor="middle" class="t t-bold" style="font-size:12.5px">VPN[1]</text><text x="115" y="28" text-anchor="start" class="t-faint" style="font-size:11px">31</text><text x="339.6" y="28" text-anchor="end" class="t-faint" style="font-size:11px">22</text><rect x="342.6" y="34" width="230.6" height="44" class="f-teal-soft"/><text x="457.9" y="61" text-anchor="middle" class="t t-bold" style="font-size:12.5px">VPN[0]</text><text x="345.6" y="28" text-anchor="start" class="t-faint" style="font-size:11px">21</text><text x="570.3" y="28" text-anchor="end" class="t-faint" style="font-size:11px">12</text><rect x="573.3" y="34" width="276.8" height="44" class="f-gold-soft"/><text x="711.6" y="61" text-anchor="middle" class="t t-bold" style="font-size:12.5px">page offset</text><text x="576.3" y="28" text-anchor="start" class="t-faint" style="font-size:11px">11</text><text x="847" y="28" text-anchor="end" class="t-faint" style="font-size:11px">0</text><text x="12" y="122" class="t t-bold">Sv39</text><text x="12" y="140" class="t-faint">VA 39비트</text><rect x="112" y="102" width="288.3" height="44" class="f-surface" stroke-dasharray="4 3"/><text x="256.1" y="121" text-anchor="middle" class="t t-bold" style="font-size:12.5px">부호 확장</text><text x="256.1" y="137" text-anchor="middle" class="t-faint" style="font-size:11px">= 비트 38</text><text x="115" y="96" text-anchor="start" class="t-faint" style="font-size:11px">63</text><text x="397.3" y="96" text-anchor="end" class="t-faint" style="font-size:11px">39</text><rect x="400.3" y="102" width="103.8" height="44" class="f-violet-soft"/><text x="452.2" y="129" text-anchor="middle" class="t t-bold" style="font-size:12.5px">VPN[2]</text><text x="403.3" y="96" text-anchor="start" class="t-faint" style="font-size:11px">38</text><text x="501.1" y="96" text-anchor="end" class="t-faint" style="font-size:11px">30</text><rect x="504.1" y="102" width="103.8" height="44" class="f-accent-soft"/><text x="556" y="129" text-anchor="middle" class="t t-bold" style="font-size:12.5px">VPN[1]</text><text x="507.1" y="96" text-anchor="start" class="t-faint" style="font-size:11px">29</text><text x="604.8" y="96" text-anchor="end" class="t-faint" style="font-size:11px">21</text><rect x="607.8" y="102" width="103.8" height="44" class="f-teal-soft"/><text x="659.7" y="129" text-anchor="middle" class="t t-bold" style="font-size:12.5px">VPN[0]</text><text x="610.8" y="96" text-anchor="start" class="t-faint" style="font-size:11px">20</text><text x="708.6" y="96" text-anchor="end" class="t-faint" style="font-size:11px">12</text><rect x="711.6" y="102" width="138.4" height="44" class="f-gold-soft"/><text x="780.8" y="129" text-anchor="middle" class="t t-bold" style="font-size:12.5px">offset</text><text x="714.6" y="96" text-anchor="start" class="t-faint" style="font-size:11px">11</text><text x="847" y="96" text-anchor="end" class="t-faint" style="font-size:11px">0</text><text x="12" y="190" class="t t-bold">Sv48</text><text x="12" y="208" class="t-faint">VA 48비트</text><rect x="112" y="170" width="184.5" height="44" class="f-surface" stroke-dasharray="4 3"/><text x="204.3" y="189" text-anchor="middle" class="t t-bold" style="font-size:12.5px">부호 확장</text><text x="204.3" y="205" text-anchor="middle" class="t-faint" style="font-size:11px">= 비트 47</text><text x="115" y="164" text-anchor="start" class="t-faint" style="font-size:11px">63</text><text x="293.5" y="164" text-anchor="end" class="t-faint" style="font-size:11px">48</text><rect x="296.5" y="170" width="103.8" height="44" class="f-warn-soft"/><text x="348.4" y="197" text-anchor="middle" class="t t-bold" style="font-size:12.5px">VPN[3]</text><text x="299.5" y="164" text-anchor="start" class="t-faint" style="font-size:11px">47</text><text x="397.3" y="164" text-anchor="end" class="t-faint" style="font-size:11px">39</text><rect x="400.3" y="170" width="103.8" height="44" class="f-violet-soft"/><text x="452.2" y="197" text-anchor="middle" class="t t-bold" style="font-size:12.5px">VPN[2]</text><text x="403.3" y="164" text-anchor="start" class="t-faint" style="font-size:11px">38</text><text x="501.1" y="164" text-anchor="end" class="t-faint" style="font-size:11px">30</text><rect x="504.1" y="170" width="103.8" height="44" class="f-accent-soft"/><text x="556" y="197" text-anchor="middle" class="t t-bold" style="font-size:12.5px">VPN[1]</text><text x="507.1" y="164" text-anchor="start" class="t-faint" style="font-size:11px">29</text><text x="604.8" y="164" text-anchor="end" class="t-faint" style="font-size:11px">21</text><rect x="607.8" y="170" width="103.8" height="44" class="f-teal-soft"/><text x="659.7" y="197" text-anchor="middle" class="t t-bold" style="font-size:12.5px">VPN[0]</text><text x="610.8" y="164" text-anchor="start" class="t-faint" style="font-size:11px">20</text><text x="708.6" y="164" text-anchor="end" class="t-faint" style="font-size:11px">12</text><rect x="711.6" y="170" width="138.4" height="44" class="f-gold-soft"/><text x="780.8" y="197" text-anchor="middle" class="t t-bold" style="font-size:12.5px">offset</text><text x="714.6" y="164" text-anchor="start" class="t-faint" style="font-size:11px">11</text><text x="847" y="164" text-anchor="end" class="t-faint" style="font-size:11px">0</text><text x="12" y="258" class="t t-bold">Sv57</text><text x="12" y="276" class="t-faint">VA 57비트</text><rect x="112" y="238" width="80.7" height="44" class="f-surface" stroke-dasharray="4 3"/><text x="152.4" y="257" text-anchor="middle" class="t t-bold" style="font-size:12.5px">부호 확장</text><text x="152.4" y="273" text-anchor="middle" class="t-faint" style="font-size:11px">= 비트 56</text><text x="115" y="232" text-anchor="start" class="t-faint" style="font-size:11px">63</text><text x="189.7" y="232" text-anchor="end" class="t-faint" style="font-size:11px">57</text><rect x="192.7" y="238" width="103.8" height="44" class="f-ok-soft"/><text x="244.6" y="265" text-anchor="middle" class="t t-bold" style="font-size:12.5px">VPN[4]</text><text x="195.7" y="232" text-anchor="start" class="t-faint" style="font-size:11px">56</text><text x="293.5" y="232" text-anchor="end" class="t-faint" style="font-size:11px">48</text><rect x="296.5" y="238" width="103.8" height="44" class="f-warn-soft"/><text x="348.4" y="265" text-anchor="middle" class="t t-bold" style="font-size:12.5px">VPN[3]</text><text x="299.5" y="232" text-anchor="start" class="t-faint" style="font-size:11px">47</text><text x="397.3" y="232" text-anchor="end" class="t-faint" style="font-size:11px">39</text><rect x="400.3" y="238" width="103.8" height="44" class="f-violet-soft"/><text x="452.2" y="265" text-anchor="middle" class="t t-bold" style="font-size:12.5px">VPN[2]</text><text x="403.3" y="232" text-anchor="start" class="t-faint" style="font-size:11px">38</text><text x="501.1" y="232" text-anchor="end" class="t-faint" style="font-size:11px">30</text><rect x="504.1" y="238" width="103.8" height="44" class="f-accent-soft"/><text x="556" y="265" text-anchor="middle" class="t t-bold" style="font-size:12.5px">VPN[1]</text><text x="507.1" y="232" text-anchor="start" class="t-faint" style="font-size:11px">29</text><text x="604.8" y="232" text-anchor="end" class="t-faint" style="font-size:11px">21</text><rect x="607.8" y="238" width="103.8" height="44" class="f-teal-soft"/><text x="659.7" y="265" text-anchor="middle" class="t t-bold" style="font-size:12.5px">VPN[0]</text><text x="610.8" y="232" text-anchor="start" class="t-faint" style="font-size:11px">20</text><text x="708.6" y="232" text-anchor="end" class="t-faint" style="font-size:11px">12</text><rect x="711.6" y="238" width="138.4" height="44" class="f-gold-soft"/><text x="780.8" y="265" text-anchor="middle" class="t t-bold" style="font-size:12.5px">offset</text><text x="714.6" y="232" text-anchor="start" class="t-faint" style="font-size:11px">11</text><text x="847" y="232" text-anchor="end" class="t-faint" style="font-size:11px">0</text><text x="12" y="326" class="t t-bold">Sv39 PA</text><text x="12" y="344" class="t-faint">물리 56비트</text><rect x="112" y="306" width="342.6" height="44" class="f-violet-soft"/><text x="283.3" y="333" text-anchor="middle" class="t t-bold" style="font-size:12.5px">PPN[2]</text><text x="115" y="300" text-anchor="start" class="t-faint" style="font-size:11px">55</text><text x="451.6" y="300" text-anchor="end" class="t-faint" style="font-size:11px">30</text><rect x="454.6" y="306" width="118.6" height="44" class="f-accent-soft"/><text x="513.9" y="333" text-anchor="middle" class="t t-bold" style="font-size:12.5px">PPN[1]</text><text x="457.6" y="300" text-anchor="start" class="t-faint" style="font-size:11px">29</text><text x="570.3" y="300" text-anchor="end" class="t-faint" style="font-size:11px">21</text><rect x="573.3" y="306" width="118.6" height="44" class="f-teal-soft"/><text x="632.6" y="333" text-anchor="middle" class="t t-bold" style="font-size:12.5px">PPN[0]</text><text x="576.3" y="300" text-anchor="start" class="t-faint" style="font-size:11px">20</text><text x="688.9" y="300" text-anchor="end" class="t-faint" style="font-size:11px">12</text><rect x="691.9" y="306" width="158.1" height="44" class="f-gold-soft"/><text x="770.9" y="333" text-anchor="middle" class="t t-bold" style="font-size:12.5px">page offset</text><text x="694.9" y="300" text-anchor="start" class="t-faint" style="font-size:11px">11</text><text x="847" y="300" text-anchor="end" class="t-faint" style="font-size:11px">0</text>
+      </svg></div>
+      <figcaption><b>그림 19-3.</b> 가상 주소의 분할. 64비트 방식(Sv39·Sv48·Sv57)은 VPN 조각이 모두 9비트이고 단계만 하나씩 늘어난다. 위쪽 회색 점선 부분은 쓰지 않는 비트로, 반드시 맨 위 VPN 비트를 복사한 값(부호 확장)이어야 한다. 맨 아래는 Sv39의 물리 주소 56비트(PPN 44비트 + 오프셋 12비트)다.</figcaption>
+    </figure>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>방식</th><th class="number">VA 비트</th><th class="number">단계</th><th>VPN 조각</th><th class="number">PTE</th><th class="number">PA 비트</th><th>지원 페이지 크기</th><th>주소 공간</th></tr></thead>
+      <tbody>
+        <tr><td><b>Sv32</b></td><td class="number">32</td><td class="number">2</td><td>10 + 10</td><td class="number">4 B</td><td class="number">34</td><td>4 KiB, 4 MiB</td><td>4 GiB</td></tr>
+        <tr><td><b>Sv39</b></td><td class="number">39</td><td class="number">3</td><td>9 × 3</td><td class="number">8 B</td><td class="number">56</td><td>4 KiB, 2 MiB, 1 GiB</td><td>512 GiB</td></tr>
+        <tr><td><b>Sv48</b></td><td class="number">48</td><td class="number">4</td><td>9 × 4</td><td class="number">8 B</td><td class="number">56</td><td>+ 512 GiB</td><td>256 TiB</td></tr>
+        <tr><td><b>Sv57</b></td><td class="number">57</td><td class="number">5</td><td>9 × 5</td><td class="number">8 B</td><td class="number">56</td><td>+ 256 TiB</td><td>128 PiB</td></tr>
+      </tbody>
+    </table></div>
+    <h3>정규형 주소와 가운데 “구멍”</h3>
+    <p>RV64의 레지스터는 64비트지만 Sv39가 실제로 쓰는 가상 주소는 39비트뿐이다. 규격은 명령어 인출 주소와 load/store 유효 주소의 <b>비트 63–39가 모두 비트 38과 같아야 하며, 그렇지 않으면 페이지 폴트</b>가 난다고 정한다(Sv48은 63–48이 비트 47과, Sv57은 63–57이 비트 56과 같아야 한다). 이런 주소를 흔히 <span class="term">정규형 주소</span><span class="english">(canonical address)</span>라 부른다.</p>
+    <p>결과적으로 쓸 수 있는 주소는 64비트 공간의 맨 아래 절반 조각과 맨 위 절반 조각이 되고, 그 사이는 거대한 구멍이다. 운영체제는 보통 아래쪽을 사용자 공간, 위쪽(최상위 비트가 1)을 커널 공간으로 쓴다. 최상위 비트 하나만 보고 사용자 주소인지 커널 주소인지 바로 가를 수 있어 편리하다. 규격 해설도 이것이 0 확장이 아니라 “굳어진 관례”를 따른 선택이라고 설명한다.</p>
+    <div class="callout tip"><strong>더 넓은 방식은 좁은 방식을 포함한다</strong><p>Sv48을 구현하면 Sv39도 반드시 구현해야 하고, Sv57을 구현하면 Sv48도 구현해야 한다. 더 넓은 하드웨어는 사실상 공짜로 좁은 방식을 지원할 수 있기 때문이다. 리눅스는 부팅할 때 하드웨어가 지원하는 가장 넓은 방식을 고르고, 커널 인자 <code>no5lvl</code>·<code>no4lvl</code>로 낮출 수 있다.</p></div>
+
+    <div class="sim" id="layout-sim">
+      <div class="sim-head"><span class="sim-tag">EXPLORER</span><h3>가상 주소 형식 탐색기</h3></div>
+      <div class="sim-pad"><div class="vm-scroll"><svg viewBox="0 0 860 290" id="layout-svg" role="img" aria-label="선택한 변환 방식의 주소 분할과 정규형 주소 영역"></svg></div></div>
+      <div class="step-description" id="layout-description"></div>
+      <div class="sim-controls">
+        <div class="control"><span>변환 방식</span><div class="segmented" id="layout-mode"><button data-value="sv32">Sv32</button><button data-value="sv39" class="on">Sv39</button><button data-value="sv48">Sv48</button><button data-value="sv57">Sv57</button></div></div>
+        <label class="control"><span>주소 검사 (16진수)</span><input type="text" id="layout-address" class="address-input" value="0xffffffc000001000" spellcheck="false" autocomplete="off"></label>
+        <div class="control"><span>예시 주소</span><div class="button-row"><button class="button" data-example="0x0000003fffffffff">사용자 끝</button><button class="button" data-example="0x0000004000000000">구멍</button><button class="button" data-example="0xffffffff80000000">커널</button></div></div>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">satp.MODE</span><span class="value" id="layout-readout-mode">8</span></div>
+        <div class="stat"><span class="key">단계 수</span><span class="value" id="layout-readout-levels">3</span></div>
+        <div class="stat"><span class="key">주소 공간</span><span class="value" id="layout-readout-size">512 GiB</span></div>
+        <div class="stat"><span class="key">가장 큰 페이지</span><span class="value" id="layout-readout-page">1 GiB</span></div>
+        <div class="stat"><span class="key">주소 검사</span><span class="value" id="layout-readout-check">—</span></div>
+      </div>
+      <div class="sim-note">방식을 Sv39 → Sv48 → Sv57로 바꾸며 회색 부호 확장 영역이 줄고 VPN 조각이 하나씩 늘어나는 것을 보자. 그다음 <code>0x00007fffffffffff</code>(Sv48 아래쪽 절반의 끝)를 넣고 Sv39와 Sv48에서 판정이 어떻게 달라지는지 확인해 보자. 거꾸로 Sv39에서 정규형인 주소는 Sv48·Sv57에서도 언제나 정규형이다.</div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="pte">
+    <h2>페이지 테이블 항목(PTE)</h2>
+    <p>페이지 테이블의 한 칸이 <span class="term">페이지 테이블 항목</span><span class="english">(PTE)</span>이다. 하위 10비트는 상태와 권한 비트이고, 그 위가 물리 페이지 번호(PPN)다. Sv39·Sv48·Sv57의 PTE는 아래 10비트와 위쪽 10비트(63–54)의 뜻이 모두 같고, 가운데 PPN을 몇 조각으로 나눠 보느냐만 다르다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 290" role="img" aria-label="Sv39와 Sv32의 PTE 비트 배치">
+        <text x="12" y="62" class="t t-bold">Sv39</text><text x="12" y="80" class="t-faint">PTE 64비트</text><rect x="92" y="46" width="30" height="48" class="f-warn-soft"/><text x="107" y="75" text-anchor="middle" class="t t-bold" style="font-size:13px">N</text><text x="107" y="40" text-anchor="middle" class="t-faint" font-family="var(--mono)" style="font-size:11px">63</text><text x="107" y="109" text-anchor="middle" class="t-dim" style="font-size:11.5px">1</text><rect x="122" y="46" width="52" height="48" class="f-warn-soft"/><text x="148" y="75" text-anchor="middle" class="t t-bold" style="font-size:13px">PBMT</text><text x="125" y="40" text-anchor="start" class="t-faint" style="font-size:11px">62</text><text x="171" y="40" text-anchor="end" class="t-faint" style="font-size:11px">61</text><text x="148" y="109" text-anchor="middle" class="t-dim" style="font-size:11.5px">2</text><rect x="174" y="46" width="56" height="48" class="f-surface" stroke-dasharray="4 3"/><text x="202" y="75" text-anchor="middle" class="t t-bold" style="font-size:13px">예약</text><text x="177" y="40" text-anchor="start" class="t-faint" style="font-size:11px">60</text><text x="227" y="40" text-anchor="end" class="t-faint" style="font-size:11px">54</text><text x="202" y="109" text-anchor="middle" class="t-dim" style="font-size:11.5px">7</text><rect x="230" y="46" width="132" height="48" class="f-violet-soft"/><text x="296" y="75" text-anchor="middle" class="t t-bold" style="font-size:13px">PPN[2]</text><text x="233" y="40" text-anchor="start" class="t-faint" style="font-size:11px">53</text><text x="359" y="40" text-anchor="end" class="t-faint" style="font-size:11px">28</text><text x="296" y="109" text-anchor="middle" class="t-dim" style="font-size:11.5px">26</text><rect x="362" y="46" width="76" height="48" class="f-accent-soft"/><text x="400" y="75" text-anchor="middle" class="t t-bold" style="font-size:13px">PPN[1]</text><text x="365" y="40" text-anchor="start" class="t-faint" style="font-size:11px">27</text><text x="435" y="40" text-anchor="end" class="t-faint" style="font-size:11px">19</text><text x="400" y="109" text-anchor="middle" class="t-dim" style="font-size:11.5px">9</text><rect x="438" y="46" width="76" height="48" class="f-teal-soft"/><text x="476" y="75" text-anchor="middle" class="t t-bold" style="font-size:13px">PPN[0]</text><text x="441" y="40" text-anchor="start" class="t-faint" style="font-size:11px">18</text><text x="511" y="40" text-anchor="end" class="t-faint" style="font-size:11px">10</text><text x="476" y="109" text-anchor="middle" class="t-dim" style="font-size:11.5px">9</text><rect x="514" y="46" width="46" height="48" class="f-surface"/><text x="537" y="75" text-anchor="middle" class="t t-bold" style="font-size:13px">RSW</text><text x="517" y="40" text-anchor="start" class="t-faint" style="font-size:11px">9</text><text x="557" y="40" text-anchor="end" class="t-faint" style="font-size:11px">8</text><text x="537" y="109" text-anchor="middle" class="t-dim" style="font-size:11.5px">2</text><rect x="560" y="46" width="36" height="48" class="f-surface"/><text x="578" y="75" text-anchor="middle" class="t t-bold" style="font-size:13px">D</text><text x="578" y="40" text-anchor="middle" class="t-faint" font-family="var(--mono)" style="font-size:11px">7</text><text x="578" y="109" text-anchor="middle" class="t-dim" style="font-size:11.5px">1</text><rect x="596" y="46" width="36" height="48" class="f-surface"/><text x="614" y="75" text-anchor="middle" class="t t-bold" style="font-size:13px">A</text><text x="614" y="40" text-anchor="middle" class="t-faint" font-family="var(--mono)" style="font-size:11px">6</text><text x="614" y="109" text-anchor="middle" class="t-dim" style="font-size:11.5px">1</text><rect x="632" y="46" width="36" height="48" class="f-surface"/><text x="650" y="75" text-anchor="middle" class="t t-bold" style="font-size:13px">G</text><text x="650" y="40" text-anchor="middle" class="t-faint" font-family="var(--mono)" style="font-size:11px">5</text><text x="650" y="109" text-anchor="middle" class="t-dim" style="font-size:11.5px">1</text><rect x="668" y="46" width="36" height="48" class="f-violet-soft"/><text x="686" y="75" text-anchor="middle" class="t t-bold" style="font-size:13px">U</text><text x="686" y="40" text-anchor="middle" class="t-faint" font-family="var(--mono)" style="font-size:11px">4</text><text x="686" y="109" text-anchor="middle" class="t-dim" style="font-size:11.5px">1</text><rect x="704" y="46" width="36" height="48" class="f-accent-soft"/><text x="722" y="75" text-anchor="middle" class="t t-bold" style="font-size:13px">X</text><text x="722" y="40" text-anchor="middle" class="t-faint" font-family="var(--mono)" style="font-size:11px">3</text><text x="722" y="109" text-anchor="middle" class="t-dim" style="font-size:11.5px">1</text><rect x="740" y="46" width="36" height="48" class="f-accent-soft"/><text x="758" y="75" text-anchor="middle" class="t t-bold" style="font-size:13px">W</text><text x="758" y="40" text-anchor="middle" class="t-faint" font-family="var(--mono)" style="font-size:11px">2</text><text x="758" y="109" text-anchor="middle" class="t-dim" style="font-size:11.5px">1</text><rect x="776" y="46" width="36" height="48" class="f-accent-soft"/><text x="794" y="75" text-anchor="middle" class="t t-bold" style="font-size:13px">R</text><text x="794" y="40" text-anchor="middle" class="t-faint" font-family="var(--mono)" style="font-size:11px">1</text><text x="794" y="109" text-anchor="middle" class="t-dim" style="font-size:11.5px">1</text><rect x="812" y="46" width="36" height="48" class="f-ok-soft"/><text x="830" y="75" text-anchor="middle" class="t t-bold" style="font-size:13px">V</text><text x="830" y="40" text-anchor="middle" class="t-faint" font-family="var(--mono)" style="font-size:11px">0</text><text x="830" y="109" text-anchor="middle" class="t-dim" style="font-size:11.5px">1</text><text x="12" y="182" class="t t-bold">Sv32</text><text x="12" y="200" class="t-faint">PTE 32비트</text><rect x="92" y="166" width="230" height="48" class="f-accent-soft"/><text x="207" y="195" text-anchor="middle" class="t t-bold" style="font-size:13px">PPN[1]</text><text x="95" y="160" text-anchor="start" class="t-faint" style="font-size:11px">31</text><text x="319" y="160" text-anchor="end" class="t-faint" style="font-size:11px">20</text><text x="207" y="229" text-anchor="middle" class="t-dim" style="font-size:11.5px">12</text><rect x="322" y="166" width="188" height="48" class="f-teal-soft"/><text x="416" y="195" text-anchor="middle" class="t t-bold" style="font-size:13px">PPN[0]</text><text x="325" y="160" text-anchor="start" class="t-faint" style="font-size:11px">19</text><text x="507" y="160" text-anchor="end" class="t-faint" style="font-size:11px">10</text><text x="416" y="229" text-anchor="middle" class="t-dim" style="font-size:11.5px">10</text><rect x="510" y="166" width="52" height="48" class="f-surface"/><text x="536" y="195" text-anchor="middle" class="t t-bold" style="font-size:13px">RSW</text><text x="513" y="160" text-anchor="start" class="t-faint" style="font-size:11px">9</text><text x="559" y="160" text-anchor="end" class="t-faint" style="font-size:11px">8</text><text x="536" y="229" text-anchor="middle" class="t-dim" style="font-size:11.5px">2</text><rect x="562" y="166" width="36" height="48" class="f-surface"/><text x="580" y="195" text-anchor="middle" class="t t-bold" style="font-size:13px">D</text><text x="580" y="160" text-anchor="middle" class="t-faint" font-family="var(--mono)" style="font-size:11px">7</text><text x="580" y="229" text-anchor="middle" class="t-dim" style="font-size:11.5px">1</text><rect x="598" y="166" width="36" height="48" class="f-surface"/><text x="616" y="195" text-anchor="middle" class="t t-bold" style="font-size:13px">A</text><text x="616" y="160" text-anchor="middle" class="t-faint" font-family="var(--mono)" style="font-size:11px">6</text><text x="616" y="229" text-anchor="middle" class="t-dim" style="font-size:11.5px">1</text><rect x="634" y="166" width="36" height="48" class="f-surface"/><text x="652" y="195" text-anchor="middle" class="t t-bold" style="font-size:13px">G</text><text x="652" y="160" text-anchor="middle" class="t-faint" font-family="var(--mono)" style="font-size:11px">5</text><text x="652" y="229" text-anchor="middle" class="t-dim" style="font-size:11.5px">1</text><rect x="670" y="166" width="36" height="48" class="f-violet-soft"/><text x="688" y="195" text-anchor="middle" class="t t-bold" style="font-size:13px">U</text><text x="688" y="160" text-anchor="middle" class="t-faint" font-family="var(--mono)" style="font-size:11px">4</text><text x="688" y="229" text-anchor="middle" class="t-dim" style="font-size:11.5px">1</text><rect x="706" y="166" width="36" height="48" class="f-accent-soft"/><text x="724" y="195" text-anchor="middle" class="t t-bold" style="font-size:13px">X</text><text x="724" y="160" text-anchor="middle" class="t-faint" font-family="var(--mono)" style="font-size:11px">3</text><text x="724" y="229" text-anchor="middle" class="t-dim" style="font-size:11.5px">1</text><rect x="742" y="166" width="36" height="48" class="f-accent-soft"/><text x="760" y="195" text-anchor="middle" class="t t-bold" style="font-size:13px">W</text><text x="760" y="160" text-anchor="middle" class="t-faint" font-family="var(--mono)" style="font-size:11px">2</text><text x="760" y="229" text-anchor="middle" class="t-dim" style="font-size:11.5px">1</text><rect x="778" y="166" width="36" height="48" class="f-accent-soft"/><text x="796" y="195" text-anchor="middle" class="t t-bold" style="font-size:13px">R</text><text x="796" y="160" text-anchor="middle" class="t-faint" font-family="var(--mono)" style="font-size:11px">1</text><text x="796" y="229" text-anchor="middle" class="t-dim" style="font-size:11.5px">1</text><rect x="814" y="166" width="36" height="48" class="f-ok-soft"/><text x="832" y="195" text-anchor="middle" class="t t-bold" style="font-size:13px">V</text><text x="832" y="160" text-anchor="middle" class="t-faint" font-family="var(--mono)" style="font-size:11px">0</text><text x="832" y="229" text-anchor="middle" class="t-dim" style="font-size:11.5px">1</text>
+        <g transform="translate(0,252)">
+          <rect x="566" y="0" width="18" height="12" rx="3" class="f-ok-soft pulse"/><text x="590" y="11" class="t-faint">유효</text>
+          <rect x="632" y="0" width="18" height="12" rx="3" class="f-accent-soft pulse" style="animation-delay:.4s"/><text x="656" y="11" class="t-faint">권한 R·W·X</text>
+          <rect x="740" y="0" width="18" height="12" rx="3" class="f-violet-soft pulse" style="animation-delay:.8s"/><text x="764" y="11" class="t-faint">사용자 U</text>
+          <rect x="92" y="0" width="18" height="12" rx="3" class="f-warn-soft pulse" style="animation-delay:1.2s"/><text x="116" y="11" class="t-faint">확장용: N(Svnapot) · PBMT(Svpbmt)</text>
+          <rect x="350" y="0" width="18" height="12" rx="3" class="f-surface"/><text x="374" y="11" class="t-faint">소프트웨어용 RSW · 예약</text>
+        </g>
+      </svg></div>
+      <figcaption><b>그림 19-4.</b> Sv39(위)와 Sv32(아래)의 PTE. 아래쪽 8비트 D·A·G·U·X·W·R·V와 소프트웨어용 RSW 2비트는 두 형식이 똑같다. Sv39의 비트 63은 Svnapot의 N, 62–61은 Svpbmt의 PBMT, 60–54는 예약이다. 해당 확장이 없거나 꺼져 있으면 이 비트들은 0이어야 하고, 0이 아니면 페이지 폴트가 난다.</figcaption>
+    </figure>
+    <div class="table-wrap"><table class="compact bit-table">
+      <thead><tr><th>비트</th><th>이름</th><th>뜻</th></tr></thead>
+      <tbody>
+        <tr><td>0</td><td><b>V</b> Valid</td><td>1이면 유효. 0이면 나머지 비트는 하드웨어가 보지 않으므로 OS가 자유롭게 쓴다(예: 스왑 위치 기록).</td></tr>
+        <tr><td>1–3</td><td><b>R W X</b></td><td>읽기·쓰기·실행 권한. 셋 다 0이면 이 PTE는 잎이 아니라 다음 단계 표를 가리키는 <b>포인터</b>다.</td></tr>
+        <tr><td>4</td><td><b>U</b> User</td><td>U 모드가 접근할 수 있는 페이지. S 모드는 SUM=1일 때만 load/store할 수 있고, 실행은 언제나 금지.</td></tr>
+        <tr><td>5</td><td><b>G</b> Global</td><td>모든 주소 공간에 똑같이 있는 매핑(커널 영역 등). TLB가 ASID와 상관없이 공유할 수 있다. 포인터 PTE에 G가 있으면 그 아래 매핑이 모두 전역이다.</td></tr>
+        <tr><td>6</td><td><b>A</b> Accessed</td><td>마지막으로 지운 뒤 읽기·쓰기·인출이 있었음. 페이지 교체 정책의 힌트.</td></tr>
+        <tr><td>7</td><td><b>D</b> Dirty</td><td>마지막으로 지운 뒤 쓰기가 있었음. 내보낼 때 디스크에 다시 써야 하는지 알려 준다.</td></tr>
+        <tr><td>8–9</td><td><b>RSW</b></td><td>감독자 소프트웨어용. 하드웨어는 무시한다.</td></tr>
+        <tr><td>10–53</td><td><b>PPN</b></td><td>잎이면 데이터 페이지의, 포인터면 다음 단계 표의 물리 페이지 번호(44비트).</td></tr>
+        <tr><td>54–60</td><td>예약</td><td>0이어야 한다. Svrsw60t59b 확장이 있으면 60–59는 소프트웨어용이 된다.</td></tr>
+        <tr><td>61–62</td><td><b>PBMT</b></td><td>Svpbmt: 페이지 단위 메모리 유형(PMA·NC·IO). 잎 PTE에서만 의미가 있다.</td></tr>
+        <tr><td>63</td><td><b>N</b></td><td>Svnapot: 연속된 64 KiB 영역의 일부임을 표시.</td></tr>
+      </tbody>
+    </table></div>
+
+    <h3>R·W·X 조합과 잎/포인터</h3>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>X</th><th>W</th><th>R</th><th>뜻</th></tr></thead>
+      <tbody>
+        <tr><td>0</td><td>0</td><td>0</td><td><b>다음 단계 페이지 테이블을 가리키는 포인터</b></td></tr>
+        <tr><td>0</td><td>0</td><td>1</td><td>읽기 전용 페이지</td></tr>
+        <tr><td>0</td><td>1</td><td>0</td><td><span class="pill bad">예약</span> 쓰기만 되는 페이지는 없다</td></tr>
+        <tr><td>0</td><td>1</td><td>1</td><td>읽기·쓰기 페이지</td></tr>
+        <tr><td>1</td><td>0</td><td>0</td><td>실행 전용 페이지</td></tr>
+        <tr><td>1</td><td>0</td><td>1</td><td>읽기·실행 페이지</td></tr>
+        <tr><td>1</td><td>1</td><td>0</td><td><span class="pill bad">예약</span></td></tr>
+        <tr><td>1</td><td>1</td><td>1</td><td>읽기·쓰기·실행 페이지</td></tr>
+      </tbody>
+    </table></div>
+    <div class="callout spec"><strong>규격 원문에서</strong>
+      <blockquote>“The permission bits, R, W, and X, indicate whether the page is readable, writable, and executable, respectively. When all three are zero, the PTE is a pointer to the next level of the page table; otherwise, it is a leaf PTE. Writable pages must also be marked readable; the contrary combinations are reserved for future use.”</blockquote>
+      <p><a href="https://docs.riscv.org/reference/isa/v20260120/priv/supervisor.html#sv32" target="_blank" rel="noopener">Volume II, Sv32: Addressing and Memory Protection</a> — Sv39 이후의 방식도 “비트 9–0은 Sv32와 같은 뜻”이라며 이 정의를 그대로 물려받는다.</p></div>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 240" role="img" aria-label="포인터 PTE와 잎 PTE가 가리키는 대상의 차이">
+        <defs><marker id="leaf-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker></defs>
+        <!-- 포인터 PTE -->
+        <text x="215" y="24" text-anchor="middle" class="t t-bold">포인터 PTE (비잎)</text>
+        <rect x="30" y="40" width="250" height="44" rx="6" class="f-surface"/><text x="155" y="67" text-anchor="middle" class="t-mono">PPN = 0x80401</text>
+        <rect x="280" y="40" width="120" height="44" rx="6" class="f-accent-soft"/><text x="340" y="60" text-anchor="middle" class="t t-bold">X W R</text><text x="340" y="77" text-anchor="middle" class="t-mono">0 0 0</text>
+        <path d="M155 86 V140" class="s-accent flow-dash" marker-end="url(#leaf-arrow)"/>
+        <rect x="40" y="146" width="350" height="64" rx="10" class="f-violet-soft"/>
+        <text x="215" y="172" text-anchor="middle" class="t t-bold">다음 단계 페이지 테이블</text>
+        <text x="215" y="194" text-anchor="middle" class="t-dim">주소 = PPN × 4096 (512개 PTE)</text>
+        <!-- 잎 PTE -->
+        <text x="645" y="24" text-anchor="middle" class="t t-bold">잎 PTE (leaf)</text>
+        <rect x="460" y="40" width="250" height="44" rx="6" class="f-surface"/><text x="585" y="67" text-anchor="middle" class="t-mono">PPN = 0x81001</text>
+        <rect x="710" y="40" width="120" height="44" rx="6" class="f-gold-soft"/><text x="770" y="60" text-anchor="middle" class="t t-bold">X W R</text><text x="770" y="77" text-anchor="middle" class="t-mono">1 0 1</text>
+        <path d="M585 86 V140" class="s-gold flow-dash" marker-end="url(#leaf-arrow)"/>
+        <rect x="470" y="146" width="350" height="64" rx="10" class="f-ok-soft"/>
+        <text x="645" y="172" text-anchor="middle" class="t t-bold">데이터 페이지 (여기서 변환 끝)</text>
+        <text x="645" y="194" text-anchor="middle" class="t-dim">크기는 잎이 나온 단계가 정한다: 4 KiB · 2 MiB · 1 GiB …</text>
+      </svg></div>
+      <figcaption><b>그림 19-5.</b> 같은 PPN 필드라도 R·W·X가 모두 0이면 “다음 표가 있는 곳”, 하나라도 1이면 “데이터가 있는 곳”이다. 포인터 PTE의 D·A·U 비트는 앞으로의 표준 용도로 예약되어 있어 소프트웨어가 0으로 두어야 한다.</figcaption>
+    </figure>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="walk">
+    <h2>페이지 테이블 워크: 규격의 변환 알고리즘</h2>
+    <p>TLB에 답이 없으면 하드웨어(페이지 워커)가 메모리의 페이지 테이블을 직접 따라 내려간다. 이를 <span class="term">페이지 테이블 워크</span><span class="english">(page-table walk)</span>라 한다. Sv39에서는 satp가 가리키는 루트 표에서 VPN[2]로 한 칸을 고르고, 그 칸이 가리키는 표에서 VPN[1]로, 다시 VPN[0]으로 고른다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 400" role="img" aria-label="Sv39 3단계 페이지 테이블 워크">
+        <defs>
+          <marker id="walk-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker>
+          <path id="walk-dot-path" d="M130 128 L168 128 L235 128 L235 160 L300 160 C 330 160, 330 112, 358 112 L425 112 L425 260 L490 260 C 520 260, 520 112, 548 112 L615 112 L615 200 L680 200 C 705 200, 705 112, 728 112 L790 112 L790 297"/>
+        </defs>
+        <!-- 가상 주소 -->
+        <text x="20" y="42" class="t t-bold">VA</text>
+        <rect x="160" y="18" width="150" height="38" class="f-violet-soft"/><text x="235" y="42" text-anchor="middle" class="t t-bold">VPN[2]</text>
+        <rect x="310" y="18" width="150" height="38" class="f-accent-soft"/><text x="385" y="42" text-anchor="middle" class="t t-bold">VPN[1]</text>
+        <rect x="460" y="18" width="150" height="38" class="f-teal-soft"/><text x="535" y="42" text-anchor="middle" class="t t-bold">VPN[0]</text>
+        <rect x="610" y="18" width="180" height="38" class="f-gold-soft"/><text x="700" y="42" text-anchor="middle" class="t t-bold">offset</text>
+        <rect x="60" y="18" width="100" height="38" class="f-surface" stroke-dasharray="4 3"/><text x="110" y="42" text-anchor="middle" class="t-faint">63–39</text>
+        <!-- satp -->
+        <rect x="20" y="100" width="110" height="56" rx="8" class="f-gold-soft"/><text x="75" y="124" text-anchor="middle" class="t t-bold">satp</text><text x="75" y="143" text-anchor="middle" class="t-faint">PPN × 4096</text>
+        <!-- 표 세 개와 데이터 페이지 -->
+        <rect x="170" y="100" width="130" height="250" rx="6" class="f-elev"/>
+        <rect x="360" y="100" width="130" height="250" rx="6" class="f-elev"/>
+        <rect x="550" y="100" width="130" height="250" rx="6" class="f-elev"/>
+        <rect x="730" y="100" width="120" height="250" rx="6" class="f-ok-soft"/>
+        <g class="t-faint" style="font-size:11px">
+          <text x="176" y="114" class="t-faint" style="font-size:11px">[0]</text><text x="176" y="344" class="t-faint" style="font-size:11px">[511]</text>
+          <text x="366" y="114" class="t-faint" style="font-size:11px">[0]</text><text x="366" y="344" class="t-faint" style="font-size:11px">[511]</text>
+          <text x="556" y="114" class="t-faint" style="font-size:11px">[0]</text><text x="556" y="344" class="t-faint" style="font-size:11px">[511]</text>
+        </g>
+        <rect x="172" y="150" width="126" height="20" class="f-violet-soft"/><text x="235" y="164" text-anchor="middle" class="t-dim" style="font-size:11.5px">포인터 PTE</text>
+        <rect x="362" y="250" width="126" height="20" class="f-accent-soft"/><text x="425" y="264" text-anchor="middle" class="t-dim" style="font-size:11.5px">포인터 PTE</text>
+        <rect x="552" y="190" width="126" height="20" class="f-teal-soft"/><text x="615" y="204" text-anchor="middle" class="t-dim" style="font-size:11.5px">잎 PTE</text>
+        <rect x="732" y="290" width="116" height="14" class="f-gold"/>
+        <text x="790" y="140" text-anchor="middle" class="t t-bold">4 KiB 페이지</text>
+        <text x="790" y="322" text-anchor="middle" class="t-faint" style="font-size:11px">찾는 바이트</text>
+        <!-- 색인 선: VPN 조각이 각 표의 몇 번째 칸인지 정한다 -->
+        <path d="M235 56 V148" class="s-line s-dashed"/>
+        <path d="M385 56 L425 248" class="s-line s-dashed"/>
+        <path d="M535 56 L615 188" class="s-line s-dashed"/>
+        <path d="M700 56 L780 288" class="s-line s-dashed"/>
+        <!-- 다음 표를 가리키는 화살표 -->
+        <path d="M130 128 H168" class="s-accent" marker-end="url(#walk-arrow)"/>
+        <path d="M300 160 C 330 160, 330 112, 358 112" class="s-accent flow-dash" marker-end="url(#walk-arrow)"/>
+        <path d="M490 260 C 520 260, 520 112, 548 112" class="s-accent flow-dash" marker-end="url(#walk-arrow)"/>
+        <path d="M680 200 C 705 200, 705 112, 728 112" class="s-gold flow-dash" marker-end="url(#walk-arrow)"/>
+        <text x="235" y="374" text-anchor="middle" class="t-dim">레벨 2 (루트)</text>
+        <text x="425" y="374" text-anchor="middle" class="t-dim">레벨 1</text>
+        <text x="615" y="374" text-anchor="middle" class="t-dim">레벨 0</text>
+        <text x="790" y="374" text-anchor="middle" class="t-dim">데이터</text>
+        <text x="430" y="394" text-anchor="middle" class="t-faint">PTE 주소 = 표의 시작 주소 + VPN[i] × 8</text>
+        <circle r="6" fill="var(--accent-2)"><animateMotion dur="6s" begin="-0.2s" repeatCount="indefinite"><mpath href="#walk-dot-path"/></animateMotion></circle>
+      </svg></div>
+      <figcaption><b>그림 19-6.</b> Sv39 워크. 점선은 VA의 각 조각이 각 표의 몇 번째 칸인지 고르는 색인이고, 실선 화살표는 PTE의 PPN이 다음 표(또는 데이터 페이지)의 위치를 알려 주는 포인터다. 금색 점이 satp에서 출발해 표 세 개를 거쳐 찾는 바이트에 이르는 길을 보여 준다. TLB가 없다면 load 하나에 메모리 접근이 네 번(PTE 셋 + 데이터 하나) 필요하다.</figcaption>
+    </figure>
+
+    <p>규격은 이 과정을 알고리즘으로 정확히 적어 두었다. Sv32를 기준으로 쓰고, Sv39·Sv48·Sv57은 LEVELS와 PTESIZE만 바꾸면 된다(Sv39: LEVELS=3, PTESIZE=8). 아래는 Sv39에 맞춰 옮긴 것이다.</p>
+    <ol>
+      <li><b>a = satp.ppn × 4096</b>, <b>i = 2</b>로 시작한다. (실효 특권 모드가 S나 U여야 한다.)</li>
+      <li><b>pte = 메모리[a + va.vpn[i] × 8]</b>를 읽는다. 이 읽기가 PMA·PMP 검사에 걸리면 원래 접근 종류의 <b>접근 폴트</b>(access fault)다.</li>
+      <li><b>V=0</b>이거나, <b>R=0인데 W=1</b>이거나, 예약 비트·예약 인코딩이 켜져 있으면 <b>페이지 폴트</b>.</li>
+      <li>R=1 또는 X=1이면 잎이므로 5단계로. 아니면 포인터다: <b>i = i − 1</b>. i &lt; 0이면 페이지 폴트. 아니면 <b>a = pte.ppn × 4096</b>으로 놓고 2단계로 돌아간다.</li>
+      <li>잎에 도착했다. <b>i &gt; 0인데 pte.ppn[i−1:0] ≠ 0</b>이면 정렬되지 않은 슈퍼페이지 → 페이지 폴트.</li>
+      <li>현재 특권 모드와 SUM·MXR을 고려해 <b>U 비트</b>가 이 접근을 허락하는지 본다. 아니면 페이지 폴트.</li>
+      <li>그림자 스택(Zicfiss) 규칙상 R·W·X 조합이 허락되지 않으면 접근 폴트.</li>
+      <li><b>R·W·X 비트</b>가 이 접근을 허락하는지 본다. 아니면 페이지 폴트.</li>
+      <li><b>A=0</b>이거나, 쓰기인데 <b>D=0</b>이면: Svade라면 페이지 폴트, 아니면 PTE를 원자적으로 비교·갱신해 A(쓰기면 D도)를 1로 만든다.</li>
+      <li>성공. <b>pa.pgoff = va.pgoff</b>. i &gt; 0이면 슈퍼페이지이므로 <b>pa.ppn[i−1:0] = va.vpn[i−1:0]</b>, 그리고 <b>pa.ppn[2:i] = pte.ppn[2:i]</b>.</li>
+    </ol>
+    <div class="callout warn"><strong>페이지 폴트와 접근 폴트는 다르다</strong><p>“페이지 테이블이 이 접근을 허락하지 않는다”면 <b>페이지 폴트</b>(12·13·15)다. 반면 PTE를 읽으러 간 물리 주소나 최종 물리 주소가 PMP·PMA 검사에 걸리면 <b>접근 폴트</b>(1·5·7)다. 운영체제는 앞의 것만 고칠 수 있다. 뒤의 것은 M 모드가 친 울타리(20장)에 부딪힌 것이다.</p></div>
+
+    <div class="sim" id="walk-sim">
+      <div class="sim-head"><span class="sim-tag">SIMULATOR</span><h3>Sv39 페이지 테이블 워크</h3></div>
+      <div class="sim-view"><canvas id="walk-canvas"></canvas></div>
+      <div class="step-description" id="walk-description"></div>
+      <div class="sim-controls walk-controls">
+        <label class="control"><span>시나리오</span><select id="walk-scenario"></select></label>
+        <label class="control"><span>가상 주소 (16진수)</span><input type="text" id="walk-address" class="address-input" spellcheck="false" autocomplete="off"></label>
+        <div class="control"><span>접근</span><div class="segmented" id="walk-access"><button data-value="read" class="on">읽기 R</button><button data-value="write">쓰기 W</button><button data-value="execute">실행 X</button></div></div>
+        <div class="control"><span>특권 모드</span><div class="segmented" id="walk-privilege"><button data-value="U" class="on">U</button><button data-value="S">S</button></div></div>
+        <div class="control"><span>A/D 갱신</span><div class="segmented" id="walk-update"><button data-value="hardware" class="on">Svadu (하드웨어)</button><button data-value="fault">Svade (폴트)</button></div></div>
+        <div class="control"><span>sstatus</span><div class="checkbox-row"><label class="checkbox"><input type="checkbox" id="walk-sum">SUM</label><label class="checkbox"><input type="checkbox" id="walk-mxr">MXR</label></div></div>
+        <div class="control"><span>실행</span><div class="button-row"><button class="button primary" id="walk-step">한 단계</button><button class="button" id="walk-play">자동 재생</button><button class="button" id="walk-reset">처음으로</button></div></div>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">가상 주소</span><span class="value" id="walk-readout-virtual" style="font-size:12.5px">—</span></div>
+        <div class="stat"><span class="key">결과</span><span class="value" id="walk-readout-result" style="font-size:12.5px">—</span></div>
+        <div class="stat"><span class="key">PTE 읽기</span><span class="value" id="walk-readout-reads">0</span></div>
+        <div class="stat"><span class="key">PTE 쓰기 (A/D)</span><span class="value" id="walk-readout-writes">0</span></div>
+      </div>
+      <div class="sim-note">시나리오를 하나씩 골라 <b>한 단계</b>를 눌러 보자. 2 MiB·1 GiB 시나리오에서는 워크가 레벨 1·2에서 일찍 끝나고 VPN 조각이 오프셋으로 바뀌는 것을, ⑦·⑧에서는 SUM·MXR 상자를 켜고 다시 돌렸을 때 결과가 바뀌는 것을 확인하자. 가상 주소 칸에 직접 주소를 넣어도 된다(이 메모리에는 시나리오에 나온 매핑만 있다).</div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="superpages">
+    <h2>슈퍼페이지와 Svnapot</h2>
+    <p>알고리즘 4단계를 다시 보자. 잎은 꼭 레벨 0에서만 나오는 것이 아니다. <b>어느 단계의 PTE든 잎이 될 수 있다.</b> Sv39에서 레벨 1에서 잎이 나오면 VPN[0]과 오프셋을 합친 21비트가 통째로 오프셋이 되어 2 MiB짜리 <span class="term">메가페이지</span><span class="english">(megapage)</span>가 되고, 레벨 2에서 나오면 30비트 오프셋의 1 GiB <span class="term">기가페이지</span><span class="english">(gigapage)</span>가 된다. Sv48은 512 GiB <b>테라페이지</b>, Sv57은 256 TiB <b>페타페이지</b>까지 지원한다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 300" role="img" aria-label="Sv39에서 페이지 크기에 따라 오프셋이 넓어지는 모습">
+        <text x="150" y="22" class="t-faint">VA 비트 38 ← → 0</text>
+        <!-- 4 KiB -->
+        <text x="12" y="58" class="t t-bold">4 KiB 페이지</text><text x="12" y="76" class="t-faint">레벨 0에서 잎</text>
+        <rect x="150" y="40" width="115" height="40" class="f-violet-soft"/><text x="207" y="65" text-anchor="middle" class="t t-bold" style="font-size:12.5px">VPN[2]</text>
+        <rect x="265" y="40" width="115" height="40" class="f-accent-soft"/><text x="322" y="65" text-anchor="middle" class="t t-bold" style="font-size:12.5px">VPN[1]</text>
+        <rect x="380" y="40" width="115" height="40" class="f-teal-soft"/><text x="437" y="65" text-anchor="middle" class="t t-bold" style="font-size:12.5px">VPN[0]</text>
+        <rect x="495" y="40" width="155" height="40" class="f-gold-soft"/><text x="572" y="65" text-anchor="middle" class="t t-bold" style="font-size:12.5px">offset 12비트</text>
+        <text x="670" y="56" class="t-dim">PTE 읽기 3번</text><text x="670" y="74" class="t-faint">TLB 1칸 = 4 KiB</text>
+        <!-- 2 MiB -->
+        <text x="12" y="128" class="t t-bold">2 MiB 메가페이지</text><text x="12" y="146" class="t-faint">레벨 1에서 잎</text>
+        <rect x="150" y="110" width="115" height="40" class="f-violet-soft"/><text x="207" y="135" text-anchor="middle" class="t t-bold" style="font-size:12.5px">VPN[2]</text>
+        <rect x="265" y="110" width="115" height="40" class="f-accent-soft"/><text x="322" y="135" text-anchor="middle" class="t t-bold" style="font-size:12.5px">VPN[1]</text>
+        <rect x="380" y="110" width="270" height="40" class="f-gold-soft blink-highlight"/><text x="515" y="135" text-anchor="middle" class="t t-bold" style="font-size:12.5px">offset 21비트 (VPN[0] 포함)</text>
+        <text x="670" y="126" class="t-dim">PTE 읽기 2번</text><text x="670" y="144" class="t-faint">TLB 1칸 = 2 MiB</text>
+        <!-- 1 GiB -->
+        <text x="12" y="198" class="t t-bold">1 GiB 기가페이지</text><text x="12" y="216" class="t-faint">레벨 2에서 잎</text>
+        <rect x="150" y="180" width="115" height="40" class="f-violet-soft"/><text x="207" y="205" text-anchor="middle" class="t t-bold" style="font-size:12.5px">VPN[2]</text>
+        <rect x="265" y="180" width="385" height="40" class="f-gold-soft blink-highlight"/><text x="457" y="205" text-anchor="middle" class="t t-bold" style="font-size:12.5px">offset 30비트 (VPN[1]·VPN[0] 포함)</text>
+        <text x="670" y="196" class="t-dim">PTE 읽기 1번</text><text x="670" y="214" class="t-faint">TLB 1칸 = 1 GiB</text>
+        <!-- 정렬 조건 -->
+        <rect x="12" y="242" width="836" height="46" rx="10" class="f-bad-soft"/>
+        <text x="30" y="262" class="t t-bold">정렬 조건</text>
+        <text x="30" y="280" class="t-dim">메가페이지 잎은 pte.ppn[0] = 0, 기가페이지 잎은 pte.ppn[1:0] = 0 이어야 한다. 아니면 “정렬되지 않은 슈퍼페이지” 페이지 폴트.</text>
+      </svg></div>
+      <figcaption><b>그림 19-7.</b> 잎이 위쪽 단계에서 나올수록 페이지가 커지고, 아래쪽 VPN 조각은 변환되지 않는 오프셋이 된다. 슈퍼페이지는 가상 주소와 물리 주소가 모두 자기 크기의 배수에 정렬되어 있어야 한다. 물리 쪽 정렬은 PTE의 아래쪽 PPN 조각이 0인지로 검사한다.</figcaption>
+    </figure>
+    <p>슈퍼페이지의 가장 큰 이득은 <b>TLB 도달 범위</b>다. TLB 한 칸이 4 KiB 대신 2 MiB나 1 GiB를 덮으므로, 커다란 데이터를 다루는 프로그램이나 커널의 물리 메모리 직접 매핑(linear map)에서 TLB 미스가 크게 준다. 워크도 짧아진다. 리눅스의 transparent huge page와 hugetlbfs가 이 기능을 쓴다.</p>
+
+    <h3>Svnapot: 64 KiB 연속 페이지</h3>
+    <p>2 MiB는 너무 크고 4 KiB는 너무 작을 때가 있다. <span class="term">Svnapot</span><span class="english">(NAPOT Translation Contiguity, v1.0)</span>은 레벨 0의 PTE 16개가 64 KiB의 연속된 영역을 함께 매핑한다고 표시하는 방법이다. PTE의 <b>N 비트(63)</b>를 1로 하고, <b>pte.ppn[0]의 아래 4비트를 <code>1000</code></b>으로 둔다. 현재 표준이 정한 크기는 64 KiB(napot_bits = 4) 하나뿐이고, 레벨 0이 아니거나 다른 패턴이면 예약 인코딩이라 페이지 폴트가 난다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 300" role="img" aria-label="Svnapot 64 KiB 영역을 표현하는 16개 PTE와 TLB 한 칸">
+        <defs><marker id="napot-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker></defs>
+        <text x="160" y="24" text-anchor="middle" class="t t-bold">레벨 0 표: 정렬된 16칸</text>
+        <g>
+          <rect x="40" y="40" width="240" height="12" class="f-gold-soft"/><rect x="40" y="52" width="240" height="12" class="f-gold-soft"/><rect x="40" y="64" width="240" height="12" class="f-gold-soft"/><rect x="40" y="76" width="240" height="12" class="f-gold-soft"/>
+          <rect x="40" y="88" width="240" height="12" class="f-gold-soft"/><rect x="40" y="100" width="240" height="12" class="f-gold-soft"/><rect x="40" y="112" width="240" height="12" class="f-gold-soft"/><rect x="40" y="124" width="240" height="12" class="f-gold-soft"/>
+          <rect x="40" y="136" width="240" height="12" class="f-gold-soft"/><rect x="40" y="148" width="240" height="12" class="f-gold-soft"/><rect x="40" y="160" width="240" height="12" class="f-gold-soft"/><rect x="40" y="172" width="240" height="12" class="f-gold-soft"/>
+          <rect x="40" y="184" width="240" height="12" class="f-gold-soft"/><rect x="40" y="196" width="240" height="12" class="f-gold-soft"/><rect x="40" y="208" width="240" height="12" class="f-gold-soft"/><rect x="40" y="220" width="240" height="12" class="f-gold-soft"/>
+        </g>
+        <text x="160" y="252" text-anchor="middle" class="t-dim">16개 모두 N=1, ppn[0] = …x 1000</text>
+        <text x="160" y="270" text-anchor="middle" class="t-faint">(보통 같은 값을 16번 복사해 둔다)</text>
+        <path d="M284 136 H356" class="s-accent flow-dash" marker-end="url(#napot-arrow)"/>
+        <rect x="362" y="96" width="200" height="82" rx="10" class="f-accent-soft"/>
+        <text x="462" y="120" text-anchor="middle" class="t t-bold">TLB 한 칸</text>
+        <text x="462" y="142" text-anchor="middle" class="t-dim">VPN 하위 4비트 무시</text>
+        <text x="462" y="162" text-anchor="middle" class="t-dim">→ 64 KiB를 덮는다</text>
+        <path d="M566 136 H630" class="s-accent flow-dash" marker-end="url(#napot-arrow)"/>
+        <text x="730" y="24" text-anchor="middle" class="t t-bold">물리 메모리 64 KiB</text>
+        <g>
+          <rect x="636" y="40" width="190" height="192" rx="6" class="f-ok-soft"/>
+          <path d="M636 52 H826 M636 64 H826 M636 76 H826 M636 88 H826 M636 100 H826 M636 112 H826 M636 124 H826 M636 136 H826 M636 148 H826 M636 160 H826 M636 172 H826 M636 184 H826 M636 196 H826 M636 208 H826 M636 220 H826" stroke="var(--ok)" stroke-width="0.6" opacity="0.6"/>
+        </g>
+        <text x="731" y="252" text-anchor="middle" class="t-dim">4 KiB × 16, 64 KiB 정렬</text>
+        <text x="731" y="270" text-anchor="middle" class="t-faint">pa.ppn[0][3:0] ← va.vpn[0][3:0]</text>
+      </svg></div>
+      <figcaption><b>그림 19-8.</b> Svnapot. 64 KiB로 정렬된 16개 PTE가 한 연속 영역을 이룬다. 하드웨어는 NAPOT PTE를 읽을 때 ppn[0]의 아래 4비트를 VA의 vpn[0] 아래 4비트로 바꿔 끼운 값을 쓰므로, 16칸 중 어느 칸을 읽어도 같은 결과가 나오고 TLB는 한 칸으로 64 KiB를 기억할 수 있다.</figcaption>
+    </figure>
+    <div class="callout warn"><strong>NAPOT 영역의 A·D 비트</strong><p>구현은 NAPOT 영역을 한 TLB 칸으로 처리하면서 16개 PTE 중 아무것이나 참고할 수 있다. 그래서 A·D 비트가 16개 사이에서 서로 다를 수 있다. 운영체제는 한 페이지가 접근되었는지(또는 수정되었는지) 알려면 <b>16개 별칭을 모두 확인</b>해야 한다. 영역을 바꿀 때는 먼저 16개를 모두 무효로 만들고 SFENCE.VMA를 한 다음 새 값을 쓴다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="protection">
+    <h2>권한 검사와 페이지 폴트</h2>
+    <p>잎을 찾았다고 끝이 아니다. 알고리즘 5–9단계는 이 접근이 허락되는지 차례로 검사한다. 어느 하나라도 통과하지 못하면 <b>원래 접근 종류에 맞는</b> 페이지 폴트가 나고, <code>stval</code>(또는 <code>mtval</code>)에 문제의 가상 주소가 담긴다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 330" role="img" aria-label="잎 PTE를 찾은 뒤의 권한 검사 순서">
+        <defs>
+          <marker id="check-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker>
+          <marker id="check-arrow-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--bad)"/></marker>
+          <path id="check-dot-path" d="M105 64 H750 V196"/>
+        </defs>
+        <rect x="20" y="30" width="170" height="74" rx="10" class="f-surface"/><text x="105" y="56" text-anchor="middle" class="t t-bold">① 정렬 검사</text><text x="105" y="76" text-anchor="middle" class="t-dim">i&gt;0 이면</text><text x="105" y="93" text-anchor="middle" class="t-dim">ppn[i−1:0] = 0 ?</text>
+        <rect x="230" y="30" width="170" height="74" rx="10" class="f-violet-soft"/><text x="315" y="56" text-anchor="middle" class="t t-bold">② U 비트</text><text x="315" y="76" text-anchor="middle" class="t-dim">특권 모드와</text><text x="315" y="93" text-anchor="middle" class="t-dim">SUM을 함께 본다</text>
+        <rect x="440" y="30" width="170" height="74" rx="10" class="f-accent-soft"/><text x="525" y="56" text-anchor="middle" class="t t-bold">③ R·W·X</text><text x="525" y="76" text-anchor="middle" class="t-dim">읽기는 MXR=1이면</text><text x="525" y="93" text-anchor="middle" class="t-dim">X 페이지도 허용</text>
+        <rect x="650" y="30" width="190" height="74" rx="10" class="f-gold-soft"/><text x="745" y="56" text-anchor="middle" class="t t-bold">④ A·D 비트</text><text x="745" y="76" text-anchor="middle" class="t-dim">A=0 또는 (쓰기·D=0)</text><text x="745" y="93" text-anchor="middle" class="t-dim">Svadu 갱신 / Svade 폴트</text>
+        <path d="M190 67 H226" class="s-accent flow-dash" marker-end="url(#check-arrow)"/>
+        <path d="M400 67 H436" class="s-accent flow-dash" marker-end="url(#check-arrow)"/>
+        <path d="M610 67 H646" class="s-accent flow-dash" marker-end="url(#check-arrow)"/>
+        <!-- 실패 경로 -->
+        <path d="M105 104 V188" class="s-bad s-dashed" marker-end="url(#check-arrow-bad)"/>
+        <path d="M315 104 V188" class="s-bad s-dashed" marker-end="url(#check-arrow-bad)"/>
+        <path d="M525 104 V188" class="s-bad s-dashed" marker-end="url(#check-arrow-bad)"/>
+        <path d="M690 104 L600 188" class="s-bad s-dashed" marker-end="url(#check-arrow-bad)"/>
+        <text x="112" y="150" class="t-bad" style="font-size:12px">아니오</text><text x="322" y="150" class="t-bad" style="font-size:12px">거부</text><text x="532" y="150" class="t-bad" style="font-size:12px">거부</text><text x="630" y="138" text-anchor="end" class="t-bad" style="font-size:12px">Svade</text>
+        <path d="M770 104 V188" class="s-ok" marker-end="url(#check-arrow)"/><text x="778" y="150" class="t-ok" style="font-size:12px">통과</text>
+        <rect x="20" y="194" width="600" height="62" rx="10" class="f-bad-soft"/>
+        <text x="320" y="220" text-anchor="middle" class="t t-bold">페이지 폴트 · scause = 12 / 13 / 15</text>
+        <text x="320" y="242" text-anchor="middle" class="t-dim">인출이면 12, load면 13, store·AMO면 15 · stval = 가상 주소</text>
+        <rect x="650" y="194" width="190" height="62" rx="10" class="f-ok-soft"/>
+        <text x="745" y="220" text-anchor="middle" class="t t-bold">물리 주소 완성</text>
+        <text x="745" y="242" text-anchor="middle" class="t-dim">이어서 PMP·PMA 검사</text>
+        <text x="20" y="290" class="t-faint">· S 모드는 U=1 페이지의 명령어를 SUM과 상관없이 실행할 수 없다.</text>
+        <text x="20" y="310" class="t-faint">· U 모드는 U=0 페이지에 전혀 접근할 수 없다. · AMO는 load 페이지 폴트를 내지 않는다(항상 15).</text>
+        <circle r="6" fill="var(--accent-2)"><animateMotion dur="4s" begin="-0.5s" repeatCount="indefinite"><mpath href="#check-dot-path"/></animateMotion></circle>
+      </svg></div>
+      <figcaption><b>그림 19-9.</b> 잎 PTE를 찾은 뒤의 검사 순서(알고리즘 5–9단계). 어느 검사에서 걸리든 결과는 같은 종류의 페이지 폴트이고, 예외 코드는 실패한 검사가 아니라 <b>원래 접근 종류</b>가 정한다.</figcaption>
+    </figure>
+
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>접근 종류</th><th>페이지 폴트 (scause)</th><th>접근 폴트</th><th>이 페이지 폴트를 내는 명령</th></tr></thead>
+      <tbody>
+        <tr><td>명령어 인출</td><td><b>12</b> Instruction page fault</td><td>1</td><td>X=0 페이지에서 실행, S 모드가 U=1 페이지 실행</td></tr>
+        <tr><td>load</td><td><b>13</b> Load page fault</td><td>5</td><td>load, LR, 캐시 블록 관리(CMO) 명령</td></tr>
+        <tr><td>store·AMO</td><td><b>15</b> Store/AMO page fault</td><td>7</td><td>store, SC, AMO, cbo.zero</td></tr>
+      </tbody>
+    </table></div>
+
+    <h3>SUM과 MXR: sstatus의 두 스위치</h3>
+    <p><code>sstatus</code>의 두 비트가 권한 검사를 바꾼다. <b>SUM</b><span class="english">(permit Supervisor User Memory access, 비트 18)</span>이 0이면 S 모드가 U=1 페이지에 load/store하는 순간 폴트가 난다. 커널은 평소에 SUM=0으로 두고, <code>copy_from_user</code>처럼 사용자 메모리를 일부러 만지는 짧은 구간에서만 SUM을 켠다. 실수로 사용자 포인터를 따라가는 버그를 잡아 주는 안전장치다. <b>MXR</b><span class="english">(Make eXecutable Readable, 비트 19)</span>이 1이면 X=1 페이지도 읽을 수 있다. 실행 전용 페이지에서 명령어를 읽어 에뮬레이션해야 하는 트랩 처리기에 쓴다.</p>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>모드</th><th>페이지 U</th><th>읽기·쓰기</th><th>실행</th></tr></thead>
+      <tbody>
+        <tr><td>U</td><td>1</td><td>R/W 비트대로</td><td>X 비트대로</td></tr>
+        <tr><td>U</td><td>0</td><td><span class="pill bad">폴트</span></td><td><span class="pill bad">폴트</span></td></tr>
+        <tr><td>S</td><td>0</td><td>R/W 비트대로</td><td>X 비트대로</td></tr>
+        <tr><td>S</td><td>1</td><td>SUM=1이면 R/W 비트대로, SUM=0이면 <span class="pill bad">폴트</span></td><td><span class="pill bad">항상 폴트</span></td></tr>
+      </tbody>
+    </table></div>
+    <p>SUM·MXR을 바꾸는 것은 SFENCE.VMA 없이 즉시 효력이 있다. TLB 항목에는 PTE의 권한 비트가 그대로 들어 있고, 검사는 매 접근마다 현재 SUM·MXR 값으로 하기 때문이다.</p>
+
+    <h3>A·D 비트는 누가 켜나: Svade와 Svadu</h3>
+    <p>운영체제는 A 비트로 “최근에 쓰인 페이지”를, D 비트로 “디스크에 다시 써야 할 페이지”를 가려낸다. 이 비트를 켜는 방법은 두 가지다.</p>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>방식</th><th>A=0 또는 (쓰기·D=0)을 만나면</th><th>장단점</th></tr></thead>
+      <tbody>
+        <tr><td><b>Svade</b></td><td>페이지 폴트. OS 처리기가 비트를 켜고 명령을 다시 실행한다.</td><td>하드웨어가 단순. 처음 접근·처음 쓰기마다 트랩 비용</td></tr>
+        <tr><td><b>Svadu</b> (v1.0)</td><td>하드웨어가 PTE를 <b>원자적으로</b> 비교·갱신해 A(와 D)를 켠다.</td><td>트랩 없음. 페이지 워커가 메모리에 원자적으로 써야 한다</td></tr>
+      </tbody>
+    </table></div>
+    <p>Svadu가 있으면 <code>menvcfg.ADUE</code>(비트 61)로 하드웨어 갱신을 켜고 끈다. ADUE=0이면 Svade처럼 동작한다. A 비트는 추측 실행 때문에 켜져도 되지만, D 비트는 실제로 실행된 store 때문에만, 그리고 프로그램 순서대로 켜져야 한다. 하드웨어가 A·D를 끄는 일은 없다. 스왑이나 메모리 매핑 입출력처럼 A·D가 필요 없는 페이지라면 처음부터 둘 다 1로 두는 것이 빠르다.</p>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="tlb">
+    <h2>TLB, ASID, 그리고 SFENCE.VMA</h2>
+    <p>load 하나마다 메모리를 세 번 더 읽는다면 컴퓨터는 몇 배 느려질 것이다. 그래서 하트는 최근 변환 결과를 <span class="term">TLB</span><span class="english">(Translation Lookaside Buffer)</span>에 저장한다. 규격은 TLB라는 말 대신 <b>주소 변환 캐시</b>(address-translation cache)라는 추상적 이름을 쓰고, 그 크기와 구조는 정하지 않는다. 대신 이 캐시가 <b>메모리의 페이지 테이블과 자동으로 일치하지 않는다</b>(incoherent)는 점, 그리고 소프트웨어가 SFENCE.VMA로 동기화해야 한다는 점을 정한다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 300" role="img" aria-label="ASID와 G 비트를 이용한 TLB 조회">
+        <defs><marker id="tlb-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker></defs>
+        <rect x="20" y="50" width="160" height="56" rx="10" class="f-teal-soft"/><text x="100" y="74" text-anchor="middle" class="t t-bold">VA의 VPN</text><text x="100" y="94" text-anchor="middle" class="t-mono">0x00010</text>
+        <rect x="20" y="130" width="160" height="56" rx="10" class="f-violet-soft"/><text x="100" y="154" text-anchor="middle" class="t t-bold">satp.ASID</text><text x="100" y="174" text-anchor="middle" class="t-mono">2</text>
+        <path d="M182 78 C 205 78, 205 120, 226 120" class="s-accent flow-dash" marker-end="url(#tlb-arrow)"/>
+        <path d="M182 158 C 205 158, 205 128, 226 128" class="s-accent flow-dash" marker-end="url(#tlb-arrow)"/>
+        <!-- TLB 표 -->
+        <g font-family="var(--mono)">
+          <rect x="230" y="40" width="390" height="30" class="f-surface"/>
+          <text x="248" y="60" text-anchor="middle" class="t t-bold" style="font-size:12px">V</text>
+          <text x="291" y="60" text-anchor="middle" class="t t-bold" style="font-size:12px">ASID</text>
+          <text x="334" y="60" text-anchor="middle" class="t t-bold" style="font-size:12px">G</text>
+          <text x="402" y="60" text-anchor="middle" class="t t-bold" style="font-size:12px">VPN</text>
+          <text x="497" y="60" text-anchor="middle" class="t t-bold" style="font-size:12px">PPN</text>
+          <text x="581" y="60" text-anchor="middle" class="t t-bold" style="font-size:12px">권한</text>
+          <rect x="230" y="70" width="390" height="34" class="f-elev"/>
+          <text x="248" y="92" text-anchor="middle" class="t-mono">1</text><text x="291" y="92" text-anchor="middle" class="t-mono">1</text><text x="334" y="92" text-anchor="middle" class="t-mono">0</text><text x="402" y="92" text-anchor="middle" class="t-mono">0x00010</text><text x="497" y="92" text-anchor="middle" class="t-mono">0x81010</text><text x="581" y="92" text-anchor="middle" class="t-mono">RW-U</text>
+          <rect x="230" y="104" width="390" height="34" class="f-ok-soft blink-highlight"/>
+          <text x="248" y="126" text-anchor="middle" class="t-mono">1</text><text x="291" y="126" text-anchor="middle" class="t-mono">2</text><text x="334" y="126" text-anchor="middle" class="t-mono">0</text><text x="402" y="126" text-anchor="middle" class="t-mono">0x00010</text><text x="497" y="126" text-anchor="middle" class="t-mono">0x82010</text><text x="581" y="126" text-anchor="middle" class="t-mono">RW-U</text>
+          <rect x="230" y="138" width="390" height="34" class="f-elev"/>
+          <text x="248" y="160" text-anchor="middle" class="t-mono">1</text><text x="291" y="160" text-anchor="middle" class="t-mono">–</text><text x="334" y="160" text-anchor="middle" class="t-mono">1</text><text x="402" y="160" text-anchor="middle" class="t-mono">커널</text><text x="497" y="160" text-anchor="middle" class="t-mono">0x80200</text><text x="581" y="160" text-anchor="middle" class="t-mono">R-X-</text>
+          <rect x="230" y="172" width="390" height="34" class="f-elev"/>
+          <text x="248" y="194" text-anchor="middle" class="t-mono">0</text><text x="291" y="194" text-anchor="middle" class="t-faint">–</text><text x="334" y="194" text-anchor="middle" class="t-faint">–</text><text x="402" y="194" text-anchor="middle" class="t-faint">(빈 칸)</text><text x="497" y="194" text-anchor="middle" class="t-faint">–</text><text x="581" y="194" text-anchor="middle" class="t-faint">–</text>
+        </g>
+        <text x="425" y="230" text-anchor="middle" class="t-dim">같은 VPN <tspan font-family="var(--mono)">0x00010</tspan>이 ASID 1과 2에 따로 들어 있어도 섞이지 않는다</text>
+        <path d="M622 121 H676" class="s-ok flow-dash" marker-end="url(#tlb-arrow)"/>
+        <rect x="680" y="60" width="160" height="124" rx="10" class="f-accent-soft"/>
+        <text x="760" y="84" text-anchor="middle" class="t t-bold">적중 조건</text>
+        <text x="760" y="108" text-anchor="middle" class="t-dim">V = 1</text>
+        <text x="760" y="128" text-anchor="middle" class="t-dim">VPN 같음</text>
+        <text x="760" y="148" text-anchor="middle" class="t-dim">ASID 같음</text>
+        <text x="760" y="168" text-anchor="middle" class="t-dim">또는 G = 1</text>
+        <text x="760" y="214" text-anchor="middle" class="t-ok">→ PA = PPN ‖ offset</text>
+        <text x="430" y="270" text-anchor="middle" class="t-faint">TLB의 구조(칸 수, 연관도, 단계 수)는 규격이 정하지 않는다. 하트마다 따로 있다고 보이기만 하면 된다.</text>
+      </svg></div>
+      <figcaption><b>그림 19-10.</b> ASID를 쓰는 TLB 조회. 각 칸에 ASID가 붙어 있으므로 문맥 전환 때 TLB를 비울 필요가 없다. G=1(전역) 항목은 ASID를 따지지 않고 모든 주소 공간에서 적중한다. 커널 매핑에 G를 붙이면 프로세스 수만큼 같은 항목을 중복 저장하지 않아도 된다.</figcaption>
+    </figure>
+
+    <h3>SFENCE.VMA의 네 가지 모양</h3>
+    <p><code>sfence.vma rs1, rs2</code>(인코딩 <code>0001001 rs2 rs1 000 00000 1110011</code>)는 “앞서 이 하트에 보인 페이지 테이블 쓰기”를 “뒤따르는 변환을 위한 암묵적 읽기”보다 앞에 오도록 순서를 맞추고, 관련된 변환 캐시 항목을 무효화한다. rs1은 가상 주소, rs2는 ASID를 지정하며 레지스터 번호가 x0인지에 따라 범위가 달라진다.</p>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>rs1</th><th>rs2</th><th>범위</th><th>전역(G) 항목</th><th>쓰는 때</th></tr></thead>
+      <tbody>
+        <tr><td>x0</td><td>x0</td><td>모든 주소 공간의 모든 단계</td><td>포함</td><td>전역 매핑을 바꾼 경우, 대규모 변경</td></tr>
+        <tr><td>x0</td><td>ASID</td><td>그 ASID의 모든 단계</td><td>제외</td><td>ASID 재사용, 포인터(비잎) PTE 변경</td></tr>
+        <tr><td>VA</td><td>x0</td><td>그 VA의 잎 PTE, 모든 주소 공간</td><td>포함</td><td>전역 매핑의 잎 하나 변경</td></tr>
+        <tr><td>VA</td><td>ASID</td><td>그 VA의 잎 PTE, 그 ASID만</td><td>제외</td><td>사용자 페이지 하나의 잎 변경 (가장 흔함)</td></tr>
+      </tbody>
+    </table></div>
+    <div class="codebox assembly" data-title="unmap_page.s — 사용자 페이지 하나를 해제할 때">    # a0 = PTE의 주소, a1 = 그 페이지의 가상 주소, a2 = ASID
+    sd    zero, 0(a0)       # PTE를 무효로 (8바이트 한 번에 써야 한다)
+    sfence.vma a1, a2       # 이 VA, 이 ASID의 잎 항목만 무효화
+    # 다른 하트도 이 주소 공간을 쓰고 있었다면 IPI를 보내
+    # 그쪽에서도 sfence.vma를 실행하게 해야 한다 (TLB shootdown)</div>
+    <p>규격이 꼽는 대표적인 규칙은 다음과 같다.</p>
+    <ul>
+      <li><b>잎 PTE를 바꾸면</b> rs1에 그 페이지 안의 VA를 준다. 경로에 G=1인 PTE가 있었다면 rs2는 x0, 아니면 해당 ASID.</li>
+      <li><b>포인터 PTE를 바꾸면</b> rs1=x0으로 한다(그 아래 수많은 VA가 영향을 받으므로).</li>
+      <li><b>ASID 없이(또는 항상 ASID 0으로) 운영한다면</b> satp를 쓸 때마다 rs1=x0, rs2=“값이 0인 x0 아닌 레지스터”로 sfence.vma를 한다. 전역 항목은 남겨 두기 위해서다.</li>
+      <li><b>권한을 늘리거나 무효→유효로 바꾸는 경우</b>는 게으르게 처리해도 된다. 옛 값이 쓰이면 페이지 폴트가 나고, 그때 처리기에서 sfence.vma를 하면 된다.</li>
+      <li>SFENCE.VMA는 <b>자기 하트</b>만 동기화한다. 다른 하트에는 IPI로 알리고 각자 실행하게 해야 한다. 이를 TLB 슛다운이라 하며, RISC-V에서는 보통 SBI의 RFENCE 확장(<a href="platform.html">22장</a>)을 이용한다.</li>
+      <li>rs1의 값이 올바른 가상 주소가 아니면 아무 일도 하지 않는다(예외도 없다). 구현은 언제든지 더 넓게(예: 항상 전체) 무효화해도 된다.</li>
+    </ul>
+
+    <div class="sim" id="tlb-sim">
+      <div class="sim-head"><span class="sim-tag">SIMULATOR</span><h3>TLB와 ASID: 두 프로세스가 번갈아 달릴 때</h3></div>
+      <div class="sim-pad">
+        <div class="tlb-sequence" id="tlb-sequence"></div>
+        <div class="table-wrap" style="margin:0"><table class="compact tlb-table">
+          <thead><tr><th>칸</th><th>V</th><th>ASID</th><th>G</th><th>가상 페이지</th><th>PPN</th><th>최근 사용</th></tr></thead>
+          <tbody id="tlb-body"></tbody>
+        </table></div>
+      </div>
+      <div class="step-description" id="tlb-description"></div>
+      <div class="sim-controls">
+        <div class="control"><span>ASID</span><div class="segmented" id="tlb-asid-mode"><button data-value="asid" class="on">ASID 사용</button><button data-value="none">ASID 없음</button></div></div>
+        <label class="control"><span>TLB 칸 수 <output id="tlb-size-output"></output></span><input type="range" id="tlb-size" min="4" max="8" value="8"></label>
+        <div class="control"><span>실행</span><div class="button-row"><button class="button primary" id="tlb-step">다음 사건</button><button class="button" id="tlb-run">끝까지</button><button class="button" id="tlb-reset">처음으로</button></div></div>
+        <div class="control wide"><span>지금 실행 중인 하트에서 SFENCE.VMA (a0 = <code>0x10000</code>, a1 = 현재 ASID)</span><div class="button-row fence-row">
+          <button class="button" data-fence="all">sfence.vma x0, x0</button>
+          <button class="button" data-fence="asid">sfence.vma x0, a1</button>
+          <button class="button" data-fence="address">sfence.vma a0, x0</button>
+          <button class="button" data-fence="address-asid">sfence.vma a0, a1</button>
+        </div></div>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">실행 중 · ASID</span><span class="value" id="tlb-readout-asid">—</span></div>
+        <div class="stat"><span class="key">적중</span><span class="value" id="tlb-readout-hits">0</span></div>
+        <div class="stat"><span class="key">미스</span><span class="value" id="tlb-readout-misses">0</span></div>
+        <div class="stat"><span class="key">적중률</span><span class="value" id="tlb-readout-rate">—</span></div>
+        <div class="stat"><span class="key">워크 PTE 읽기</span><span class="value" id="tlb-readout-walk">0</span></div>
+      </div>
+      <div class="sim-note"><b>ASID 사용</b>으로 끝까지 돌린 결과와 <b>ASID 없음</b>으로 돌린 결과의 적중률을 비교해 보자. ASID가 없으면 프로세스를 바꿀 때마다 비전역 항목을 비워야 하므로 A로 돌아온 뒤 다시 미스가 난다. 커널 페이지(G=1)는 어느 경우든 살아남는다. 중간에 네 가지 sfence.vma 버튼을 눌러 어떤 칸이 지워지는지(빨간 줄) 비교해 보자.</div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="extensions">
+    <h2>Sv 확장들: Svpbmt·Svinval·Svvptc와 친구들</h2>
+    <p>특권 규격의 감독자 장에는 기본 Sv 방식 외에도 작은 확장들이 모여 있다. 응용 프로세서 프로파일 RVA23S64는 이 중 상당수를 필수로 요구한다(<a href="profiles.html">23장</a>).</p>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>확장</th><th>버전</th><th>하는 일</th><th>RVA23S64</th></tr></thead>
+      <tbody>
+        <tr><td><b>Sv39</b></td><td>—</td><td>39비트 3단계 변환</td><td><span class="pill ok">필수</span></td></tr>
+        <tr><td><b>Sv48 · Sv57</b></td><td>—</td><td>48·57비트 변환</td><td><span class="pill">선택</span></td></tr>
+        <tr><td><b>Svnapot</b></td><td>1.0</td><td>64 KiB NAPOT 연속 매핑 (N 비트)</td><td><span class="pill ok">필수</span></td></tr>
+        <tr><td><b>Svpbmt</b></td><td>1.0</td><td>PTE로 PMA 메모리 유형 덮어쓰기 (PBMT)</td><td><span class="pill ok">필수</span></td></tr>
+        <tr><td><b>Svinval</b></td><td>1.0</td><td>SFENCE.VMA를 무효화와 순서 맞추기로 쪼갬</td><td><span class="pill ok">필수</span></td></tr>
+        <tr><td><b>Svade</b></td><td>—</td><td>A/D가 꺼져 있으면 페이지 폴트</td><td><span class="pill ok">필수</span></td></tr>
+        <tr><td><b>Svadu</b></td><td>1.0</td><td>하드웨어가 A/D를 원자적으로 갱신</td><td><span class="pill">선택</span></td></tr>
+        <tr><td><b>Svvptc</b></td><td>1.0</td><td>무효→유효 PTE 변경 뒤 SFENCE.VMA 생략 가능</td><td><span class="pill">선택</span></td></tr>
+        <tr><td><b>Svrsw60t59b</b></td><td>1.0</td><td>PTE 비트 60–59를 소프트웨어용으로</td><td>—</td></tr>
+      </tbody>
+    </table></div>
+
+    <h3>Svpbmt: 페이지마다 메모리 유형 정하기</h3>
+    <p>메모리 영역이 캐시 가능한지, 입출력 장치인지 같은 성질(PMA)은 원래 물리 주소마다 고정이다. <b>Svpbmt</b>은 잎 PTE의 비트 62–61(PBMT)로 이를 덮어쓴다. 예를 들어 그래픽 프레임 버퍼를 캐시하지 않되 쓰기 결합은 허용하는 NC로 매핑할 수 있다. <code>menvcfg.PBMTE</code>(비트 62)가 1일 때만 쓸 수 있고, 0이면 Svpbmt가 없는 것처럼 동작한다.</p>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>이름</th><th class="number">PBMT</th><th>요청하는 메모리 속성</th></tr></thead>
+      <tbody>
+        <tr><td>PMA</td><td class="number">0</td><td>덮어쓰지 않음. 물리 주소의 PMA를 그대로</td></tr>
+        <tr><td>NC</td><td class="number">1</td><td>캐시 불가, 멱등(idempotent), 약한 순서(RVWMO), 주 메모리</td></tr>
+        <tr><td>IO</td><td class="number">2</td><td>캐시 불가, 비멱등, 강한 순서(I/O 순서), 입출력</td></tr>
+        <tr><td>—</td><td class="number">3</td><td>예약 (잎에 쓰면 페이지 폴트)</td></tr>
+      </tbody>
+    </table></div>
+    <p>포인터 PTE의 비트 62–61은 예약이다. 같은 물리 페이지를 캐시 가능 속성과 불가 속성으로 동시에 매핑하면 일관성이 깨질 수 있으므로, 속성을 바꿔 접근하기 전에는 <code>fence iorw,iorw</code> → <code>cbo.flush</code> → <code>fence iorw,iorw</code> 같은 순서가 필요하다고 규격은 설명한다.</p>
+
+    <h3>Svinval: 무효화를 묶어서 빠르게</h3>
+    <p>범위가 넓은 매핑을 해제할 때 SFENCE.VMA를 페이지마다 실행하면, 매번 “앞선 쓰기 정렬 + 무효화 + 뒤따르는 변환 정렬”을 다 하느라 파이프라인이 거듭 멈춘다. <b>Svinval</b>은 이것을 세 명령으로 쪼갠다.</p>
+    <div class="table-wrap"><table class="compact instruction-table">
+      <thead><tr><th>명령</th><th>인코딩</th><th>하는 일</th></tr></thead>
+      <tbody>
+        <tr><td>sfence.w.inval</td><td><code>0001100 00000 00000 000 00000 1110011</code></td><td>앞선 store를 뒤따르는 SINVAL.VMA보다 앞에 정렬</td></tr>
+        <tr><td>sinval.vma rs1, rs2</td><td><code>0001011 rs2 rs1 000 00000 1110011</code></td><td>같은 rs1·rs2의 SFENCE.VMA가 지울 항목을 무효화 (순서 보장은 없음)</td></tr>
+        <tr><td>sfence.inval.ir</td><td><code>0001100 00001 00000 000 00000 1110011</code></td><td>앞선 SINVAL.VMA를 뒤따르는 암묵적 변환 읽기보다 앞에 정렬</td></tr>
+      </tbody>
+    </table></div>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 230" role="img" aria-label="SFENCE.VMA 반복과 Svinval 묶음 처리의 시간 비교">
+        <text x="20" y="40" class="t t-bold">sfence.vma × 4</text>
+        <g>
+          <rect x="180" y="24" width="40" height="26" rx="4" class="f-bad-soft"/><rect x="220" y="24" width="50" height="26" rx="4" class="f-accent-soft"/><rect x="270" y="24" width="40" height="26" rx="4" class="f-bad-soft"/>
+          <rect x="310" y="24" width="40" height="26" rx="4" class="f-bad-soft"/><rect x="350" y="24" width="50" height="26" rx="4" class="f-accent-soft"/><rect x="400" y="24" width="40" height="26" rx="4" class="f-bad-soft"/>
+          <rect x="440" y="24" width="40" height="26" rx="4" class="f-bad-soft"/><rect x="480" y="24" width="50" height="26" rx="4" class="f-accent-soft"/><rect x="530" y="24" width="40" height="26" rx="4" class="f-bad-soft"/>
+          <rect x="570" y="24" width="40" height="26" rx="4" class="f-bad-soft"/><rect x="610" y="24" width="50" height="26" rx="4" class="f-accent-soft"/><rect x="660" y="24" width="40" height="26" rx="4" class="f-bad-soft"/>
+        </g>
+        <text x="710" y="42" class="t-dim">순서 맞추기가 8번</text>
+        <text x="20" y="110" class="t t-bold">Svinval 묶음</text>
+        <g>
+          <rect x="180" y="94" width="40" height="40" rx="4" class="f-bad-soft"/>
+          <rect x="224" y="94" width="56" height="8" rx="3" class="f-accent-soft"/>
+          <rect x="236" y="104" width="56" height="8" rx="3" class="f-accent-soft"/>
+          <rect x="248" y="114" width="56" height="8" rx="3" class="f-accent-soft"/>
+          <rect x="260" y="124" width="56" height="8" rx="3" class="f-accent-soft"/>
+          <rect x="320" y="94" width="40" height="40" rx="4" class="f-bad-soft"/>
+        </g>
+        <text x="200" y="86" text-anchor="middle" class="t-faint" style="font-size:11px">w.inval</text>
+        <text x="340" y="86" text-anchor="middle" class="t-faint" style="font-size:11px">inval.ir</text>
+        <text x="270" y="148" text-anchor="middle" class="t-faint" style="font-size:11px">sinval.vma × 4 (겹쳐서 처리)</text>
+        <text x="384" y="119" class="t-ok">순서 맞추기 2번이면 끝</text>
+        <line x1="180" y1="168" x2="760" y2="168" stroke="var(--border)" stroke-width="2"/>
+        <text x="180" y="186" class="t-faint">시간 →</text>
+        <circle r="6" cy="168" fill="var(--accent-2)"><animateMotion dur="4s" begin="-0.3s" repeatCount="indefinite" path="M180 0 H760"/></circle>
+        <rect x="20" y="196" width="18" height="12" rx="3" class="f-bad-soft"/><text x="44" y="207" class="t-faint">순서 맞추기(멈춤)</text>
+        <rect x="190" y="196" width="18" height="12" rx="3" class="f-accent-soft"/><text x="214" y="207" class="t-faint">무효화 작업</text>
+      </svg></div>
+      <figcaption><b>그림 19-11.</b> 네 페이지를 무효화할 때의 개념도. SFENCE.VMA는 매번 앞뒤 순서 맞추기(빨강)를 동반하지만, Svinval은 SFENCE.W.INVAL과 SFENCE.INVAL.IR 사이에 SINVAL.VMA를 몰아넣어 무효화(파랑)를 겹쳐 처리할 수 있다. 단순한 구현은 SINVAL.VMA를 SFENCE.VMA처럼, 나머지 둘을 no-op로 구현해도 된다.</figcaption>
+    </figure>
+    <p>Svinval은 하이퍼바이저 확장이 있으면 <code>hinval.vvma</code>·<code>hinval.gvma</code>도 함께 제공한다(<a href="hypervisor.html">21장</a>). SINVAL.VMA는 SFENCE.VMA와 같은 권한을 요구하므로 <code>mstatus.TVM=1</code>이면 S 모드에서 불법 명령 예외가 나지만, 두 순서 명령은 부작용이 없어 TVM과 상관없이 허용된다.</p>
+
+    <h3>Svvptc와 Svrsw60t59b</h3>
+    <p><b>Svvptc</b>가 있으면 PTE의 V 비트를 0→1로 바꾼 store는 “유한한 시간 안에” 이 하트의 변환에 보이게 된다. 그래서 새 매핑을 만들 때마다 하던 SFENCE.VMA를 생략할 수 있다. 가끔 쓸데없는 페이지 폴트가 한 번 더 날 수 있지만, 명령을 아끼는 이득이 더 크다는 판단이다. 유효→무효, 권한 축소 같은 다른 변경에는 여전히 펜스가 필요하다. <b>Svrsw60t59b</b>는 원래 예약이라 0이어야 했던 PTE 비트 60–59를 운영체제가 메타데이터 저장용으로 쓸 수 있게 풀어 준다.</p>
+  </section>
+
+  <section class="keypoints" id="summary">
+    <h2>핵심 정리</h2>
+    <ol>
+      <li>가상 메모리는 페이지(기본 4 KiB) 단위로 VA를 PA로 바꾸며 격리·요구 페이징·공유·보호를 제공한다.</li>
+      <li><code>satp</code>(<code>0x180</code>)는 MODE(RV64: Bare 0, Sv39 8, Sv48 9, Sv57 10 / RV32: Sv32 1), ASID, 루트 표의 PPN을 담는다. 지원하지 않는 MODE를 쓰면 쓰기 전체가 무시된다.</li>
+      <li>페이지 테이블 하나는 정확히 한 페이지다. Sv39는 8바이트 PTE 512개이므로 VPN 조각이 9비트이고, Sv32는 4바이트 PTE 1024개라서 10비트다. Sv39 이상은 VA의 위쪽 비트가 부호 확장된 정규형이어야 한다.</li>
+      <li>PTE의 R=W=X=0은 포인터, 하나라도 1이면 잎이다. W=1·R=0은 예약 조합이다. 어느 단계든 잎이 될 수 있어 메가·기가·테라·페타페이지가 생기며, 물리 쪽 정렬이 안 맞으면 페이지 폴트다.</li>
+      <li>권한 검사는 U 비트(SUM 고려), R·W·X(MXR 고려), A·D(Svade는 폴트, Svadu는 하드웨어 갱신) 순이며, 실패하면 접근 종류에 따라 12·13·15번 페이지 폴트가 난다.</li>
+      <li>TLB는 ASID와 G 비트로 주소 공간을 구별한다. 페이지 테이블을 고친 뒤에는 rs1(VA)·rs2(ASID)로 범위를 고른 <code>sfence.vma</code>로 자기 하트를 동기화하고, 다른 하트에는 IPI로 알린다.</li>
+      <li>Svnapot(64 KiB 연속), Svpbmt(PMA·NC·IO), Svinval(무효화 묶음), Svvptc(무효→유효 펜스 생략)는 성능과 장치 매핑을 돕는 작은 확장이다.</li>
+    </ol>
+  </section>
+
+  <section id="quiz">
+    <h2>확인 퀴즈</h2>
+    <div class="quiz">
+      <div class="quiz-question"><p>Sv39의 페이지 테이블 하나에 들어 있는 PTE 수와 PTE 하나의 크기는?</p><div class="options">
+        <button class="option">1024개 × 4바이트</button>
+        <button class="option" data-correct>512개 × 8바이트</button>
+        <button class="option">512개 × 4바이트</button>
+        <button class="option">4096개 × 1바이트</button>
+      </div><div class="quiz-explanation">표 하나가 정확히 4 KiB 페이지 하나이고 PTE가 8바이트이므로 512개다. 그래서 VPN 조각이 9비트다. 1024개 × 4바이트는 Sv32다.</div></div>
+      <div class="quiz-question"><p>V=1이고 R=W=X=0인 PTE는 무엇을 뜻하나?</p><div class="options">
+        <button class="option">접근이 모두 금지된 페이지</button>
+        <button class="option" data-correct>다음 단계 페이지 테이블을 가리키는 포인터</button>
+        <button class="option">예약된 조합이라 페이지 폴트</button>
+        <button class="option">실행 전용 페이지</button>
+      </div><div class="quiz-explanation">R·W·X가 모두 0이면 잎이 아니라 비잎(포인터) PTE다. PPN × 4096이 다음 표의 주소가 된다. 예약 조합은 W=1·R=0인 경우다.</div></div>
+      <div class="quiz-question"><p>Sv39에서 가상 주소 <code>0x0000004000000000</code>에 load하면?</p><div class="options">
+        <button class="option">사용자 영역의 정상 주소라 워크를 시작한다</button>
+        <button class="option">커널 영역 주소다</button>
+        <button class="option" data-correct>비트 63–39가 비트 38과 같지 않으므로 load 페이지 폴트(13)</button>
+        <button class="option">접근 폴트(5)</button>
+      </div><div class="quiz-explanation">비트 38이 1인데 그 위 비트는 0이라 정규형이 아니다. 규격은 이 경우 페이지 폴트를 낸다고 정한다.</div></div>
+      <div class="quiz-question"><p>Sv39 워크가 레벨 1에서 잎 PTE를 만났는데 pte.ppn[0] ≠ 0이다. 결과는?</p><div class="options">
+        <button class="option">4 KiB 페이지로 취급한다</button>
+        <button class="option">ppn[0]을 무시하고 2 MiB 페이지로 변환한다</button>
+        <button class="option" data-correct>정렬되지 않은 슈퍼페이지이므로 페이지 폴트</button>
+        <button class="option">레벨 0으로 계속 내려간다</button>
+      </div><div class="quiz-explanation">메가페이지는 물리적으로도 2 MiB에 정렬되어야 한다. 알고리즘 5단계에서 pte.ppn[i−1:0] ≠ 0이면 페이지 폴트다.</div></div>
+      <div class="quiz-question"><p>S 모드에서 SUM=1로 두고 U=1 페이지의 명령어를 실행하려 하면?</p><div class="options">
+        <button class="option">SUM=1이므로 실행된다</button>
+        <button class="option">MXR이 1이어야 실행된다</button>
+        <button class="option" data-correct>Instruction page fault(12)가 난다</button>
+        <button class="option">불법 명령 예외가 난다</button>
+      </div><div class="quiz-explanation">SUM은 S 모드의 load/store만 허락한다. 사용자 페이지에서 실행하는 것은 SUM과 상관없이 금지된다. 공격자가 심은 코드를 커널이 실행하지 못하게 하려는 것이다.</div></div>
+      <div class="quiz-question"><p>쓰기 권한(W=0)이 없는 페이지에 AMO 명령을 실행했다. scause는?</p><div class="options">
+        <button class="option">13 (Load page fault)</button>
+        <button class="option" data-correct>15 (Store/AMO page fault)</button>
+        <button class="option">7 (Store/AMO access fault)</button>
+        <button class="option">2 (Illegal instruction)</button>
+      </div><div class="quiz-explanation">AMO는 읽고 쓰는 명령이지만 load 페이지 폴트는 내지 않는다. 권한 문제는 항상 store/AMO 페이지 폴트(15)로 보고된다. 7은 PMP·PMA에 걸렸을 때다.</div></div>
+      <div class="quiz-question"><p>ASID 3인 프로세스의 사용자 페이지 하나(전역 아님)의 잎 PTE를 고쳤다. 가장 알맞은 명령은?</p><div class="options">
+        <button class="option">sfence.vma x0, x0</button>
+        <button class="option">sfence.vma x0, a1 (a1 = 3)</button>
+        <button class="option" data-correct>sfence.vma a0, a1 (a0 = 그 페이지의 VA, a1 = 3)</button>
+        <button class="option">fence.i</button>
+      </div><div class="quiz-explanation">잎 하나를 바꿨으면 rs1에 VA를, 전역 매핑이 아니면 rs2에 ASID를 준다. 앞의 두 답도 틀리지는 않지만 쓸데없이 많은 항목을 지운다(과잉 펜스).</div></div>
+      <div class="quiz-question"><p>Svnapot으로 64 KiB 영역을 표시할 때 레벨 0 PTE의 ppn[0] 아래 4비트는?</p><div class="options">
+        <button class="option"><code>0000</code></button>
+        <button class="option"><code>1111</code></button>
+        <button class="option" data-correct><code>1000</code></button>
+        <button class="option"><code>0001</code></button>
+      </div><div class="quiz-explanation">N=1이고 ppn[0]이 <code>x xxxx 1000</code>이면 64 KiB 연속 영역이다(napot_bits = 4). 다른 패턴은 지금은 예약이라 페이지 폴트가 난다.</div></div>
+    </div>
+  </section>
+
+  <section id="references">
+    <h2>더 읽을거리</h2>
+    <ul class="references">
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/priv/supervisor.html" target="_blank" rel="noopener">The RISC-V Instruction Set Manual, Volume II: Privileged Architecture — Supervisor-Level ISA</a> (v20260120) — satp, SFENCE.VMA, Sv32/39/48/57, Svnapot, Svpbmt, Svinval, Svadu, Svvptc, Svrsw60t59b</li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/priv/supervisor.html#sv32algorithm" target="_blank" rel="noopener">Virtual Address Translation Process</a> — 이 장 시뮬레이터가 따른 변환 알고리즘</li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/priv/machine.html" target="_blank" rel="noopener">Volume II, Machine-Level ISA</a> — menvcfg의 PBMTE·ADUE, mstatus의 MPRV·SUM·MXR</li>
+      <li><a href="https://docs.riscv.org/reference/rva23/v1.0/rva23-profiles.html" target="_blank" rel="noopener">RVA23 Profiles v1.0</a> — RVA23S64의 필수·선택 Sv 확장</li>
+      <li>이 책의 <a href="trap.html">18장(트랩)</a>, <a href="memory-protection.html">20장(PMA·PMP)</a>, <a href="hypervisor.html">21장(2단계 변환)</a></li>
+    </ul>
+  </section>
+</main>
+
+<script>
+/* ---------------------------------------------------------------------------
+   코드 상자: 어셈블리 원문을 색칠한다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  document.querySelectorAll(".codebox.assembly").forEach((codebox) => {
+    codebox.innerHTML = window.Riscv.highlightAssembly(codebox.textContent);
+  });
+})();
+
+/* ---------------------------------------------------------------------------
+   가상 주소 형식 탐색기: 방식마다 비트 분할과 정규형 영역을 SVG로 다시 그린다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const NAMESPACE = "http://www.w3.org/2000/svg";
+  const PAGE_OFFSET_BITS = 12;
+  const BAR_LEFT = 20;
+  const BAR_WIDTH = 820;
+  const BAR_TOP = 52;
+  const BAR_HEIGHT = 46;
+  const VPN_CLASSES = ["f-teal-soft", "f-accent-soft", "f-violet-soft", "f-warn-soft", "f-ok-soft"];
+  const MINIMUM_LABEL_WIDTH = 40;
+  const MODES = {
+    sv32: { name: "Sv32", modeValue: 1, registerBits: 32, virtualBits: 32, levels: 2, vpnBits: 10, pageSizes: ["4 KiB", "4 MiB"], physicalBits: 34 },
+    sv39: { name: "Sv39", modeValue: 8, registerBits: 64, virtualBits: 39, levels: 3, vpnBits: 9, pageSizes: ["4 KiB", "2 MiB", "1 GiB"], physicalBits: 56 },
+    sv48: { name: "Sv48", modeValue: 9, registerBits: 64, virtualBits: 48, levels: 4, vpnBits: 9, pageSizes: ["4 KiB", "2 MiB", "1 GiB", "512 GiB"], physicalBits: 56 },
+    sv57: { name: "Sv57", modeValue: 10, registerBits: 64, virtualBits: 57, levels: 5, vpnBits: 9, pageSizes: ["4 KiB", "2 MiB", "1 GiB", "512 GiB", "256 TiB"], physicalBits: 56 },
+  };
+  const SIZE_UNITS = [[50, "PiB"], [40, "TiB"], [30, "GiB"], [20, "MiB"], [10, "KiB"], [0, "B"]];
+
+  const svg = document.getElementById("layout-svg");
+  const description = document.getElementById("layout-description");
+  const addressInput = document.getElementById("layout-address");
+  let currentMode = MODES.sv39;
+
+  /** 2의 거듭제곱 바이트 수를 사람이 읽기 좋은 단위로 바꾼다. */
+  function formatPowerOfTwoBytes(exponent) {
+    const unit = SIZE_UNITS.find(([unitExponent]) => exponent >= unitExponent);
+    return (2 ** (exponent - unit[0])) + " " + unit[1];
+  }
+
+  function hex64(value) {
+    return "0x" + value.toString(16).padStart(16, "0");
+  }
+
+  function addElement(tagName, attributes, text) {
+    const element = document.createElementNS(NAMESPACE, tagName);
+    Object.entries(attributes).forEach(([name, value]) => element.setAttribute(name, value));
+    if (text !== undefined) element.textContent = text;
+    svg.appendChild(element);
+    return element;
+  }
+
+  function buildFields(mode) {
+    const fields = [];
+    if (mode.registerBits > mode.virtualBits) {
+      fields.push({ name: "부호 확장", high: mode.registerBits - 1, low: mode.virtualBits, className: "f-surface", isExtension: true });
+    }
+    for (let level = mode.levels - 1; level >= 0; level -= 1) {
+      const low = PAGE_OFFSET_BITS + level * mode.vpnBits;
+      fields.push({ name: "VPN[" + level + "]", high: low + mode.vpnBits - 1, low, className: VPN_CLASSES[level] });
+    }
+    fields.push({ name: "offset", high: PAGE_OFFSET_BITS - 1, low: 0, className: "f-gold-soft" });
+    return fields;
+  }
+
+  /** 입력한 주소가 어느 영역(아래 절반, 구멍, 위 절반)에 속하는지 판정한다. */
+  function classifyAddress(text, mode) {
+    const cleaned = text.trim().toLowerCase().replace(/_/g, "").replace(/^0x/, "");
+    if (!/^[0-9a-f]{1,16}$/.test(cleaned)) return { isValidInput: false, message: "16진수 1–16자리를 넣어 주세요." };
+    const value = BigInt("0x" + cleaned);
+    if (mode.registerBits === 32) {
+      if (value >> 32n) return { isValidInput: true, region: "too-wide", value, message: "RV32 주소는 32비트다. 이 값은 레지스터에 들어가지 않는다." };
+      return { isValidInput: true, region: "lower", value, message: "Sv32는 32비트 주소 전체를 쓴다. 정규형 규칙이 없다." };
+    }
+    const upperBits = value >> BigInt(mode.virtualBits - 1);
+    const allOnes = (1n << BigInt(64 - mode.virtualBits + 1)) - 1n;
+    if (upperBits === 0n) return { isValidInput: true, region: "lower", value, message: "비트 63–" + (mode.virtualBits - 1) + "이 모두 0 → 아래쪽 정규형 영역(보통 사용자 공간)." };
+    if (upperBits === allOnes) return { isValidInput: true, region: "upper", value, message: "비트 63–" + (mode.virtualBits - 1) + "이 모두 1 → 위쪽 정규형 영역(보통 커널 공간)." };
+    return { isValidInput: true, region: "hole", value, message: "비트 63–" + mode.virtualBits + "이 비트 " + (mode.virtualBits - 1) + "과 같지 않다 → 정규형이 아님. 접근하면 페이지 폴트." };
+  }
+
+  function render() {
+    const mode = currentMode;
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    const fields = buildFields(mode);
+    const pixelsPerBit = BAR_WIDTH / mode.registerBits;
+    addElement("text", { x: BAR_LEFT, y: 22, class: "t t-bold" }, mode.name + " · satp.MODE = " + mode.modeValue + " · " + mode.levels + "단계 · PTE " + (mode.registerBits / 8) + "바이트");
+    let cursor = BAR_LEFT;
+    fields.forEach((field) => {
+      const bitCount = field.high - field.low + 1;
+      const fieldWidth = bitCount * pixelsPerBit;
+      const rectangle = addElement("rect", { x: cursor, y: BAR_TOP, width: fieldWidth, height: BAR_HEIGHT, class: field.className });
+      if (field.isExtension) rectangle.setAttribute("stroke-dasharray", "4 3");
+      const centerX = cursor + fieldWidth / 2;
+      if (fieldWidth >= MINIMUM_LABEL_WIDTH) {
+        addElement("text", { x: centerX, y: BAR_TOP + 21, "text-anchor": "middle", class: "t t-bold", style: "font-size:12.5px" }, field.name);
+        addElement("text", { x: centerX, y: BAR_TOP + 37, "text-anchor": "middle", class: "t-faint", style: "font-size:11px" }, bitCount + "비트");
+      }
+      addElement("text", { x: cursor + 3, y: BAR_TOP - 6, class: "t-faint", style: "font-size:11px" }, String(field.high));
+      addElement("text", { x: cursor + fieldWidth - 3, y: BAR_TOP - 6, "text-anchor": "end", class: "t-faint", style: "font-size:11px" }, String(field.low));
+      cursor += fieldWidth;
+    });
+
+    const classification = classifyAddress(addressInput.value, mode);
+    const regionTop = 140;
+    const regionHeight = 64;
+    if (mode.registerBits === 32) {
+      addElement("rect", { x: BAR_LEFT, y: regionTop, width: BAR_WIDTH, height: regionHeight, rx: 10, class: "f-accent-soft" });
+      addElement("text", { x: 430, y: regionTop + 28, "text-anchor": "middle", class: "t t-bold" }, "32비트 주소 전체가 유효 (구멍 없음)");
+      addElement("text", { x: 430, y: regionTop - 6, "text-anchor": "middle", class: "t-mono", style: "font-size:11.5px" }, "0x00000000 – 0xffffffff");
+      addElement("text", { x: 430, y: regionTop + 49, "text-anchor": "middle", class: "t-dim" }, "satp.PPN 22비트 × 4 KiB → 물리 주소는 34비트(16 GiB)까지");
+    } else {
+      const halfExponent = mode.virtualBits - 1;
+      const lowerEnd = (1n << BigInt(halfExponent)) - 1n;
+      const upperStart = ((1n << 64n) - 1n) ^ lowerEnd;
+      addElement("rect", { x: 20, y: regionTop, width: 250, height: regionHeight, rx: 10, class: "f-accent-soft" });
+      addElement("text", { x: 145, y: regionTop + 22, "text-anchor": "middle", class: "t t-bold" }, "아래쪽 절반 · " + formatPowerOfTwoBytes(halfExponent));
+      addElement("text", { x: 145, y: regionTop + 40, "text-anchor": "middle", class: "t-mono", style: "font-size:11.5px" }, hex64(0n));
+      addElement("text", { x: 145, y: regionTop + 56, "text-anchor": "middle", class: "t-mono", style: "font-size:11.5px" }, "– " + hex64(lowerEnd));
+      addElement("rect", { x: 280, y: regionTop, width: 300, height: regionHeight, rx: 10, fill: "url(#layout-hatch)", stroke: "var(--bad)", "stroke-dasharray": "5 4" });
+      addElement("text", { x: 430, y: regionTop + 28, "text-anchor": "middle", class: "t-bad" }, "정규형이 아닌 구멍");
+      addElement("text", { x: 430, y: regionTop + 48, "text-anchor": "middle", class: "t-dim" }, "접근하면 페이지 폴트");
+      addElement("rect", { x: 590, y: regionTop, width: 250, height: regionHeight, rx: 10, class: "f-violet-soft" });
+      addElement("text", { x: 715, y: regionTop + 22, "text-anchor": "middle", class: "t t-bold" }, "위쪽 절반 · " + formatPowerOfTwoBytes(halfExponent));
+      addElement("text", { x: 715, y: regionTop + 40, "text-anchor": "middle", class: "t-mono", style: "font-size:11.5px" }, hex64(upperStart));
+      addElement("text", { x: 715, y: regionTop + 56, "text-anchor": "middle", class: "t-mono", style: "font-size:11.5px" }, "– 0xffffffffffffffff");
+    }
+    // 입력 주소가 속한 영역 위에 표시를 단다
+    const markerPositions = { lower: 145, hole: 430, upper: 715 };
+    if (mode.registerBits === 32) {
+      markerPositions.lower = 430;
+    }
+    if (classification.isValidInput && markerPositions[classification.region] !== undefined) {
+      const markerX = markerPositions[classification.region];
+      addElement("path", { d: "M" + markerX + " " + (regionTop + regionHeight + 6) + " l-8 12 h16 z", fill: "var(--accent-2)" });
+      addElement("text", { x: markerX, y: regionTop + regionHeight + 36, "text-anchor": "middle", class: "t-gold", style: "font-size:13px", "font-family": "var(--mono)" }, "입력 " + hex64(classification.value));
+    }
+    addElement("text", { x: BAR_LEFT, y: 278, class: "t-faint" }, "페이지 크기: " + mode.pageSizes.join(" · ") + "   ·   물리 주소 " + mode.physicalBits + "비트");
+    // 빗금 무늬는 매번 다시 그리므로 정의도 다시 넣는다
+    const definitions = document.createElementNS(NAMESPACE, "defs");
+    definitions.innerHTML = '<pattern id="layout-hatch" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="8" height="8" fill="var(--bad-soft)"/><line x1="0" y1="0" x2="0" y2="8" stroke="var(--bad)" stroke-width="1.2" opacity="0.5"/></pattern>';
+    svg.insertBefore(definitions, svg.firstChild);
+
+    document.getElementById("layout-readout-mode").textContent = String(mode.modeValue);
+    document.getElementById("layout-readout-levels").textContent = String(mode.levels);
+    document.getElementById("layout-readout-size").textContent = formatPowerOfTwoBytes(mode.virtualBits);
+    document.getElementById("layout-readout-page").textContent = mode.pageSizes[mode.pageSizes.length - 1];
+    const checkReadout = document.getElementById("layout-readout-check");
+    if (!classification.isValidInput) checkReadout.textContent = "입력 오류";
+    else if (classification.region === "too-wide") checkReadout.textContent = "32비트 초과";
+    else if (classification.region === "hole") checkReadout.textContent = "폴트";
+    else checkReadout.textContent = "정규형";
+    const vpnText = mode.levels + "개의 VPN 조각(각 " + mode.vpnBits + "비트)과 12비트 오프셋";
+    description.innerHTML = "<b>" + mode.name + "</b>: 가상 주소 " + mode.virtualBits + "비트 = " + vpnText + ". 표 하나에 PTE " + (2 ** mode.vpnBits) + "개. " + classification.message;
+  }
+
+  book.segmented("layout-mode", (value) => { currentMode = MODES[value]; render(); });
+  addressInput.addEventListener("input", render);
+  document.querySelectorAll("#layout-sim [data-example]").forEach((button) => {
+    button.addEventListener("click", () => { addressInput.value = button.dataset.example; render(); });
+  });
+  render();
+})();
+
+/* ---------------------------------------------------------------------------
+   Sv39 페이지 테이블 워크 시뮬레이터
+   - 규격의 변환 알고리즘(supervisor.html#sv32algorithm)을 그대로 따른 translate() 가
+     단계 기록을 만들고, 화면은 그 기록을 한 단계씩 보여 준다.
+   - 64비트 주소를 정확히 다루기 위해 모든 주소 계산은 BigInt 로 한다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+
+  /* ---------- 규격의 상수 ---------- */
+  const PAGE_SHIFT = 12n;
+  const PAGE_SIZE = 4096n;
+  const PTE_SIZE = 8n;
+  const LEVELS = 3;
+  const VPN_BITS = 9n;
+  const VPN_MASK = 0x1ffn;
+  const SV39_VIRTUAL_BITS = 39n;
+  const SV39_MODE = 8;
+  const PTE_PPN_SHIFT = 10n;
+  const PTE_PPN_MASK = (1n << 44n) - 1n;
+  const PTE_RESERVED_MASK = 0x7fn << 54n;   // 비트 60–54
+  const PTE_PBMT_MASK = 0x3n << 61n;        // 비트 62–61 (이 시뮬레이터는 Svpbmt를 끈 상태로 본다)
+  const PTE_NAPOT_MASK = 1n << 63n;         // 비트 63 (Svnapot도 끈 상태)
+  const FLAG = { V: 1n, R: 2n, W: 4n, X: 8n, U: 16n, G: 32n, A: 64n, D: 128n };
+  const FLAG_ORDER = ["D", "A", "G", "U", "X", "W", "R", "V"];
+  const FAULT_CODES = { execute: 12, read: 13, write: 15 };
+  const FAULT_NAMES = { execute: "Instruction page fault", read: "Load page fault", write: "Store/AMO page fault" };
+  const ACCESS_NAMES = { execute: "실행(인출)", read: "읽기(load)", write: "쓰기(store)" };
+  const ROOT_TABLE_PPN = 0x80400n;
+  const SATP_ASID = 1;
+  const PAGE_SIZE_NAMES = ["4 KiB 페이지", "2 MiB 메가페이지", "1 GiB 기가페이지"];
+
+  /* ---------- 화면 배치 상수 ---------- */
+  const BOX_SATP = 0;
+  const BOX_PHYSICAL = 4;
+  const WIDE_LAYOUT_MINIMUM_WIDTH = 640;
+  const TRANSITION_SECONDS = 0.7;
+  const AUTO_PLAY_INTERVAL_SECONDS = 1.7;
+  const LEVEL_COLOR_NAMES = ["teal", "accent", "violet"];
+  const LEVEL_SOFT_COLOR_NAMES = ["tealSoft", "accentSoft", "violetSoft"];
+
+  const SCENARIOS = [
+    { label: "① 사용자 코드 실행 (4 KiB)", address: "0x0000000000401234", access: "execute", privilege: "U", isSumSet: false, isMxrSet: false, isHardwareUpdate: true },
+    { label: "② 사용자 데이터에 쓰기 (D 갱신)", address: "0x0000000000402010", access: "write", privilege: "U", isSumSet: false, isMxrSet: false, isHardwareUpdate: true },
+    { label: "③ 커널 2 MiB 메가페이지", address: "0xffffffff80345678", access: "read", privilege: "S", isSumSet: false, isMxrSet: false, isHardwareUpdate: true },
+    { label: "④ 직접 매핑 1 GiB 기가페이지", address: "0xffffffc012345678", access: "write", privilege: "S", isSumSet: false, isMxrSet: false, isHardwareUpdate: true },
+    { label: "⑤ 정렬되지 않은 슈퍼페이지", address: "0xffffffc040000100", access: "read", privilege: "S", isSumSet: false, isMxrSet: false, isHardwareUpdate: true },
+    { label: "⑥ 무효 PTE (V=0)", address: "0x0000000000403000", access: "read", privilege: "U", isSumSet: false, isMxrSet: false, isHardwareUpdate: true },
+    { label: "⑦ S 모드가 사용자 페이지 읽기 (SUM)", address: "0x0000000000402010", access: "read", privilege: "S", isSumSet: false, isMxrSet: false, isHardwareUpdate: true },
+    { label: "⑧ 실행 전용 페이지 읽기 (MXR)", address: "0x0000000000404000", access: "read", privilege: "U", isSumSet: false, isMxrSet: false, isHardwareUpdate: true },
+    { label: "⑨ W=1, R=0 예약 조합", address: "0x0000000000405000", access: "read", privilege: "U", isSumSet: false, isMxrSet: false, isHardwareUpdate: true },
+    { label: "⑩ A=0 페이지 (Svade면 폴트)", address: "0x0000000000406000", access: "read", privilege: "U", isSumSet: false, isMxrSet: false, isHardwareUpdate: false },
+    { label: "⑪ 읽기 전용 코드에 쓰기", address: "0x0000000000401234", access: "write", privilege: "U", isSumSet: false, isMxrSet: false, isHardwareUpdate: true },
+    { label: "⑫ 정규형이 아닌 주소", address: "0x0000004000000000", access: "read", privilege: "U", isSumSet: false, isMxrSet: false, isHardwareUpdate: true },
+  ];
+
+  /* ---------- 페이지 테이블 메모리와 변환 알고리즘 ---------- */
+  function makePte(ppn, flags) {
+    return (ppn << PTE_PPN_SHIFT) | flags;
+  }
+  function hasFlag(pte, flag) {
+    return (pte & flag) !== 0n;
+  }
+  function ptePpn(pte) {
+    return (pte >> PTE_PPN_SHIFT) & PTE_PPN_MASK;
+  }
+
+  /** 시나리오가 공유하는 작은 물리 메모리. A/D 갱신이 남지 않도록 실행할 때마다 새로 만든다. */
+  function buildMemory() {
+    const memory = new Map();
+    const USER_LEVEL1_PPN = 0x80401n;
+    const USER_LEVEL0_PPN = 0x80402n;
+    const KERNEL_LEVEL1_PPN = 0x80403n;
+    const entryAddress = (ppn, index) => ppn * PAGE_SIZE + BigInt(index) * PTE_SIZE;
+    const { V, R, W, X, U, G, A, D } = FLAG;
+    // 루트(레벨 2) 표: 사용자 영역 포인터, 1 GiB 직접 매핑, 정렬이 틀린 기가페이지, 커널 영역 포인터
+    memory.set(entryAddress(ROOT_TABLE_PPN, 0), makePte(USER_LEVEL1_PPN, V));
+    memory.set(entryAddress(ROOT_TABLE_PPN, 256), makePte(0x80000n, V | R | W | G | A | D));
+    memory.set(entryAddress(ROOT_TABLE_PPN, 257), makePte(0x80200n, V | R | W | G | A | D));
+    memory.set(entryAddress(ROOT_TABLE_PPN, 510), makePte(KERNEL_LEVEL1_PPN, V | G));
+    // 사용자 레벨 1 표
+    memory.set(entryAddress(USER_LEVEL1_PPN, 2), makePte(USER_LEVEL0_PPN, V));
+    // 사용자 레벨 0 표: 4 KiB 페이지들
+    memory.set(entryAddress(USER_LEVEL0_PPN, 1), makePte(0x81001n, V | R | X | U | A));
+    memory.set(entryAddress(USER_LEVEL0_PPN, 2), makePte(0x81002n, V | R | W | U | A));
+    memory.set(entryAddress(USER_LEVEL0_PPN, 3), makePte(0x81003n, R | W | U | A | D));
+    memory.set(entryAddress(USER_LEVEL0_PPN, 4), makePte(0x81004n, V | X | U | A));
+    memory.set(entryAddress(USER_LEVEL0_PPN, 5), makePte(0x81005n, V | W | U | A | D));
+    memory.set(entryAddress(USER_LEVEL0_PPN, 6), makePte(0x81006n, V | R | W | U));
+    // 커널 레벨 1 표: 2 MiB 메가페이지 (커널 코드)
+    memory.set(entryAddress(KERNEL_LEVEL1_PPN, 1), makePte(0x80200n, V | R | X | G | A | D));
+    return memory;
+  }
+
+  function virtualPageNumber(virtualAddress, level) {
+    return Number((virtualAddress >> (PAGE_SHIFT + BigInt(level) * VPN_BITS)) & VPN_MASK);
+  }
+
+  function isCanonical(virtualAddress) {
+    const upperBits = virtualAddress >> (SV39_VIRTUAL_BITS - 1n);
+    const allOnes = (1n << (64n - SV39_VIRTUAL_BITS + 1n)) - 1n;
+    return upperBits === 0n || upperBits === allOnes;
+  }
+
+  /**
+   * 규격의 변환 알고리즘을 수행하며 단계마다 기록을 남긴다.
+   * request: { virtualAddress, access, privilege, isSumSet, isMxrSet, isHardwareUpdate }
+   */
+  function translate(request, memory) {
+    const steps = [];
+    const access = request.access;
+    const fault = (reason, level) => {
+      steps.push({ kind: "fault", level, reason });
+      return { steps, isSuccess: false, faultCode: FAULT_CODES[access], faultName: FAULT_NAMES[access], reason, level };
+    };
+    const virtualAddress = request.virtualAddress;
+    if (!isCanonical(virtualAddress)) {
+      return fault("비트 63–39가 비트 38과 같지 않다 (정규형이 아닌 주소)", null);
+    }
+    let tableBase = ROOT_TABLE_PPN * PAGE_SIZE;
+    let level = LEVELS - 1;
+    steps.push({ kind: "start", level, tableBase });
+    let pte = 0n;
+    let pteAddress = 0n;
+    for (;;) {
+      const index = virtualPageNumber(virtualAddress, level);
+      pteAddress = tableBase + BigInt(index) * PTE_SIZE;
+      pte = memory.has(pteAddress) ? memory.get(pteAddress) : 0n;
+      steps.push({ kind: "read", level, tableBase, index, pteAddress, pte });
+      const isReadable = hasFlag(pte, FLAG.R);
+      const isWritable = hasFlag(pte, FLAG.W);
+      if (!hasFlag(pte, FLAG.V)) return fault("PTE의 V=0 (무효)", level);
+      if (!isReadable && isWritable) return fault("R=0인데 W=1 (예약된 조합)", level);
+      const hasReservedBits = (pte & (PTE_RESERVED_MASK | PTE_PBMT_MASK | PTE_NAPOT_MASK)) !== 0n;
+      if (hasReservedBits) return fault("예약 비트가 0이 아니다", level);
+      const isLeaf = isReadable || hasFlag(pte, FLAG.X);
+      if (isLeaf) break;
+      level -= 1;
+      if (level < 0) return fault("레벨 0에서도 포인터 PTE (잎이 없음)", 0);
+      tableBase = ptePpn(pte) * PAGE_SIZE;
+      steps.push({ kind: "descend", level, tableBase });
+    }
+    const pagePpn = ptePpn(pte);
+    steps.push({ kind: "leaf", level, pte });
+    if (level > 0) {
+      const lowPpnMask = (1n << (BigInt(level) * VPN_BITS)) - 1n;
+      if ((pagePpn & lowPpnMask) !== 0n) return fault("정렬되지 않은 슈퍼페이지: pte.ppn[" + (level - 1) + ":0] ≠ 0", level);
+    }
+    const isUserPage = hasFlag(pte, FLAG.U);
+    if (request.privilege === "U" && !isUserPage) return fault("U 모드인데 U=0 (커널 전용 페이지)", level);
+    if (request.privilege === "S" && isUserPage) {
+      if (access === "execute") return fault("S 모드는 U=1 페이지를 SUM과 상관없이 실행할 수 없다", level);
+      if (!request.isSumSet) return fault("S 모드가 U=1 페이지에 접근했는데 SUM=0", level);
+    }
+    if (access === "execute" && !hasFlag(pte, FLAG.X)) return fault("X=0 페이지에서 명령어 인출", level);
+    if (access === "read") {
+      const canRead = hasFlag(pte, FLAG.R) || (request.isMxrSet && hasFlag(pte, FLAG.X));
+      if (!canRead) return fault("R=0 페이지 읽기 (MXR=" + (request.isMxrSet ? 1 : 0) + ")", level);
+    }
+    if (access === "write" && !hasFlag(pte, FLAG.W)) return fault("W=0 페이지에 쓰기", level);
+    const needsAccessed = !hasFlag(pte, FLAG.A);
+    const needsDirty = access === "write" && !hasFlag(pte, FLAG.D);
+    if (needsAccessed || needsDirty) {
+      if (!request.isHardwareUpdate) {
+        const missingBit = needsAccessed ? "A=0" : "D=0";
+        return fault("Svade: " + missingBit + "이므로 OS가 비트를 켜도록 폴트", level);
+      }
+      let updatedPte = pte | FLAG.A;
+      if (access === "write") updatedPte |= FLAG.D;
+      memory.set(pteAddress, updatedPte);
+      steps.push({ kind: "update", level, pteAddress, before: pte, after: updatedPte });
+      pte = updatedPte;
+    }
+    const offsetBits = PAGE_SHIFT + BigInt(level) * VPN_BITS;
+    const offsetMask = (1n << offsetBits) - 1n;
+    const physicalAddress = ((pagePpn << PAGE_SHIFT) & ~offsetMask) | (virtualAddress & offsetMask);
+    steps.push({ kind: "done", level, physicalAddress, pte });
+    return { steps, isSuccess: true, physicalAddress, level };
+  }
+
+  /* ---------- 표시용 글자 만들기 ---------- */
+  function hex(value, digits) {
+    return "0x" + value.toString(16).padStart(digits || 1, "0");
+  }
+  function codeHex(value, digits) {
+    return "<code>" + hex(value, digits) + "</code>";
+  }
+  function flagLetters(pte, separator) {
+    const letters = [];
+    ["V", "R", "W", "X", "U", "G", "A", "D"].forEach((name) => {
+      if (hasFlag(pte, FLAG[name])) letters.push(name);
+    });
+    return letters.join(separator === undefined ? " " : separator);
+  }
+  /** 좁은 상자 안에 들어가도록 PTE를 "PPN 권한글자" 꼴로 짧게 쓴다. */
+  function describePte(pte) {
+    if (pte === 0n) return "0 (빈 칸)";
+    return "ppn " + ptePpn(pte).toString(16) + " " + flagLetters(pte, "");
+  }
+  function tableBoxForLevel(level) {
+    return 1 + (LEVELS - 1 - level);
+  }
+
+  /** translate() 의 기록을 화면 단계(상자 하나에 초점)로 묶는다. */
+  function buildVisualSteps(request, result) {
+    const visualSteps = [];
+    const steps = result.steps;
+    if (steps[0].kind === "fault") {
+      visualSteps.push({ activeBox: BOX_SATP, from: null, level: null, isFault: true,
+        message: "VA = <code>" + hex(request.virtualAddress, 16) + "</code>. Sv39는 비트 63–39가 모두 비트 38과 같아야 한다. 이 주소는 그렇지 않으므로 워크를 시작하기도 전에 <b>" + result.faultName + " (scause = " + result.faultCode + ")</b>가 난다. stval에는 이 가상 주소가 담긴다." });
+      return visualSteps;
+    }
+    const bit38 = Number((request.virtualAddress >> 38n) & 1n);
+    visualSteps.push({ activeBox: BOX_SATP, from: null, level: null, isFault: false,
+      message: "비트 63–39가 모두 비트 38(=" + bit38 + ")과 같으므로 정규형. satp.MODE = 8(Sv39), satp.PPN = <code>" + hex(ROOT_TABLE_PPN) + "</code> → 루트 표 주소 <b>a = PPN × 4096 =</b> " + codeHex(ROOT_TABLE_PPN * PAGE_SIZE) + ", i = 2에서 시작한다." });
+    let previousBox = BOX_SATP;
+    steps.forEach((step, index) => {
+      if (step.kind !== "read") return;
+      const box = tableBoxForLevel(step.level);
+      const nextStep = steps[index + 1];
+      let message = "i = " + step.level + ": PTE 주소 = a + VPN[" + step.level + "] × 8 = " + codeHex(step.tableBase) + " + " + step.index + " × 8 = " + codeHex(step.pteAddress) + ". 읽은 PTE = " + codeHex(step.pte, 16);
+      let isFault = false;
+      if (nextStep.kind === "descend") {
+        message += " (V=1, R=W=X=0 → <b>포인터</b>). 다음 표 a = PPN × 4096 = " + codeHex(nextStep.tableBase) + ", i = " + nextStep.level + ".";
+      } else if (nextStep.kind === "leaf") {
+        message += " (R 또는 X가 1 → <b>잎 PTE</b>, 권한: " + flagLetters(step.pte) + ").";
+        if (step.level > 0) message += " 레벨 " + step.level + "의 잎이므로 " + PAGE_SIZE_NAMES[step.level] + "다.";
+      } else {
+        message += ". <b class=\"t-bad\">" + nextStep.reason + "</b> → <b>" + result.faultName + " (scause = " + result.faultCode + ")</b>.";
+        isFault = true;
+      }
+      visualSteps.push({ activeBox: box, from: previousBox, level: step.level, read: step, isFault, message });
+      previousBox = box;
+    });
+    const leafStep = steps.find((step) => step.kind === "leaf");
+    if (!leafStep) return visualSteps;
+    const lastStep = steps[steps.length - 1];
+    const updateStep = steps.find((step) => step.kind === "update");
+    let message = "";
+    if (lastStep.kind === "fault") {
+      message = "잎 PTE 검사(정렬 → U 비트 → R·W·X → A·D)에서 걸렸다: <b>" + lastStep.reason + "</b>. 결과는 <b>" + result.faultName + " (scause = " + result.faultCode + ")</b>, stval = <code>" + hex(request.virtualAddress, 16) + "</code>.";
+    } else {
+      const level = lastStep.level;
+      const offsetBitCount = 12 + 9 * level;
+      message = "정렬·U·R·W·X 검사를 모두 통과했다.";
+      if (updateStep) message += " A/D가 꺼져 있어 하드웨어(Svadu)가 PTE를 원자적으로 <code>" + hex(updateStep.before, 16) + "</code> → <code>" + hex(updateStep.after, 16) + "</code>로 갱신했다(메모리 쓰기 1번).";
+      message += " PA = pte.ppn[2:" + level + "] ‖ va[" + (offsetBitCount - 1) + ":0] = " + codeHex(lastStep.physicalAddress, 14) + " (" + PAGE_SIZE_NAMES[level] + ").";
+    }
+    visualSteps.push({ activeBox: BOX_PHYSICAL, from: previousBox, level: null, isFault: lastStep.kind === "fault", isFinal: true, message });
+    return visualSteps;
+  }
+
+  /* ---------- 상태 ---------- */
+  const canvasElement = document.getElementById("walk-canvas");
+  const description = document.getElementById("walk-description");
+  const scenarioSelect = document.getElementById("walk-scenario");
+  const addressInput = document.getElementById("walk-address");
+  const sumCheckbox = document.getElementById("walk-sum");
+  const mxrCheckbox = document.getElementById("walk-mxr");
+  const playButton = document.getElementById("walk-play");
+  const state = {
+    request: null,
+    memory: null,
+    result: null,
+    visualSteps: [],
+    currentStep: 0,
+    transitionProgress: 1,
+    isPlaying: false,
+    playTimer: 0,
+    inputError: "",
+  };
+  let isApplyingScenario = false;
+
+  SCENARIOS.forEach((scenario, index) => {
+    const option = document.createElement("option");
+    option.value = String(index);
+    option.textContent = scenario.label;
+    scenarioSelect.appendChild(option);
+  });
+
+  function parseAddress(text) {
+    const cleaned = text.trim().toLowerCase().replace(/_/g, "").replace(/^0x/, "");
+    if (!/^[0-9a-f]{1,16}$/.test(cleaned)) return null;
+    return BigInt("0x" + cleaned);
+  }
+
+  /** 조작부의 현재 값으로 변환을 처음부터 다시 계산한다. */
+  function recompute() {
+    if (isApplyingScenario) return;
+    const virtualAddress = parseAddress(addressInput.value);
+    stopPlaying();
+    if (virtualAddress === null) {
+      state.inputError = "가상 주소는 16진수 1–16자리로 넣어 주세요 (예: <code>0x0000000000401234</code>).";
+      state.result = null;
+      state.visualSteps = [];
+      updateTexts();
+      drawing.redraw();
+      return;
+    }
+    state.inputError = "";
+    state.request = {
+      virtualAddress,
+      access: accessControl.value(),
+      privilege: privilegeControl.value(),
+      isSumSet: sumCheckbox.checked,
+      isMxrSet: mxrCheckbox.checked,
+      isHardwareUpdate: updateControl.value() === "hardware",
+    };
+    state.memory = buildMemory();
+    state.result = translate(state.request, state.memory);
+    state.visualSteps = buildVisualSteps(state.request, state.result);
+    state.currentStep = 0;
+    state.transitionProgress = 1;
+    updateTexts();
+    drawing.redraw();
+  }
+
+  function applyScenario(index) {
+    const scenario = SCENARIOS[index];
+    isApplyingScenario = true;
+    addressInput.value = scenario.address;
+    accessControl.set(scenario.access);
+    privilegeControl.set(scenario.privilege);
+    updateControl.set(scenario.isHardwareUpdate ? "hardware" : "fault");
+    sumCheckbox.checked = scenario.isSumSet;
+    mxrCheckbox.checked = scenario.isMxrSet;
+    isApplyingScenario = false;
+    recompute();
+  }
+
+  function isAtLastStep() {
+    return state.currentStep >= state.visualSteps.length - 1;
+  }
+
+  function advance() {
+    if (!state.visualSteps.length || isAtLastStep()) {
+      stopPlaying();
+      return;
+    }
+    state.currentStep += 1;
+    state.transitionProgress = 0;
+    updateTexts();
+    if (isAtLastStep()) stopPlaying();
+  }
+
+  function stopPlaying() {
+    state.isPlaying = false;
+    playButton.textContent = "자동 재생";
+  }
+
+  function updateTexts() {
+    const virtualReadout = document.getElementById("walk-readout-virtual");
+    const resultReadout = document.getElementById("walk-readout-result");
+    if (state.inputError) {
+      description.innerHTML = "⚠️ " + state.inputError;
+      virtualReadout.textContent = "—";
+      resultReadout.textContent = "—";
+      return;
+    }
+    const visualStep = state.visualSteps[state.currentStep];
+    description.innerHTML = "<b>" + (state.currentStep + 1) + " / " + state.visualSteps.length + "</b> · " + visualStep.message;
+    virtualReadout.textContent = hex(state.request.virtualAddress, 16);
+    const shownSteps = state.visualSteps.slice(0, state.currentStep + 1);
+    const readCount = shownSteps.filter((step) => step.read).length;
+    document.getElementById("walk-readout-reads").textContent = String(readCount);
+    const hasUpdate = isAtLastStep() && state.result.steps.some((step) => step.kind === "update");
+    document.getElementById("walk-readout-writes").textContent = hasUpdate ? "1" : "0";
+    if (!isAtLastStep()) {
+      resultReadout.textContent = "진행 중…";
+    } else if (state.result.isSuccess) {
+      resultReadout.textContent = "PA " + hex(state.result.physicalAddress, 14);
+    } else {
+      resultReadout.textContent = "폴트 " + state.result.faultCode;
+    }
+  }
+
+  /* ---------- 그리기 ---------- */
+  function computeLayout(width, height) {
+    const margin = 12;
+    const isWide = width >= WIDE_LAYOUT_MINIMUM_WIDTH;
+    const addressBar = { x: margin, y: 8, width: width - 2 * margin, height: 84 };
+    const boxes = [];
+    let composition;
+    let columnGapX = 0;
+    if (isWide) {
+      const top = 128;
+      const gap = 24;
+      const boxWidth = (width - 2 * margin - 4 * gap) / 5;
+      const boxHeight = 236;
+      for (let index = 0; index < 5; index += 1) {
+        boxes.push({ x: margin + index * (boxWidth + gap), y: top, width: boxWidth, height: boxHeight });
+      }
+      composition = { x: margin, y: top + boxHeight + 48, width: width - 2 * margin, height: 70 };
+    } else {
+      const top = 104;
+      const gap = 14;
+      const rowGap = 24;
+      const columnWidth = (width - 2 * margin - gap) / 2;
+      const boxHeight = 142;
+      columnGapX = margin + columnWidth + gap / 2;
+      boxes.push({ x: margin, y: top, width: columnWidth, height: boxHeight });
+      boxes.push({ x: margin + columnWidth + gap, y: top, width: columnWidth, height: boxHeight });
+      boxes.push({ x: margin, y: top + boxHeight + rowGap, width: columnWidth, height: boxHeight });
+      boxes.push({ x: margin + columnWidth + gap, y: top + boxHeight + rowGap, width: columnWidth, height: boxHeight });
+      const lastTop = top + 2 * (boxHeight + rowGap);
+      boxes.push({ x: margin, y: lastTop, width: width - 2 * margin, height: boxHeight });
+      composition = { x: margin + 12, y: lastTop + 62, width: width - 2 * margin - 24, height: 60 };
+    }
+    return { isWide, addressBar, boxes, composition, columnGapX };
+  }
+
+  /** 두 상자를 잇는 꺾은선 좌표. 배치마다 상자 사이를 지나가지 않도록 길을 정해 둔다. */
+  function connectorPoints(layout, fromIndex, toIndex) {
+    const from = layout.boxes[fromIndex];
+    const to = layout.boxes[toIndex];
+    const fromBottom = from.y + from.height;
+    if (layout.isWide) {
+      if (toIndex === fromIndex + 1) {
+        const middleY = from.y + 34;
+        return [[from.x + from.width, middleY], [to.x, middleY]];
+      }
+      // 건너뛰는 표(슈퍼페이지) 아래로 돌아간다
+      const detourY = fromBottom + 18;
+      return [[from.x + from.width / 2, fromBottom], [from.x + from.width / 2, detourY], [to.x + to.width / 2, detourY], [to.x + to.width / 2, fromBottom]];
+    }
+    const isSameRow = Math.abs(from.y - to.y) < 1;
+    if (isSameRow) {
+      const middleY = from.y + 30;
+      return [[from.x + from.width, middleY], [to.x, middleY]];
+    }
+    if (fromIndex === 1 && toIndex === 2) {
+      return [[from.x + 24, fromBottom], [to.x + to.width - 24, to.y]];
+    }
+    if (fromIndex === 1 && toIndex === BOX_PHYSICAL) {
+      return [[from.x + 10, fromBottom], [layout.columnGapX, fromBottom + 10], [layout.columnGapX, to.y]];
+    }
+    const centerX = from.x + from.width / 2;
+    return [[centerX, fromBottom], [centerX, to.y]];
+  }
+
+  function polylineLength(points) {
+    let total = 0;
+    for (let index = 1; index < points.length; index += 1) {
+      total += Math.hypot(points[index][0] - points[index - 1][0], points[index][1] - points[index - 1][1]);
+    }
+    return total;
+  }
+
+  function pointAlong(points, fraction) {
+    let remaining = polylineLength(points) * fraction;
+    for (let index = 1; index < points.length; index += 1) {
+      const segmentLength = Math.hypot(points[index][0] - points[index - 1][0], points[index][1] - points[index - 1][1]);
+      if (remaining <= segmentLength || index === points.length - 1) {
+        const ratio = segmentLength ? Math.min(1, remaining / segmentLength) : 1;
+        return [book.linearInterpolate(points[index - 1][0], points[index][0], ratio), book.linearInterpolate(points[index - 1][1], points[index][1], ratio)];
+      }
+      remaining -= segmentLength;
+    }
+    return points[points.length - 1];
+  }
+
+  function drawConnector(context, points, color, progress) {
+    context.save();
+    context.strokeStyle = color;
+    context.lineWidth = 2;
+    context.beginPath();
+    context.moveTo(points[0][0], points[0][1]);
+    for (let index = 1; index < points.length - 1; index += 1) context.lineTo(points[index][0], points[index][1]);
+    context.stroke();
+    context.restore();
+    const lastStart = points[points.length - 2];
+    const lastEnd = points[points.length - 1];
+    book.drawArrow(context, lastStart[0], lastStart[1], lastEnd[0], lastEnd[1], { color, width: 2, headSize: 8 });
+    if (progress < 1) {
+      const [dotX, dotY] = pointAlong(points, book.easeInOut(progress));
+      context.beginPath();
+      context.arc(dotX, dotY, 6, 0, Math.PI * 2);
+      context.fillStyle = book.palette().gold;
+      context.fill();
+    }
+  }
+
+  function drawAddressBar(context, layout, colors, visualStep) {
+    const bar = layout.addressBar;
+    const virtualAddress = state.request.virtualAddress;
+    book.drawText(context, "가상 주소 VA =", bar.x, bar.y + 8, { size: 12.5, bold: true, color: colors.dim });
+    const labelWidth = context.measureText("가상 주소 VA =").width;
+    book.drawText(context, hex(virtualAddress, 16), bar.x + labelWidth + 6, bar.y + 8, { size: 12.5, bold: true, mono: true, color: colors.text });
+    const fractions = [0.14, 0.2, 0.2, 0.2, 0.26];
+    const segmentTop = bar.y + 22;
+    const segmentHeight = 40;
+    const isFinalSuccess = visualStep.isFinal && !visualStep.isFault;
+    const leafLevel = state.result.isSuccess ? state.result.level : -1;
+    let cursor = bar.x;
+    fractions.forEach((fraction, segmentIndex) => {
+      const segmentWidth = bar.width * fraction;
+      let fillColor = colors.surface;
+      let strokeColor = colors.border;
+      let label = "63–39";
+      let valueText = isCanonical(virtualAddress) ? "부호 ✓" : "부호 ✗";
+      let rangeText = "부호 확장";
+      if (segmentIndex >= 1 && segmentIndex <= 3) {
+        const level = 3 - segmentIndex;
+        fillColor = colors[LEVEL_SOFT_COLOR_NAMES[level]];
+        strokeColor = colors[LEVEL_COLOR_NAMES[level]];
+        label = "VPN[" + level + "]";
+        valueText = String(virtualPageNumber(virtualAddress, level));
+        rangeText = (12 + 9 * level + 8) + "–" + (12 + 9 * level);
+        if (isFinalSuccess && level < leafLevel) {
+          fillColor = colors.goldSoft;
+          strokeColor = colors.gold;
+        }
+      } else if (segmentIndex === 4) {
+        fillColor = colors.goldSoft;
+        strokeColor = colors.gold;
+        label = "offset";
+        valueText = hex(virtualAddress & 0xfffn, 3);
+        rangeText = "11–0";
+      } else if (!isCanonical(virtualAddress)) {
+        fillColor = colors.badSoft;
+        strokeColor = colors.bad;
+      }
+      context.fillStyle = fillColor;
+      context.fillRect(cursor, segmentTop, segmentWidth, segmentHeight);
+      context.strokeStyle = strokeColor;
+      const isHighlighted = (segmentIndex >= 1 && segmentIndex <= 3 && visualStep.level === 3 - segmentIndex) || (segmentIndex === 0 && visualStep.isFault && visualStep.activeBox === BOX_SATP);
+      context.lineWidth = isHighlighted ? 3 : 1;
+      context.strokeRect(cursor + 0.5, segmentTop + 0.5, segmentWidth - 1, segmentHeight - 1);
+      const centerX = cursor + segmentWidth / 2;
+      book.drawText(context, label, centerX, segmentTop + 13, { size: 11.5, bold: true, color: colors.text, align: "center" });
+      book.drawText(context, valueText, centerX, segmentTop + 29, { size: 11.5, mono: true, color: colors.text, align: "center" });
+      book.drawText(context, rangeText, centerX, segmentTop + segmentHeight + 10, { size: 10, color: colors.faint, align: "center" });
+      if (isHighlighted && segmentIndex >= 1) {
+        // 이 VPN 조각이 지금 보는 표의 색인임을 점선으로 잇는다
+        const box = layout.boxes[visualStep.activeBox];
+        context.save();
+        context.setLineDash([4, 4]);
+        context.strokeStyle = colors.gold;
+        context.lineWidth = 1.5;
+        context.beginPath();
+        context.moveTo(centerX, segmentTop + segmentHeight + 16);
+        context.lineTo(box.x + box.width / 2, box.y);
+        context.stroke();
+        context.restore();
+      }
+      cursor += segmentWidth;
+    });
+  }
+
+  function drawFlagStrip(context, x, y, width, pte, colors) {
+    const cellWidth = Math.min(18, (width - 7 * 2) / 8);
+    const cellHeight = 15;
+    FLAG_ORDER.forEach((name, index) => {
+      const cellX = x + index * (cellWidth + 2);
+      const isOn = hasFlag(pte, FLAG[name]);
+      book.roundedRectangle(context, cellX, y, cellWidth, cellHeight, 3);
+      context.fillStyle = isOn ? colors.accent : colors.surface;
+      context.fill();
+      book.drawText(context, name, cellX + cellWidth / 2, y + cellHeight / 2 + 0.5, { size: 10, bold: true, color: isOn ? colors.onAccent : colors.faint, align: "center" });
+    });
+  }
+
+  function boxFrame(context, box, colors, status) {
+    book.roundedRectangle(context, box.x, box.y, box.width, box.height, 10);
+    context.fillStyle = colors.elevated;
+    context.fill();
+    context.save();
+    let strokeColor = colors.border;
+    let lineWidth = 1;
+    if (status === "active") { strokeColor = colors.gold; lineWidth = 3; }
+    if (status === "visited") { strokeColor = colors.accent; lineWidth = 1.5; }
+    if (status === "fault") { strokeColor = colors.bad; lineWidth = 3; }
+    if (status === "skipped") context.setLineDash([5, 4]);
+    context.strokeStyle = strokeColor;
+    context.lineWidth = lineWidth;
+    context.stroke();
+    context.restore();
+  }
+
+  function boxStatus(boxIndex, visualStep) {
+    const shown = state.visualSteps.slice(0, state.currentStep + 1);
+    const isVisited = shown.some((step) => step.activeBox === boxIndex);
+    if (visualStep.activeBox === boxIndex) return visualStep.isFault ? "fault" : "active";
+    if (isVisited) return "visited";
+    if (isAtLastStep() && state.result.isSuccess && boxIndex !== BOX_PHYSICAL) return "skipped";
+    return "pending";
+  }
+
+  function drawSatpBox(context, box, colors, status, isWide) {
+    boxFrame(context, box, colors, status);
+    const left = box.x + 10;
+    const lineGap = isWide ? 21 : 17;
+    let y = box.y + 18;
+    book.drawText(context, "satp", left, y, { size: 14, bold: true, color: colors.gold });
+    y += lineGap + 4;
+    const lines = ["MODE = " + SV39_MODE + " (Sv39)", "ASID = " + SATP_ASID, "PPN = " + hex(ROOT_TABLE_PPN), "a = " + hex(ROOT_TABLE_PPN * PAGE_SIZE)];
+    lines.forEach((line) => {
+      book.drawText(context, line, left, y, { size: 11.5, mono: true, color: colors.text });
+      y += lineGap;
+    });
+    const request = state.request;
+    const modeLine = request.privilege + " 모드 · " + ACCESS_NAMES[request.access];
+    const switchLine = "SUM " + (request.isSumSet ? 1 : 0) + " · MXR " + (request.isMxrSet ? 1 : 0);
+    if (isWide) {
+      y += 8;
+      book.drawText(context, modeLine, left, y, { size: 11.5, color: colors.dim });
+      book.drawText(context, switchLine, left, y + lineGap, { size: 11.5, color: colors.dim });
+    } else {
+      book.drawText(context, modeLine, left, box.y + box.height - 28, { size: 10.5, color: colors.dim });
+      book.drawText(context, switchLine, left, box.y + box.height - 13, { size: 10.5, color: colors.dim });
+    }
+  }
+
+  function drawTableBox(context, box, colors, status, level, readStep, isWide) {
+    boxFrame(context, box, colors, status);
+    const left = box.x + 10;
+    const levelColor = colors[LEVEL_COLOR_NAMES[level]];
+    context.fillStyle = levelColor;
+    context.fillRect(box.x + 1, box.y + 8, 4, 18);
+    const title = level === LEVELS - 1 ? "레벨 2 (루트)" : "레벨 " + level;
+    book.drawText(context, title, left, box.y + 17, { size: 13.5, bold: true, color: colors.text });
+    if (!readStep) {
+      const message = status === "skipped" ? "건너뜀 (슈퍼페이지)" : "아직 읽지 않음";
+      book.drawText(context, message, box.x + box.width / 2, box.y + box.height / 2, { size: 12, color: colors.faint, align: "center" });
+      return;
+    }
+    const rowHeight = isWide ? 20 : 15;
+    let y = box.y + (isWide ? 40 : 34);
+    book.drawText(context, "a = " + hex(readStep.tableBase), left, y, { size: 11, mono: true, color: colors.dim });
+    y += isWide ? 12 : 9;
+    const firstIndex = Math.max(0, Math.min(511 - 2, readStep.index - 1));
+    // 글자가 상자 밖으로 삐져나가지 않도록 상자 안쪽으로 잘라 그린다
+    context.save();
+    context.beginPath();
+    context.rect(box.x + 2, box.y, box.width - 4, box.height);
+    context.clip();
+    for (let row = 0; row < 3; row += 1) {
+      const entryIndex = firstIndex + row;
+      const entryAddress = readStep.tableBase + BigInt(entryIndex) * PTE_SIZE;
+      const entryValue = state.memory.has(entryAddress) ? state.memory.get(entryAddress) : 0n;
+      const isSelected = entryIndex === readStep.index;
+      if (isSelected) {
+        context.fillStyle = status === "fault" ? colors.badSoft : colors.goldSoft;
+        context.fillRect(box.x + 4, y, box.width - 8, rowHeight);
+      }
+      const rowText = "[" + entryIndex + "] " + describePte(isSelected ? readStep.pte : entryValue);
+      book.drawText(context, rowText, left, y + rowHeight / 2 + 0.5, { size: 10.5, mono: true, color: isSelected ? colors.text : colors.faint, bold: isSelected });
+      y += rowHeight;
+    }
+    context.restore();
+    y += isWide ? 14 : 9;
+    book.drawText(context, "PTE @ " + hex(readStep.pteAddress), left, y, { size: 11, mono: true, color: colors.dim });
+    y += isWide ? 14 : 9;
+    drawFlagStrip(context, left, y, box.width - 20, readStep.pte, colors);
+    if (isWide) {
+      const kind = hasFlag(readStep.pte, FLAG.V) ? ((hasFlag(readStep.pte, FLAG.R) || hasFlag(readStep.pte, FLAG.X)) ? "잎 PTE" : "포인터 PTE") : "무효 PTE";
+      book.drawText(context, kind, left, y + 34, { size: 12, bold: true, color: status === "fault" ? colors.bad : colors.accent });
+    }
+  }
+
+  function drawPhysicalBox(context, box, colors, status, visualStep, isWide) {
+    boxFrame(context, box, colors, status);
+    const left = box.x + 10;
+    book.drawText(context, "물리 주소 (PA)", left, box.y + 17, { size: 13.5, bold: true, color: colors.text });
+    const isReached = visualStep.isFinal || (isAtLastStep() && !state.result.isSuccess);
+    if (!isReached) {
+      book.drawText(context, "워크가 끝나면", box.x + box.width / 2, box.y + box.height / 2 - 8, { size: 12, color: colors.faint, align: "center" });
+      book.drawText(context, "여기에 결과가 나온다", box.x + box.width / 2, box.y + box.height / 2 + 10, { size: 12, color: colors.faint, align: "center" });
+      return;
+    }
+    if (state.result.isSuccess) {
+      book.drawText(context, hex(state.result.physicalAddress, 14), left, box.y + 42, { size: isWide ? 12.5 : 14, bold: true, mono: true, color: colors.gold });
+      if (!isWide) {
+        book.drawText(context, PAGE_SIZE_NAMES[state.result.level], box.x + box.width - 10, box.y + 42, { size: 11.5, color: colors.dim, align: "right" });
+        return;
+      }
+      book.drawText(context, PAGE_SIZE_NAMES[state.result.level], left, box.y + 64, { size: 11.5, color: colors.dim });
+      const finalPte = state.result.steps[state.result.steps.length - 1].pte;
+      book.drawText(context, "최종 PTE 비트", left, box.y + 92, { size: 11, color: colors.faint });
+      drawFlagStrip(context, left, box.y + 102, box.width - 20, finalPte, colors);
+      return;
+    }
+    book.drawText(context, "페이지 폴트", left, box.y + 42, { size: 15, bold: true, color: colors.bad });
+    book.drawText(context, "scause = " + state.result.faultCode, left, box.y + 63, { size: 12, mono: true, color: colors.text });
+    book.drawText(context, state.result.faultName, left, box.y + 82, { size: 11, color: colors.dim });
+  }
+
+  function drawComposition(context, layout, colors, visualStep) {
+    const area = layout.composition;
+    const isDone = visualStep.isFinal && state.result.isSuccess;
+    if (layout.isWide) {
+      book.drawText(context, "물리 주소 조립", area.x, area.y - 12, { size: 12.5, bold: true, color: colors.dim });
+    }
+    if (!isDone) {
+      if (layout.isWide) {
+        book.roundedRectangle(context, area.x, area.y, area.width, 40, 8);
+        context.save();
+        context.setLineDash([5, 4]);
+        context.strokeStyle = colors.border;
+        context.stroke();
+        context.restore();
+        book.drawText(context, "변환이 성공하면 PTE의 PPN과 VA의 오프셋으로 물리 주소를 조립한다", area.x + area.width / 2, area.y + 20, { size: 12, color: colors.faint, align: "center" });
+      }
+      return;
+    }
+    const level = state.result.level;
+    const offsetBitCount = 12 + 9 * level;
+    const ppnBitCount = 56 - offsetBitCount;
+    const leftWidth = area.width * Math.max(0.42, ppnBitCount / 56);
+    const rightWidth = area.width - leftWidth;
+    const physicalAddress = state.result.physicalAddress;
+    const offsetMask = (1n << BigInt(offsetBitCount)) - 1n;
+    const barHeight = 40;
+    context.fillStyle = colors.accentSoft;
+    context.fillRect(area.x, area.y, leftWidth, barHeight);
+    context.strokeStyle = colors.accent;
+    context.lineWidth = 1;
+    context.strokeRect(area.x + 0.5, area.y + 0.5, leftWidth - 1, barHeight - 1);
+    context.fillStyle = colors.goldSoft;
+    context.fillRect(area.x + leftWidth, area.y, rightWidth, barHeight);
+    context.strokeStyle = colors.gold;
+    context.strokeRect(area.x + leftWidth + 0.5, area.y + 0.5, rightWidth - 1, barHeight - 1);
+    const leftLabel = "pte.ppn[2:" + level + "] → PA[55:" + offsetBitCount + "]";
+    const rightLabel = "va[" + (offsetBitCount - 1) + ":0]";
+    book.drawText(context, leftLabel, area.x + leftWidth / 2, area.y + 13, { size: 10.5, bold: true, color: colors.text, align: "center" });
+    book.drawText(context, hex(physicalAddress >> BigInt(offsetBitCount)), area.x + leftWidth / 2, area.y + 29, { size: 11, mono: true, color: colors.text, align: "center" });
+    book.drawText(context, rightLabel, area.x + leftWidth + rightWidth / 2, area.y + 13, { size: 10.5, bold: true, color: colors.text, align: "center" });
+    book.drawText(context, hex(physicalAddress & offsetMask), area.x + leftWidth + rightWidth / 2, area.y + 29, { size: 11, mono: true, color: colors.text, align: "center" });
+    if (layout.isWide) {
+      book.drawText(context, "= PA " + hex(physicalAddress, 14), area.x, area.y + barHeight + 16, { size: 12, mono: true, bold: true, color: colors.gold });
+      const absorbedText = level === 0 ? "4 KiB 페이지: VPN 조각은 모두 변환되었다" : "VPN 조각 " + level + "개가 오프셋으로 흡수되었다";
+      book.drawText(context, absorbedText, area.x + 190, area.y + barHeight + 16, { size: 12, color: colors.dim });
+    }
+  }
+
+  function draw(context, width, height, colors) {
+    const layout = computeLayout(width, height);
+    if (!state.result) {
+      book.drawText(context, state.inputError ? "주소 형식을 확인해 주세요" : "준비 중", width / 2, height / 2, { size: 14, color: colors.dim, align: "center" });
+      return;
+    }
+    const visualStep = state.visualSteps[state.currentStep];
+    drawAddressBar(context, layout, colors, visualStep);
+    // 지나온 화살표를 먼저 그려서 상자 테두리 아래로 깔리게 한다
+    for (let index = 1; index <= state.currentStep; index += 1) {
+      const step = state.visualSteps[index];
+      const points = connectorPoints(layout, step.from, step.activeBox);
+      const color = step.isFault ? colors.bad : colors.accent;
+      const progress = index === state.currentStep ? state.transitionProgress : 1;
+      drawConnector(context, points, color, progress);
+    }
+    layout.boxes.forEach((box, boxIndex) => {
+      const status = boxStatus(boxIndex, visualStep);
+      if (boxIndex === BOX_SATP) {
+        drawSatpBox(context, box, colors, status, layout.isWide);
+      } else if (boxIndex === BOX_PHYSICAL) {
+        drawPhysicalBox(context, box, colors, status, visualStep, layout.isWide);
+      } else {
+        const level = LEVELS - boxIndex;
+        const shown = state.visualSteps.slice(0, state.currentStep + 1);
+        const visit = shown.find((step) => step.read && step.read.level === level);
+        drawTableBox(context, box, colors, status, level, visit ? visit.read : null, layout.isWide);
+      }
+    });
+    drawComposition(context, layout, colors, visualStep);
+    if (layout.isWide) drawLegend(context, width, height, colors);
+  }
+
+  /** 상자 테두리 색의 뜻. 넓은 화면에만 자리가 있다. */
+  function drawLegend(context, width, height, colors) {
+    const items = [[colors.gold, "지금 보는 단계", false], [colors.accent, "지나온 단계", false], [colors.bad, "폴트가 난 곳", false], [colors.border, "건너뛴 표(슈퍼페이지)", true]];
+    let x = 12;
+    const y = height - 20;
+    items.forEach(([color, label, isDashed]) => {
+      context.save();
+      context.strokeStyle = color;
+      context.lineWidth = 2.5;
+      if (isDashed) context.setLineDash([4, 3]);
+      book.roundedRectangle(context, x, y - 7, 22, 14, 4);
+      context.stroke();
+      context.restore();
+      book.drawText(context, label, x + 30, y, { size: 12, color: colors.dim });
+      context.font = "400 12px " + colors.font;
+      x += 30 + context.measureText(label).width + 24;
+    });
+  }
+
+  const drawing = book.createCanvas(canvasElement, draw, { aspectRatio: 0.62, minimumHeight: 600, maximumHeight: 640 });
+
+  const animation = book.animationLoop(canvasElement, (deltaSeconds) => {
+    let shouldRedraw = false;
+    if (state.transitionProgress < 1) {
+      state.transitionProgress = Math.min(1, state.transitionProgress + deltaSeconds / TRANSITION_SECONDS);
+      shouldRedraw = true;
+    }
+    if (state.isPlaying) {
+      state.playTimer += deltaSeconds;
+      if (state.playTimer >= AUTO_PLAY_INTERVAL_SECONDS) {
+        state.playTimer = 0;
+        advance();
+        shouldRedraw = true;
+      }
+    }
+    if (shouldRedraw) drawing.redraw();
+  });
+  animation.start();
+
+  /* ---------- 조작부 연결 ---------- */
+  // segmented() 는 만들 때 한 번 onChange 를 부르므로, 세 조작부가 다 만들어질 때까지 계산을 미룬다
+  isApplyingScenario = true;
+  const accessControl = book.segmented("walk-access", recompute);
+  const privilegeControl = book.segmented("walk-privilege", recompute);
+  const updateControl = book.segmented("walk-update", recompute);
+  isApplyingScenario = false;
+  sumCheckbox.addEventListener("change", recompute);
+  mxrCheckbox.addEventListener("change", recompute);
+  addressInput.addEventListener("change", recompute);
+  scenarioSelect.addEventListener("change", () => applyScenario(Number(scenarioSelect.value)));
+  document.getElementById("walk-step").addEventListener("click", () => {
+    stopPlaying();
+    advance();
+    drawing.redraw();
+  });
+  playButton.addEventListener("click", () => {
+    if (state.isPlaying) {
+      stopPlaying();
+      return;
+    }
+    if (isAtLastStep()) {
+      state.currentStep = 0;
+      state.memory = buildMemory();
+      state.result = translate(state.request, state.memory);
+      updateTexts();
+    }
+    state.isPlaying = true;
+    state.playTimer = AUTO_PLAY_INTERVAL_SECONDS;
+    playButton.textContent = "멈춤";
+  });
+  document.getElementById("walk-reset").addEventListener("click", recompute);
+  applyScenario(0);
+})();
+
+/* ---------------------------------------------------------------------------
+   TLB와 ASID 시뮬레이터: 8칸 이하의 완전 연관 TLB, 가장 오래 안 쓴 칸을 내보낸다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const KERNEL_PAGE = "0xffffffff80000000";
+  const FENCE_ADDRESS = "0x10000";
+  const WALK_READS_PER_MISS = 3;            // Sv39 4 KiB 페이지는 PTE를 세 번 읽는다
+  const NO_ASID = 0;
+  const PROCESSES = {
+    1: { name: "A", ownerClass: "owner-a", pages: { "0x10000": "0x81010", "0x11000": "0x81011", "0x12000": "0x81012" } },
+    2: { name: "B", ownerClass: "owner-b", pages: { "0x10000": "0x82010", "0x11000": "0x82011", "0x20000": "0x82020" } },
+  };
+  const KERNEL_PPN = "0x80200";
+  const SEQUENCE = [
+    { type: "switch", process: 1 },
+    { type: "access", page: "0x10000" }, { type: "access", page: "0x11000" }, { type: "access", page: "0x10000" },
+    { type: "access", page: KERNEL_PAGE }, { type: "access", page: "0x12000" },
+    { type: "switch", process: 2 },
+    { type: "access", page: "0x10000" }, { type: "access", page: "0x11000" }, { type: "access", page: KERNEL_PAGE },
+    { type: "access", page: "0x20000" },
+    { type: "switch", process: 1 },
+    { type: "access", page: "0x10000" }, { type: "access", page: "0x11000" }, { type: "access", page: KERNEL_PAGE },
+    { type: "access", page: "0x12000" },
+  ];
+
+  const body = document.getElementById("tlb-body");
+  const sequenceElement = document.getElementById("tlb-sequence");
+  const description = document.getElementById("tlb-description");
+  const state = { entries: [], nextEvent: 0, activeProcess: null, hits: 0, misses: 0, clock: 0, outcomes: [], lastHighlight: {}, isUsingAsid: true, size: 8 };
+
+  function currentAsid() {
+    if (!state.activeProcess) return null;
+    return state.isUsingAsid ? state.activeProcess : NO_ASID;
+  }
+
+  function reset() {
+    state.entries = [];
+    state.nextEvent = 0;
+    state.activeProcess = null;
+    state.hits = 0;
+    state.misses = 0;
+    state.clock = 0;
+    state.outcomes = [];
+    state.lastHighlight = {};
+    description.innerHTML = "<b>다음 사건</b>을 눌러 시작하자. 처음에는 TLB가 비어 있다.";
+    render();
+  }
+
+  /** 조건에 맞는 칸을 지우고, 화면에서 빨간 줄로 보여 주려고 지운 칸을 기록한다. */
+  function flushEntries(shouldFlush) {
+    const flushedEntries = state.entries.filter(shouldFlush);
+    state.entries = state.entries.filter((entry) => !shouldFlush(entry));
+    state.lastHighlight = { flushed: flushedEntries };
+    return flushedEntries.length;
+  }
+
+  function runEvent() {
+    if (state.nextEvent >= SEQUENCE.length) {
+      description.innerHTML = "사건을 모두 실행했다. <b>처음으로</b>를 눌러 다른 설정으로 다시 해 보자.";
+      return;
+    }
+    const event = SEQUENCE[state.nextEvent];
+    state.nextEvent += 1;
+    state.lastHighlight = {};
+    if (event.type === "switch") {
+      state.activeProcess = event.process;
+      state.outcomes.push("switch");
+      const processName = PROCESSES[event.process].name;
+      if (state.isUsingAsid) {
+        description.innerHTML = "문맥 전환: <code>csrw satp</code>로 프로세스 " + processName + "의 표와 <b>ASID " + event.process + "</b>를 한꺼번에 넣었다. TLB는 그대로 둔다. 다른 ASID의 칸은 그냥 적중하지 않을 뿐이다.";
+      } else {
+        const flushedCount = flushEntries((entry) => !entry.isGlobal && entry.asid === NO_ASID);
+        description.innerHTML = "문맥 전환: ASID가 없으므로 satp를 쓴 뒤 <code>sfence.vma x0, t0</code>(t0 = 0)로 비전역 칸을 모두 지웠다(" + flushedCount + "칸). 전역(G) 커널 칸은 남는다.";
+      }
+      render();
+      return;
+    }
+    const asid = currentAsid();
+    const isKernel = event.page === KERNEL_PAGE;
+    state.clock += 1;
+    const matchingEntry = state.entries.find((entry) => entry.page === event.page && (entry.isGlobal || entry.asid === asid));
+    if (matchingEntry) {
+      matchingEntry.lastUsed = state.clock;
+      state.hits += 1;
+      state.outcomes.push("hit");
+      state.lastHighlight = { hit: matchingEntry };
+      const reason = matchingEntry.isGlobal ? "G=1 전역 칸이라 ASID와 상관없이" : "ASID " + asid + "와 VPN이 모두 같아";
+      description.innerHTML = PROCESSES[state.activeProcess].name + "가 <code>" + event.page + "</code> 접근 → " + reason + " <b class=\"t-ok\">적중</b>. PPN <code>" + matchingEntry.ppn + "</code>를 바로 쓴다.";
+      render();
+      return;
+    }
+    state.misses += 1;
+    state.outcomes.push("miss");
+    let evictedText = "";
+    if (state.entries.length >= state.size) {
+      const victim = state.entries.reduce((oldest, entry) => (entry.lastUsed < oldest.lastUsed ? entry : oldest));
+      state.entries = state.entries.filter((entry) => entry !== victim);
+      evictedText = " TLB가 가득 차서 가장 오래 안 쓴 칸(<code>" + victim.page + "</code>)을 내보냈다.";
+    }
+    const process = PROCESSES[state.activeProcess];
+    const newEntry = {
+      asid,
+      page: event.page,
+      ppn: isKernel ? KERNEL_PPN : process.pages[event.page],
+      isGlobal: isKernel,
+      ownerClass: isKernel ? "owner-kernel" : process.ownerClass,
+      owner: isKernel ? "커널" : process.name,
+      lastUsed: state.clock,
+    };
+    state.entries.push(newEntry);
+    state.lastHighlight = { inserted: newEntry };
+    description.innerHTML = process.name + "가 <code>" + event.page + "</code> 접근 → <b class=\"t-bad\">미스</b>. 페이지 워크로 PTE를 " + WALK_READS_PER_MISS + "번 읽어 PPN <code>" + newEntry.ppn + "</code>를 찾아 새 칸에 넣었다" + (isKernel ? " (G=1 전역 매핑)" : "") + "." + evictedText;
+    render();
+  }
+
+  function applyFence(kind) {
+    const asid = currentAsid();
+    if (asid === null) {
+      description.innerHTML = "아직 실행 중인 프로세스가 없다. <b>다음 사건</b>을 먼저 눌러 보자.";
+      return;
+    }
+    let flushedCount = 0;
+    let explanation = "";
+    if (kind === "all") {
+      flushedCount = flushEntries(() => true);
+      explanation = "rs1=x0, rs2=x0: 모든 주소 공간의 모든 칸(전역 포함)을 지웠다.";
+    } else if (kind === "asid") {
+      flushedCount = flushEntries((entry) => entry.asid === asid && !entry.isGlobal);
+      explanation = "rs1=x0, rs2=a1(ASID " + asid + "): 그 ASID의 칸만 지웠다. 전역 칸은 남는다.";
+    } else if (kind === "address") {
+      flushedCount = flushEntries((entry) => entry.page === FENCE_ADDRESS);
+      explanation = "rs1=a0(<code>" + FENCE_ADDRESS + "</code>), rs2=x0: 그 VA의 잎 칸을 모든 ASID에서 지웠다.";
+    } else {
+      flushedCount = flushEntries((entry) => entry.page === FENCE_ADDRESS && entry.asid === asid && !entry.isGlobal);
+      explanation = "rs1=a0(<code>" + FENCE_ADDRESS + "</code>), rs2=a1(ASID " + asid + "): 그 VA, 그 ASID의 칸만 지웠다.";
+    }
+    description.innerHTML = "<code>sfence.vma</code> 실행 · " + explanation + " 지운 칸: <b>" + flushedCount + "</b>개.";
+    render();
+  }
+
+  function render() {
+    const rows = [];
+    const flushed = state.lastHighlight.flushed || [];
+    for (let slot = 0; slot < state.size; slot += 1) {
+      const entry = state.entries[slot];
+      if (!entry) {
+        rows.push('<tr class="empty"><td>' + slot + "</td><td>0</td><td>–</td><td>–</td><td>(빈 칸)</td><td>–</td><td>–</td></tr>");
+        continue;
+      }
+      let rowClass = "";
+      if (state.lastHighlight.hit === entry) rowClass = "hit";
+      if (state.lastHighlight.inserted === entry) rowClass = "inserted";
+      const asidText = entry.isGlobal ? "–" : String(entry.asid);
+      rows.push('<tr class="' + rowClass + '"><td>' + slot + "</td><td>1</td><td>" + asidText + "</td><td>" + (entry.isGlobal ? 1 : 0) + '</td><td><span class="' + entry.ownerClass + '">' + entry.owner + "</span> " + entry.page + "</td><td>" + entry.ppn + "</td><td>" + (state.clock - entry.lastUsed) + "번 전</td></tr>");
+    }
+    flushed.forEach((entry) => {
+      rows.push('<tr class="flushed"><td>×</td><td>1</td><td>' + (entry.isGlobal ? "–" : entry.asid) + "</td><td>" + (entry.isGlobal ? 1 : 0) + "</td><td>" + entry.owner + " " + entry.page + "</td><td>" + entry.ppn + "</td><td>지워짐</td></tr>");
+    });
+    body.innerHTML = rows.join("");
+
+    sequenceElement.innerHTML = SEQUENCE.map((event, index) => {
+      const classNames = ["sequence-chip"];
+      if (event.type === "switch") classNames.push("switch");
+      if (index === state.nextEvent) classNames.push("current");
+      const outcome = state.outcomes[index];
+      if (outcome === "hit" || outcome === "miss") classNames.push(outcome);
+      let label = "";
+      if (event.type === "switch") label = "→ " + PROCESSES[event.process].name;
+      else if (event.page === KERNEL_PAGE) label = "커널";
+      else label = event.page;
+      return '<span class="' + classNames.join(" ") + '">' + label + "</span>";
+    }).join("");
+
+    const asid = currentAsid();
+    const activeName = state.activeProcess ? PROCESSES[state.activeProcess].name : "—";
+    document.getElementById("tlb-readout-asid").textContent = activeName + " · " + (asid === null ? "—" : asid);
+    document.getElementById("tlb-readout-hits").textContent = String(state.hits);
+    document.getElementById("tlb-readout-misses").textContent = String(state.misses);
+    const total = state.hits + state.misses;
+    document.getElementById("tlb-readout-rate").textContent = total ? Math.round((state.hits / total) * 100) + "%" : "—";
+    document.getElementById("tlb-readout-walk").textContent = String(state.misses * WALK_READS_PER_MISS);
+  }
+
+  book.segmented("tlb-asid-mode", (value) => { state.isUsingAsid = value === "asid"; reset(); });
+  book.range("tlb-size", (value) => { state.size = value; reset(); }, (value) => value + "칸");
+  document.getElementById("tlb-step").addEventListener("click", runEvent);
+  document.getElementById("tlb-run").addEventListener("click", () => {
+    while (state.nextEvent < SEQUENCE.length) runEvent();
+  });
+  document.getElementById("tlb-reset").addEventListener("click", reset);
+  document.querySelectorAll("#tlb-sim [data-fence]").forEach((button) => {
+    button.addEventListener("click", () => applyFence(button.dataset.fence));
+  });
+  reset();
+})();
+</script>
+</body>
+</html>

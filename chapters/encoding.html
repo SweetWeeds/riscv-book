@@ -1,0 +1,1768 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>04 명령어 형식과 인코딩 · RISC-V Book</title>
+<meta name="description" content="RISC-V 32비트 명령어의 R·I·S·B·U·J 여섯 형식을 비트 단위로 해부한다. 레지스터 칸을 고정한 이유, 부호 비트가 언제나 inst[31]인 이유, B·J 즉시값이 뒤섞인 이유, lui+addi 상수 만들기를 인코더·디코더 시뮬레이터로 익힌다.">
+<link rel="icon" href="../assets/img/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/style.css">
+<script src="../assets/js/book.js"></script>
+<script src="../assets/js/riscv.js"></script>
+<style>
+  .sim .scroll-x { overflow-x: auto; }
+  .sim .scroll-x > .bitfield { min-width: 560px; }
+  .bitfield .field .value { font-size: 11.5px; }
+  .is-invalid { opacity: 0.4; }
+  .binary-line { display: flex; flex-wrap: wrap; gap: 4px 6px; font-family: var(--mono); font-size: 15px; margin-top: 10px; }
+  .binary-line .group { padding: 2px 5px; border-radius: 5px; letter-spacing: 0.04em; }
+  .binary-line .group.opcode, .chip.opcode { background: var(--accent-soft); }
+  .binary-line .group.register, .chip.register { background: var(--teal-soft); }
+  .binary-line .group.immediate, .chip.immediate { background: var(--accent-2-soft); }
+  .binary-line .group.function, .chip.function { background: var(--violet-soft); }
+  .message-error { margin-top: 12px; padding: 8px 12px; border-radius: 8px; background: var(--bad-soft); color: var(--bad); font-size: 14.5px; font-weight: 600; }
+  .message-note { margin-top: 12px; padding: 8px 12px; border-radius: 8px; background: var(--warn-soft); color: var(--text); font-size: 14.5px; }
+  .decoder-bits { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin: 4px 0 14px; }
+  .decoder-bits .byte-group { display: flex; gap: 3px; }
+  .decoder-bits .bit { width: 20px; height: 30px; font-size: 13px; }
+  @media (max-width: 520px) { .decoder-bits .bit { width: 16px; height: 28px; font-size: 12px; } .decoder-bits .byte-group { gap: 2px; } }
+  .bit.kind-opcode { box-shadow: inset 0 -4px 0 var(--accent); }
+  .bit.kind-register { box-shadow: inset 0 -4px 0 var(--teal); }
+  .bit.kind-immediate { box-shadow: inset 0 -4px 0 var(--accent-2); }
+  .bit.kind-function { box-shadow: inset 0 -4px 0 var(--violet); }
+  .bit-index-row { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 11px; color: var(--text-faint); }
+  .field-table td:first-child { font-family: var(--mono); font-weight: 700; white-space: nowrap; }
+  .field-table td.mono { font-family: var(--mono); white-space: nowrap; }
+  .chip { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; border: 1px solid var(--border); }
+  .example-row { display: flex; flex-wrap: wrap; gap: 6px; }
+  .example-row .button { font-family: var(--mono); font-size: 12.5px; padding: 5px 10px; }
+  .constant-steps { display: grid; gap: 10px; }
+  .constant-row { display: grid; grid-template-columns: minmax(0, 150px) minmax(0, 1fr); gap: 4px 14px; align-items: baseline; padding-bottom: 10px; border-bottom: 1px dashed var(--border); }
+  .constant-row:last-child { border-bottom: 0; }
+  @media (max-width: 560px) { .constant-row { grid-template-columns: minmax(0, 1fr); } }
+  .constant-row .label { font-size: 13.5px; font-weight: 700; color: var(--text-dim); }
+  .constant-row .content { font-family: var(--mono); font-size: 14.5px; overflow-wrap: anywhere; }
+  .constant-row .content .explain { font-family: var(--font); font-size: 14px; color: var(--text-dim); display: block; margin-top: 2px; }
+  .split-upper { background: var(--accent-2-soft); border-radius: 4px; padding: 1px 3px; }
+  .split-lower { background: var(--accent-soft); border-radius: 4px; padding: 1px 3px; }
+  .split-sign { color: var(--bad); font-weight: 800; text-decoration: underline; }
+  .verdict-ok { color: var(--ok); font-weight: 700; }
+  .verdict-bad { color: var(--bad); font-weight: 700; }
+  .lane-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+  .lane { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; font-family: var(--mono); font-size: 13.5px; background: var(--canvas-bg); }
+  .lane h4 { margin: 0 0 6px !important; font-family: var(--font); font-size: 14px !important; }
+  .lane div { overflow-wrap: anywhere; }
+  table.opcode-table td:first-child { white-space: normal; min-width: 120px; }
+  table.opcode-table td:nth-child(3) { white-space: nowrap; }
+  .encoder-assembly { font-family: var(--mono); font-size: 17px; font-weight: 700; color: var(--accent); margin-bottom: 4px; overflow-wrap: anywhere; }
+</style>
+</head>
+<body data-chapter="encoding">
+<main class="chapter">
+  <header class="chapter-hero">
+    <div class="eyebrow">Chapter 04</div>
+    <h1>명령어 형식과 인코딩</h1>
+    <p class="lead"><code>add a0, a1, a2</code>는 CPU에게 <code>0x00c58533</code>이라는 32비트 숫자 하나로 전달된다. 이 32비트 안 어디에 “무슨 명령인지”, “어느 레지스터인지”, “어떤 상수인지”가 들어 있을까? RISC-V의 기본 명령어는 <strong>R·I·S·B·U·J 여섯 가지 형식</strong>만으로 모든 것을 표현한다. 이 장에서는 그 비트 배치를 하나하나 해부하고, 언뜻 보면 이상하게 뒤섞인 즉시값 비트가 사실은 <strong>하드웨어를 단순하게 만들기 위한 치밀한 설계</strong>라는 것을 확인한다.</p>
+    <ul class="objectives">
+      <li>32비트 명령어의 하위 2비트가 왜 항상 <code>11</code>인지, 명령어 길이를 어떻게 알아내는지 설명한다.</li>
+      <li>R·I·S·B·U·J 여섯 형식의 비트 필드를 그리고, 명령마다 어느 형식을 쓰는지 안다.</li>
+      <li>rs1·rs2·rd가 모든 형식에서 같은 자리에 있고, 부호 비트가 언제나 inst[31]인 이유를 하드웨어 관점에서 설명한다.</li>
+      <li>B·J 형식의 즉시값 비트가 뒤섞인 규칙을 외우지 않고 “다른 형식과 최대한 겹치게”라는 원리로 이해한다.</li>
+      <li>opcode·funct3·funct7로 명령을 고르는 과정을 알고, 직접 인코딩·해독해 본다.</li>
+      <li><code>lui</code>+<code>addi</code>로 32비트 상수를 만들 때 필요한 +1 보정과, <code>auipc</code>로 pc 상대 주소를 만드는 법을 익힌다.</li>
+    </ul>
+    <div class="spec-meta">
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html" target="_blank" rel="noopener">Unprivileged ISA · RV32I Base Integer Instruction Set</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/unpriv/rv-32-64g.html" target="_blank" rel="noopener">RV32/64G Instruction Set Listings</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/unpriv/intro.html" target="_blank" rel="noopener">Base Instruction-Length Encoding</a>
+    </div>
+  </header>
+
+  <!-- ============================================================ -->
+  <section id="length">
+    <h2>32비트 명령어와 길이 표시 비트</h2>
+    <p>RISC-V 베이스 ISA의 명령어는 모두 <b>정확히 32비트</b>이고, 메모리에서 4바이트 경계에 정렬되어야 한다. 규격은 이 정렬 단위를 <span class="term">IALIGN</span><span class="english">(instruction-address alignment)</span>이라 부르며 베이스 ISA에서는 32비트다. 길이가 고정되어 있으니 CPU는 다음 명령이 어디서 시작하는지 고민할 필요가 없다. x86처럼 1바이트에서 15바이트까지 길이가 제각각인 ISA에서는 명령의 경계를 찾는 일 자체가 큰 회로가 된다.</p>
+    <p>그렇다고 RISC-V가 길이를 영원히 32비트로 묶어 둔 것은 아니다. 처음부터 <b>16비트 압축 명령(C 확장, <a href="compressed.html">13장</a>)</b>과 더 긴 명령이 들어올 자리를 남겨 두었다. 그 표시가 바로 <b>하위 2비트</b>다. 베이스 ISA의 32비트 명령은 모두 하위 2비트가 <code>11</code>이고, 압축 명령은 <code>00</code>·<code>01</code>·<code>10</code> 중 하나다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 880 300" role="img" aria-label="하위 비트로 명령어 길이를 구별하는 방법과 메모리에 저장된 add 명령의 바이트 순서">
+        <text x="20" y="24" class="t t-bold">길이는 가장 낮은 비트들이 알려 준다</text>
+        <rect x="20" y="46" width="250" height="44" rx="8" class="f-surface"/>
+        <text x="145" y="73" text-anchor="middle" class="t">16비트 압축 명령 (C 확장)</text>
+        <rect x="272" y="46" width="80" height="44" rx="8" class="f-warn-soft"/>
+        <text x="312" y="73" text-anchor="middle" class="t-mono">aa</text>
+        <text x="362" y="73" class="t-dim">aa ≠ 11</text>
+        <text x="231" y="104" text-anchor="middle" class="t-faint" style="font-size:11px">inst[4:2]</text>
+        <text x="312" y="104" text-anchor="middle" class="t-faint" style="font-size:11px">inst[1:0]</text>
+        <rect x="20" y="110" width="170" height="44" rx="8" class="f-surface"/>
+        <text x="105" y="137" text-anchor="middle" class="t t-bold">32비트 명령</text>
+        <rect x="192" y="110" width="78" height="44" rx="8" class="f-violet-soft"/>
+        <text x="231" y="137" text-anchor="middle" class="t-mono">bbb</text>
+        <rect x="272" y="110" width="80" height="44" rx="8" class="f-accent-soft"/>
+        <text x="312" y="137" text-anchor="middle" class="t-accent">11</text>
+        <text x="362" y="137" class="t-dim">bbb ≠ 111</text>
+        <rect x="20" y="174" width="170" height="44" rx="8" class="f-surface"/>
+        <text x="105" y="201" text-anchor="middle" class="t-faint">더 긴 명령용 (예약)</text>
+        <rect x="192" y="174" width="78" height="44" rx="8" class="f-surface"/>
+        <text x="231" y="201" text-anchor="middle" class="t-mono">111</text>
+        <rect x="272" y="174" width="80" height="44" rx="8" class="f-surface"/>
+        <text x="312" y="201" text-anchor="middle" class="t-mono">11</text>
+        <text x="362" y="201" class="t-dim">&gt; 32비트</text>
+        <text x="20" y="252" class="t-faint">비트가 모두 0인 명령과, 모두 1인 명령은 규격상 불법이다.</text>
+        <text x="20" y="272" class="t-faint">→ 지워진(0) 메모리나 비어 있는(1) 플래시로 잘못 뛰어들면 곧바로 예외가 난다.</text>
+
+        <line x1="450" y1="20" x2="450" y2="280" stroke="var(--border)" stroke-dasharray="4 5"/>
+        <text x="470" y="24" class="t t-bold">메모리 속 add a0, a1, a2</text>
+        <text x="470" y="42" class="t-faint t-mono" style="font-size:11.5px">0x00c58533 · 리틀 엔디언</text>
+        <g class="t-mono">
+          <text x="476" y="78" class="t-mono">A+0</text><rect x="530" y="56" width="80" height="36" rx="6" class="f-accent-soft"/><text x="570" y="79" text-anchor="middle" class="t-accent">33</text>
+          <text x="476" y="122" class="t-mono">A+1</text><rect x="530" y="100" width="80" height="36" rx="6" class="f-surface"/><text x="570" y="123" text-anchor="middle" class="t-mono">85</text>
+          <text x="476" y="166" class="t-mono">A+2</text><rect x="530" y="144" width="80" height="36" rx="6" class="f-surface"/><text x="570" y="167" text-anchor="middle" class="t-mono">c5</text>
+          <text x="476" y="210" class="t-mono">A+3</text><rect x="530" y="188" width="80" height="36" rx="6" class="f-surface"/><text x="570" y="211" text-anchor="middle" class="t-mono">00</text>
+        </g>
+        <path d="M612 74 H650" class="s-accent flow-dash"/>
+        <text x="658" y="79" class="t-mono">0011 00<tspan class="t-accent">11</tspan></text>
+        <text x="658" y="104" class="t-dim">하위 2비트 = 11</text>
+        <text x="658" y="124" class="t-dim">→ 32비트 명령이다</text>
+        <text x="658" y="160" class="t-faint">가장 낮은 주소의 첫 바이트만</text>
+        <text x="658" y="178" class="t-faint">읽고도 길이를 안다</text>
+        <text x="470" y="252" class="t-faint">명령은 16비트 조각(parcel) 단위로, 낮은 주소에</text>
+        <text x="470" y="272" class="t-faint">낮은 번호 비트가 오도록 저장된다.</text>
+      </svg></div>
+      <figcaption><b>그림 4-1.</b> 명령어 길이 인코딩. 왼쪽: 하위 2비트가 <code>11</code>이 아니면 16비트 압축 명령, <code>11</code>이면 32비트 이상이다. opcode 지도에서 inst[4:2]=<code>111</code> 열은 32비트보다 긴 명령을 위해 비워 두었다. 오른쪽: 명령어는 메모리 엔디언과 상관없이 리틀 엔디언 16비트 조각으로 저장되므로, 길이를 결정하는 비트는 언제나 가장 먼저 읽히는 바이트에 있다.</figcaption>
+    </figure>
+
+    <div class="callout deep"><strong>2비트를 희생한 대가와 이득</strong><p>32비트 중 2비트를 길이 표시에 쓰면 베이스 ISA가 쓸 수 있는 공간은 그만큼 좁아진다. 대신 얻는 것이 많다. 규격의 해설에 따르면 압축 명령을 지원하지 않는 구현은 명령어 캐시에 하위 2비트를 저장하지 않아도 되어 6.25%를 아낄 수 있고, RV32I 전체가 32비트 인코딩 공간의 <b>8분의 1도 쓰지 않기</b> 때문에 나머지는 표준 확장과 사용자 확장의 몫으로 남는다.</p></div>
+    <div class="callout tip"><strong>0x00000000은 언제나 불법 명령</strong><p>규격은 하위 16비트가 모두 0인 인코딩을 불법 명령으로 정했다. 그래서 소프트웨어는 “여기서 반드시 예외를 내고 싶다”는 자리에 0을 써 넣을 수 있다. 모든 비트가 1인 ILEN 길이 인코딩도 불법이다. 이 두 값은 지워진 메모리, 연결이 끊긴 버스, 프로그래밍하지 않은 플래시에서 흔히 읽히는 값이기 때문이다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="formats">
+    <h2>여섯 가지 형식: R·I·S·B·U·J</h2>
+    <p>규격은 베이스 ISA의 형식을 <b>핵심 네 가지(R·I·S·U)</b>와, 즉시값을 다루는 방식만 조금 다른 <b>변형 두 가지(B·J)</b>로 설명한다. 이름은 쓰임새에서 왔다. <b>R</b>egister(레지스터끼리 연산), <b>I</b>mmediate(즉시값 연산과 적재), <b>S</b>tore(저장), <b>B</b>ranch(분기), <b>U</b>pper immediate(상위 즉시값), <b>J</b>ump(점프)다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 900 406" role="img" aria-label="여섯 가지 명령어 형식의 비트 배치">
+<line x1="239" y1="27" x2="239" y2="34" stroke="var(--teal)" stroke-width="2"/>
+<line x1="367" y1="27" x2="367" y2="34" stroke="var(--teal)" stroke-width="2"/>
+<line x1="239" y1="74" x2="239" y2="84" stroke="var(--teal)" stroke-width="2"/>
+<line x1="367" y1="74" x2="367" y2="84" stroke="var(--teal)" stroke-width="2"/>
+<line x1="239" y1="124" x2="239" y2="134" stroke="var(--teal)" stroke-width="2"/>
+<line x1="367" y1="124" x2="367" y2="134" stroke="var(--teal)" stroke-width="2"/>
+<line x1="239" y1="174" x2="239" y2="184" stroke="var(--teal)" stroke-width="2"/>
+<line x1="367" y1="174" x2="367" y2="184" stroke="var(--teal)" stroke-width="2"/>
+<line x1="239" y1="224" x2="239" y2="234" stroke="var(--teal)" stroke-width="2"/>
+<line x1="367" y1="224" x2="367" y2="234" stroke="var(--teal)" stroke-width="2"/>
+<line x1="239" y1="274" x2="239" y2="284" stroke="var(--teal)" stroke-width="2"/>
+<line x1="367" y1="274" x2="367" y2="284" stroke="var(--teal)" stroke-width="2"/>
+<line x1="239" y1="324" x2="239" y2="334" stroke="var(--teal)" stroke-width="2"/>
+<line x1="367" y1="324" x2="367" y2="334" stroke="var(--teal)" stroke-width="2"/>
+<line x1="239" y1="27" x2="367" y2="27" stroke="var(--teal)" stroke-width="2"/>
+<line x1="239" y1="334" x2="367" y2="334" stroke="var(--teal)" stroke-width="2"/>
+<line x1="369" y1="27" x2="369" y2="34" stroke="var(--teal)" stroke-width="2"/>
+<line x1="497" y1="27" x2="497" y2="34" stroke="var(--teal)" stroke-width="2"/>
+<line x1="369" y1="74" x2="369" y2="84" stroke="var(--teal)" stroke-width="2"/>
+<line x1="497" y1="74" x2="497" y2="84" stroke="var(--teal)" stroke-width="2"/>
+<line x1="369" y1="124" x2="369" y2="134" stroke="var(--teal)" stroke-width="2"/>
+<line x1="497" y1="124" x2="497" y2="134" stroke="var(--teal)" stroke-width="2"/>
+<line x1="369" y1="174" x2="369" y2="184" stroke="var(--teal)" stroke-width="2"/>
+<line x1="497" y1="174" x2="497" y2="184" stroke="var(--teal)" stroke-width="2"/>
+<line x1="369" y1="224" x2="369" y2="234" stroke="var(--teal)" stroke-width="2"/>
+<line x1="497" y1="224" x2="497" y2="234" stroke="var(--teal)" stroke-width="2"/>
+<line x1="369" y1="274" x2="369" y2="284" stroke="var(--teal)" stroke-width="2"/>
+<line x1="497" y1="274" x2="497" y2="284" stroke="var(--teal)" stroke-width="2"/>
+<line x1="369" y1="324" x2="369" y2="334" stroke="var(--teal)" stroke-width="2"/>
+<line x1="497" y1="324" x2="497" y2="334" stroke="var(--teal)" stroke-width="2"/>
+<line x1="369" y1="27" x2="497" y2="27" stroke="var(--teal)" stroke-width="2"/>
+<line x1="369" y1="334" x2="497" y2="334" stroke="var(--teal)" stroke-width="2"/>
+<line x1="577" y1="27" x2="577" y2="34" stroke="var(--teal)" stroke-width="2"/>
+<line x1="705" y1="27" x2="705" y2="34" stroke="var(--teal)" stroke-width="2"/>
+<line x1="577" y1="74" x2="577" y2="84" stroke="var(--teal)" stroke-width="2"/>
+<line x1="705" y1="74" x2="705" y2="84" stroke="var(--teal)" stroke-width="2"/>
+<line x1="577" y1="124" x2="577" y2="134" stroke="var(--teal)" stroke-width="2"/>
+<line x1="705" y1="124" x2="705" y2="134" stroke="var(--teal)" stroke-width="2"/>
+<line x1="577" y1="174" x2="577" y2="184" stroke="var(--teal)" stroke-width="2"/>
+<line x1="705" y1="174" x2="705" y2="184" stroke="var(--teal)" stroke-width="2"/>
+<line x1="577" y1="224" x2="577" y2="234" stroke="var(--teal)" stroke-width="2"/>
+<line x1="705" y1="224" x2="705" y2="234" stroke="var(--teal)" stroke-width="2"/>
+<line x1="577" y1="274" x2="577" y2="284" stroke="var(--teal)" stroke-width="2"/>
+<line x1="705" y1="274" x2="705" y2="284" stroke="var(--teal)" stroke-width="2"/>
+<line x1="577" y1="324" x2="577" y2="334" stroke="var(--teal)" stroke-width="2"/>
+<line x1="705" y1="324" x2="705" y2="334" stroke="var(--teal)" stroke-width="2"/>
+<line x1="577" y1="27" x2="705" y2="27" stroke="var(--teal)" stroke-width="2"/>
+<line x1="577" y1="334" x2="705" y2="334" stroke="var(--teal)" stroke-width="2"/>
+<text x="69.0" y="20" text-anchor="middle" class="t-faint" style="font-size:11px">31</text>
+<text x="225.0" y="20" text-anchor="middle" class="t-faint" style="font-size:11px">25</text>
+<text x="251.0" y="20" text-anchor="middle" class="t-faint" style="font-size:11px">24</text>
+<text x="355.0" y="20" text-anchor="middle" class="t-faint" style="font-size:11px">20</text>
+<text x="381.0" y="20" text-anchor="middle" class="t-faint" style="font-size:11px">19</text>
+<text x="485.0" y="20" text-anchor="middle" class="t-faint" style="font-size:11px">15</text>
+<text x="511.0" y="20" text-anchor="middle" class="t-faint" style="font-size:11px">14</text>
+<text x="563.0" y="20" text-anchor="middle" class="t-faint" style="font-size:11px">12</text>
+<text x="589.0" y="20" text-anchor="middle" class="t-faint" style="font-size:11px">11</text>
+<text x="693.0" y="20" text-anchor="middle" class="t-faint" style="font-size:11px">7</text>
+<text x="719.0" y="20" text-anchor="middle" class="t-faint" style="font-size:11px">6</text>
+<text x="875.0" y="20" text-anchor="middle" class="t-faint" style="font-size:11px">0</text>
+<text x="28.0" y="61.0" text-anchor="middle" class="t t-bold" style="font-size:19px">R</text>
+<rect x="56" y="34" width="182" height="40" rx="5" class="f-violet-soft"/>
+<text x="147.0" y="59.0" text-anchor="middle" class="t-mono" style="font-size:13px">funct7</text>
+<rect x="238" y="34" width="130" height="40" rx="5" class="f-teal-soft"/>
+<text x="303.0" y="59.0" text-anchor="middle" class="t-mono" style="font-size:13px">rs2</text>
+<rect x="368" y="34" width="130" height="40" rx="5" class="f-teal-soft"/>
+<text x="433.0" y="59.0" text-anchor="middle" class="t-mono" style="font-size:13px">rs1</text>
+<rect x="498" y="34" width="78" height="40" rx="5" class="f-violet-soft"/>
+<text x="537.0" y="59.0" text-anchor="middle" class="t-mono" style="font-size:13px">funct3</text>
+<rect x="576" y="34" width="130" height="40" rx="5" class="f-teal-soft"/>
+<text x="641.0" y="59.0" text-anchor="middle" class="t-mono" style="font-size:13px">rd</text>
+<rect x="706" y="34" width="182" height="40" rx="5" class="f-accent-soft"/>
+<text x="797.0" y="59.0" text-anchor="middle" class="t-mono" style="font-size:13px">opcode</text>
+<text x="28.0" y="111.0" text-anchor="middle" class="t t-bold" style="font-size:19px">I</text>
+<rect x="56" y="84" width="312" height="40" rx="5" class="f-gold-soft"/>
+<text x="212.0" y="109.0" text-anchor="middle" class="t-mono" style="font-size:13px">imm[11:0]</text>
+<rect x="368" y="84" width="130" height="40" rx="5" class="f-teal-soft"/>
+<text x="433.0" y="109.0" text-anchor="middle" class="t-mono" style="font-size:13px">rs1</text>
+<rect x="498" y="84" width="78" height="40" rx="5" class="f-violet-soft"/>
+<text x="537.0" y="109.0" text-anchor="middle" class="t-mono" style="font-size:13px">funct3</text>
+<rect x="576" y="84" width="130" height="40" rx="5" class="f-teal-soft"/>
+<text x="641.0" y="109.0" text-anchor="middle" class="t-mono" style="font-size:13px">rd</text>
+<rect x="706" y="84" width="182" height="40" rx="5" class="f-accent-soft"/>
+<text x="797.0" y="109.0" text-anchor="middle" class="t-mono" style="font-size:13px">opcode</text>
+<text x="28.0" y="161.0" text-anchor="middle" class="t t-bold" style="font-size:19px">S</text>
+<rect x="56" y="134" width="182" height="40" rx="5" class="f-gold-soft"/>
+<text x="147.0" y="159.0" text-anchor="middle" class="t-mono" style="font-size:13px">imm[11:5]</text>
+<rect x="238" y="134" width="130" height="40" rx="5" class="f-teal-soft"/>
+<text x="303.0" y="159.0" text-anchor="middle" class="t-mono" style="font-size:13px">rs2</text>
+<rect x="368" y="134" width="130" height="40" rx="5" class="f-teal-soft"/>
+<text x="433.0" y="159.0" text-anchor="middle" class="t-mono" style="font-size:13px">rs1</text>
+<rect x="498" y="134" width="78" height="40" rx="5" class="f-violet-soft"/>
+<text x="537.0" y="159.0" text-anchor="middle" class="t-mono" style="font-size:13px">funct3</text>
+<rect x="576" y="134" width="130" height="40" rx="5" class="f-gold-soft"/>
+<text x="641.0" y="159.0" text-anchor="middle" class="t-mono" style="font-size:13px">imm[4:0]</text>
+<rect x="706" y="134" width="182" height="40" rx="5" class="f-accent-soft"/>
+<text x="797.0" y="159.0" text-anchor="middle" class="t-mono" style="font-size:13px">opcode</text>
+<text x="28.0" y="211.0" text-anchor="middle" class="t t-bold" style="font-size:19px">B</text>
+<rect x="56" y="184" width="26" height="40" rx="5" class="f-gold-soft"/>
+<text x="69.0" y="201.0" text-anchor="middle" class="t-mono" style="font-size:10px">imm</text><text x="69.0" y="214.0" text-anchor="middle" class="t-mono" style="font-size:10px">[12]</text>
+<rect x="82" y="184" width="156" height="40" rx="5" class="f-gold-soft"/>
+<text x="160.0" y="209.0" text-anchor="middle" class="t-mono" style="font-size:13px">imm[10:5]</text>
+<rect x="238" y="184" width="130" height="40" rx="5" class="f-teal-soft"/>
+<text x="303.0" y="209.0" text-anchor="middle" class="t-mono" style="font-size:13px">rs2</text>
+<rect x="368" y="184" width="130" height="40" rx="5" class="f-teal-soft"/>
+<text x="433.0" y="209.0" text-anchor="middle" class="t-mono" style="font-size:13px">rs1</text>
+<rect x="498" y="184" width="78" height="40" rx="5" class="f-violet-soft"/>
+<text x="537.0" y="209.0" text-anchor="middle" class="t-mono" style="font-size:13px">funct3</text>
+<rect x="576" y="184" width="104" height="40" rx="5" class="f-gold-soft"/>
+<text x="628.0" y="209.0" text-anchor="middle" class="t-mono" style="font-size:13px">imm[4:1]</text>
+<rect x="680" y="184" width="26" height="40" rx="5" class="f-gold-soft"/>
+<text x="693.0" y="201.0" text-anchor="middle" class="t-mono" style="font-size:10px">imm</text><text x="693.0" y="214.0" text-anchor="middle" class="t-mono" style="font-size:10px">[11]</text>
+<rect x="706" y="184" width="182" height="40" rx="5" class="f-accent-soft"/>
+<text x="797.0" y="209.0" text-anchor="middle" class="t-mono" style="font-size:13px">opcode</text>
+<text x="28.0" y="261.0" text-anchor="middle" class="t t-bold" style="font-size:19px">U</text>
+<rect x="56" y="234" width="520" height="40" rx="5" class="f-gold-soft"/>
+<text x="316.0" y="259.0" text-anchor="middle" class="t-mono" style="font-size:13px">imm[31:12]</text>
+<rect x="576" y="234" width="130" height="40" rx="5" class="f-teal-soft"/>
+<text x="641.0" y="259.0" text-anchor="middle" class="t-mono" style="font-size:13px">rd</text>
+<rect x="706" y="234" width="182" height="40" rx="5" class="f-accent-soft"/>
+<text x="797.0" y="259.0" text-anchor="middle" class="t-mono" style="font-size:13px">opcode</text>
+<text x="28.0" y="311.0" text-anchor="middle" class="t t-bold" style="font-size:19px">J</text>
+<rect x="56" y="284" width="26" height="40" rx="5" class="f-gold-soft"/>
+<text x="69.0" y="301.0" text-anchor="middle" class="t-mono" style="font-size:10px">imm</text><text x="69.0" y="314.0" text-anchor="middle" class="t-mono" style="font-size:10px">[20]</text>
+<rect x="82" y="284" width="260" height="40" rx="5" class="f-gold-soft"/>
+<text x="212.0" y="309.0" text-anchor="middle" class="t-mono" style="font-size:13px">imm[10:1]</text>
+<rect x="342" y="284" width="26" height="40" rx="5" class="f-gold-soft"/>
+<text x="355.0" y="301.0" text-anchor="middle" class="t-mono" style="font-size:10px">imm</text><text x="355.0" y="314.0" text-anchor="middle" class="t-mono" style="font-size:10px">[11]</text>
+<rect x="368" y="284" width="208" height="40" rx="5" class="f-gold-soft"/>
+<text x="472.0" y="309.0" text-anchor="middle" class="t-mono" style="font-size:13px">imm[19:12]</text>
+<rect x="576" y="284" width="130" height="40" rx="5" class="f-teal-soft"/>
+<text x="641.0" y="309.0" text-anchor="middle" class="t-mono" style="font-size:13px">rd</text>
+<rect x="706" y="284" width="182" height="40" rx="5" class="f-accent-soft"/>
+<text x="797.0" y="309.0" text-anchor="middle" class="t-mono" style="font-size:13px">opcode</text>
+<rect x="56" y="345" width="16" height="16" rx="4" class="f-accent-soft"/>
+<text x="78" y="358" class="t-dim">opcode</text>
+<rect x="206" y="345" width="16" height="16" rx="4" class="f-teal-soft"/>
+<text x="228" y="358" class="t-dim">레지스터 번호</text>
+<rect x="356" y="345" width="16" height="16" rx="4" class="f-violet-soft"/>
+<text x="378" y="358" class="t-dim">funct (기능 선택)</text>
+<rect x="506" y="345" width="16" height="16" rx="4" class="f-gold-soft"/>
+<text x="528" y="358" class="t-dim">즉시값</text>
+<text x="56" y="386" class="t-teal" style="font-size:12.5px">청록 괄호: rs2 · rs1 · rd 는 어느 형식에서나 같은 비트 자리에 있다</text>
+</svg></div>
+      <figcaption><b>그림 4-2.</b> RV32I의 여섯 가지 명령어 형식. 위의 숫자는 비트 번호다. 즉시값 칸의 <code>imm[x]</code>는 “명령어의 몇 번째 비트”가 아니라 <b>만들어질 즉시값의 몇 번째 비트</b>인지를 뜻한다(규격 그림과 같은 표기). opcode는 늘 맨 아래 7비트, funct3은 늘 [14:12]에 있고, 레지스터 번호 칸(청록)은 형식이 달라도 자리가 움직이지 않는다.</figcaption>
+    </figure>
+
+    <div class="table-wrap"><table>
+      <thead><tr><th>형식</th><th>들어 있는 것</th><th>쓰는 명령 (RV32I)</th><th>예</th></tr></thead>
+      <tbody>
+        <tr><td><b>R</b></td><td>rd, rs1, rs2, funct3, funct7</td><td>add, sub, sll, slt, sltu, xor, srl, sra, or, and</td><td><code>add a0, a1, a2</code></td></tr>
+        <tr><td><b>I</b></td><td>rd, rs1, 12비트 즉시값, funct3</td><td>addi 등 즉시값 연산, 시프트(즉시값 자리에 shamt), 적재 lb…lhu, jalr, fence, ecall, ebreak</td><td><code>lw a0, 8(sp)</code></td></tr>
+        <tr><td><b>S</b></td><td>rs1, rs2, 12비트 즉시값(둘로 나뉨), funct3</td><td>sb, sh, sw</td><td><code>sw a0, 8(sp)</code></td></tr>
+        <tr><td><b>B</b></td><td>rs1, rs2, 13비트 오프셋(짝수), funct3</td><td>beq, bne, blt, bge, bltu, bgeu</td><td><code>beq a0, zero, loop</code></td></tr>
+        <tr><td><b>U</b></td><td>rd, 상위 20비트 즉시값</td><td>lui, auipc</td><td><code>lui a0, 0x12345</code></td></tr>
+        <tr><td><b>J</b></td><td>rd, 21비트 오프셋(짝수)</td><td>jal</td><td><code>jal ra, func</code></td></tr>
+      </tbody>
+    </table></div>
+
+    <h3>한 명령을 손으로 풀어 보기</h3>
+    <p><code>add a0, a1, a2</code>를 R 형식에 채워 넣어 보자. a0·a1·a2는 레지스터 x10·x11·x12이고(<a href="registers.html">3장</a>), add의 opcode는 <code>0110011</code>(OP), funct3과 funct7은 모두 0이다.</p>
+    <div class="scroll-x" style="overflow-x:auto"><div class="bitfield" style="min-width:560px">
+      <div class="field function" style="flex-grow:7"><div class="range"><span>31</span><span>25</span></div><div class="name">funct7</div><div class="value">0000000</div></div>
+      <div class="field register" style="flex-grow:5"><div class="range"><span>24</span><span>20</span></div><div class="name">rs2 = 12</div><div class="value">01100</div></div>
+      <div class="field register" style="flex-grow:5"><div class="range"><span>19</span><span>15</span></div><div class="name">rs1 = 11</div><div class="value">01011</div></div>
+      <div class="field function" style="flex-grow:3"><div class="range"><span>14</span><span>12</span></div><div class="name">f3</div><div class="value">000</div></div>
+      <div class="field register" style="flex-grow:5"><div class="range"><span>11</span><span>7</span></div><div class="name">rd = 10</div><div class="value">01010</div></div>
+      <div class="field opcode" style="flex-grow:7"><div class="range"><span>6</span><span>0</span></div><div class="name">OP</div><div class="value">0110011</div></div>
+    </div></div>
+    <p>비트를 이어 붙이면 <code>0000 0000 1100 0101 1000 0101 0011 0011</code>, 16진수로 <code>0x00c58533</code>이다. 어셈블러가 하는 일의 대부분은 이렇게 칸을 채우는 것이다. 이 장 가운데의 <a href="#encoder-lab">인코더 시뮬레이터</a>에서 다른 명령도 직접 채워 볼 수 있다.</p>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="register-fields">
+    <h2>레지스터 칸을 고정한 이유</h2>
+    <p>그림 4-2에서 청록색 칸이 위아래로 가지런히 줄 선 것은 우연이 아니다. 규격은 <b>rs1·rs2·rd를 모든 형식에서 같은 자리에 둔다</b>고 못 박았다. 이유는 하드웨어의 시간표에 있다. 명령어를 받은 CPU는 가능한 한 빨리 레지스터 파일에서 피연산자를 읽어야 다음 단계(연산)로 넘어갈 수 있다. 만약 형식마다 rs1의 자리가 다르다면, 먼저 opcode를 해독해 형식을 알아낸 <b>다음에야</b> 어느 비트를 레지스터 번호로 쓸지 고를 수 있다. 해독과 레지스터 읽기가 직렬로 이어지는 것이다.</p>
+    <p>RISC-V에서는 형식을 몰라도 inst[19:15]는 rs1, inst[24:20]은 rs2라고 믿고 <b>일단 레지스터를 읽어 버린다</b>. I 형식처럼 rs2가 없는 명령이라면 그 자리에 있던 즉시값 비트로 엉뚱한 레지스터를 읽게 되지만 상관없다. 해독이 끝난 뒤 그 값을 쓰지 않으면 그만이다. 이렇게 <b>해독·레지스터 읽기·부호 확장</b> 세 가지가 같은 클럭 안에서 동시에 시작된다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 880 380" role="img" aria-label="명령어 비트가 해독기, 레지스터 파일, 즉시값 생성기로 동시에 흘러가는 모습">
+        <defs>
+          <marker id="decode-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--text-faint)"/></marker>
+          <path id="decode-path-sign" d="M52.5 74 V160"/>
+          <path id="decode-path-rs2" d="M277.5 74 V160"/>
+          <path id="decode-path-rs1" d="M402.5 74 V160"/>
+          <path id="decode-path-opcode" d="M752.5 74 V160"/>
+        </defs>
+        <g>
+          <text x="52.5" y="22" text-anchor="middle" class="t-faint" style="font-size:10.5px">31</text>
+          <text x="77.5" y="22" text-anchor="middle" class="t-faint" style="font-size:10.5px">30</text>
+          <text x="202.5" y="22" text-anchor="middle" class="t-faint" style="font-size:10.5px">25</text>
+          <text x="227.5" y="22" text-anchor="middle" class="t-faint" style="font-size:10.5px">24</text>
+          <text x="327.5" y="22" text-anchor="middle" class="t-faint" style="font-size:10.5px">20</text>
+          <text x="352.5" y="22" text-anchor="middle" class="t-faint" style="font-size:10.5px">19</text>
+          <text x="452.5" y="22" text-anchor="middle" class="t-faint" style="font-size:10.5px">15</text>
+          <text x="477.5" y="22" text-anchor="middle" class="t-faint" style="font-size:10.5px">14</text>
+          <text x="527.5" y="22" text-anchor="middle" class="t-faint" style="font-size:10.5px">12</text>
+          <text x="552.5" y="22" text-anchor="middle" class="t-faint" style="font-size:10.5px">11</text>
+          <text x="652.5" y="22" text-anchor="middle" class="t-faint" style="font-size:10.5px">7</text>
+          <text x="677.5" y="22" text-anchor="middle" class="t-faint" style="font-size:10.5px">6</text>
+          <text x="827.5" y="22" text-anchor="middle" class="t-faint" style="font-size:10.5px">0</text>
+          <rect x="40" y="30" width="25" height="44" rx="5" class="f-gold-soft"/><text x="52.5" y="57" text-anchor="middle" class="t-mono" style="font-size:12px">±</text>
+          <rect x="65" y="30" width="150" height="44" rx="5" class="f-surface"/><text x="140" y="57" text-anchor="middle" class="t-mono">imm · funct7</text>
+          <rect x="215" y="30" width="125" height="44" rx="5" class="f-teal-soft"/><text x="277.5" y="57" text-anchor="middle" class="t-mono">rs2</text>
+          <rect x="340" y="30" width="125" height="44" rx="5" class="f-teal-soft"/><text x="402.5" y="57" text-anchor="middle" class="t-mono">rs1</text>
+          <rect x="465" y="30" width="75" height="44" rx="5" class="f-violet-soft"/><text x="502.5" y="57" text-anchor="middle" class="t-mono">funct3</text>
+          <rect x="540" y="30" width="125" height="44" rx="5" class="f-teal-soft"/><text x="602.5" y="57" text-anchor="middle" class="t-mono">rd</text>
+          <rect x="665" y="30" width="175" height="44" rx="5" class="f-accent-soft"/><text x="752.5" y="57" text-anchor="middle" class="t-mono">opcode</text>
+          <text x="602.5" y="96" text-anchor="middle" class="t-faint">rd는 결과를 쓸 때 사용</text>
+        </g>
+        <!-- 동시에 흘러가는 선 -->
+        <use href="#decode-path-sign" class="s-gold flow-dash" marker-end="url(#decode-arrow)"/>
+        <path d="M140 74 V160" class="s-line flow-dash" marker-end="url(#decode-arrow)"/>
+        <use href="#decode-path-rs2" class="s-accent flow-dash" marker-end="url(#decode-arrow)"/>
+        <use href="#decode-path-rs1" class="s-accent flow-dash" marker-end="url(#decode-arrow)"/>
+        <path d="M502.5 74 V120 H560 V160" class="s-line flow-dash" marker-end="url(#decode-arrow)"/>
+        <use href="#decode-path-opcode" class="s-accent flow-dash" marker-end="url(#decode-arrow)"/>
+        <circle r="5" fill="var(--accent-2)"><animateMotion dur="1.6s" begin="-0.2s" repeatCount="indefinite"><mpath href="#decode-path-sign"/></animateMotion></circle>
+        <circle r="5" fill="var(--accent-2)"><animateMotion dur="1.6s" begin="-0.2s" repeatCount="indefinite"><mpath href="#decode-path-rs2"/></animateMotion></circle>
+        <circle r="5" fill="var(--accent-2)"><animateMotion dur="1.6s" begin="-0.2s" repeatCount="indefinite"><mpath href="#decode-path-rs1"/></animateMotion></circle>
+        <circle r="5" fill="var(--accent-2)"><animateMotion dur="1.6s" begin="-0.2s" repeatCount="indefinite"><mpath href="#decode-path-opcode"/></animateMotion></circle>
+        <!-- 세 블록 -->
+        <rect x="10" y="164" width="175" height="70" rx="12" class="f-gold-soft"/>
+        <text x="97.5" y="194" text-anchor="middle" class="t t-bold">즉시값 생성</text>
+        <text x="97.5" y="216" text-anchor="middle" class="t-dim">inst[31]로 부호 확장</text>
+        <rect x="210" y="164" width="280" height="70" rx="12" class="f-teal-soft"/>
+        <text x="350" y="194" text-anchor="middle" class="t t-bold">레지스터 파일 읽기</text>
+        <text x="350" y="216" text-anchor="middle" class="t-dim">rs1·rs2 번호로 곧바로 읽는다</text>
+        <rect x="515" y="164" width="355" height="70" rx="12" class="f-accent-soft"/>
+        <text x="692.5" y="194" text-anchor="middle" class="t t-bold">해독기</text>
+        <text x="692.5" y="216" text-anchor="middle" class="t-dim">opcode·funct3·funct7 → 무슨 명령인가?</text>
+        <!-- 같은 클럭 -->
+        <rect x="10" y="252" width="860" height="28" rx="8" class="f-surface"/>
+        <text x="440" y="271" text-anchor="middle" class="t-dim">↑ 세 일이 같은 클럭 안에서 동시에 시작한다. 형식을 알아내기 전에 레지스터부터 읽는다.</text>
+        <path d="M97.5 280 L330 318" class="s-line flow-dash" marker-end="url(#decode-arrow)"/>
+        <path d="M350 280 L420 318" class="s-line flow-dash" marker-end="url(#decode-arrow)"/>
+        <path d="M692.5 280 L540 318" class="s-line flow-dash" marker-end="url(#decode-arrow)"/>
+        <rect x="290" y="320" width="300" height="50" rx="12" class="f-elev"/>
+        <text x="440" y="342" text-anchor="middle" class="t t-bold">실행 (ALU)</text>
+        <text x="440" y="361" text-anchor="middle" class="t-faint">해독 결과로 필요한 값만 고른다</text>
+      </svg></div>
+      <figcaption><b>그림 4-3.</b> 명령어가 들어오면 rs1·rs2 칸은 형식과 상관없이 곧바로 레지스터 파일로, 부호 비트 inst[31]은 즉시값 생성기로, opcode·funct는 해독기로 <b>동시에</b> 흘러간다(금색 점). 레지스터 번호와 부호 비트의 자리가 형식마다 달랐다면 해독이 끝날 때까지 기다려야 했을 것이다.</figcaption>
+    </figure>
+
+    <div class="callout spec"><strong>규격 원문에서</strong>
+      <blockquote>“Decoding register specifiers is usually on the critical paths in implementations, and so the instruction format was chosen to keep all register specifiers at the same position in all formats at the expense of having to move immediate bits across formats …”</blockquote>
+      <p><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html" target="_blank" rel="noopener">Volume I, RV32I · Base Instruction Formats</a> — 레지스터 칸을 지키는 대가로 즉시값 비트를 형식마다 옮겨 다니게 했다는 고백이다. 이 대가가 다음 두 절의 주제다.</p></div>
+
+    <div class="callout history"><strong>MIPS와 비교하면</strong><p>MIPS의 R 형식은 목적지 레지스터를 rd(비트 15–11)에 두지만, I 형식은 목적지를 rt(비트 20–16)에 둔다. 그래서 MIPS 하드웨어는 “이 명령의 목적지가 어느 칸인가”를 opcode로 골라 주는 멀티플렉서가 필요했다. RISC-V는 rd를 언제나 inst[11:7]에 두어 이 선택 자체를 없앴다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="immediates">
+    <h2>즉시값: 부호 비트는 언제나 inst[31]</h2>
+    <p>명령어 안에 박힌 상수를 <span class="term">즉시값</span><span class="english">(immediate)</span>이라 한다. RISC-V의 즉시값에는 두 가지 큰 규칙이 있다. 첫째, CSR 명령의 5비트 즉시값을 빼면 <b>모든 즉시값은 부호 확장된다</b>. MIPS처럼 어떤 명령은 0 확장, 어떤 명령은 부호 확장하는 식의 구분이 없다. 둘째, <b>부호 비트는 어느 형식에서나 inst[31]</b>이다.</p>
+    <p>32비트 즉시값의 상위 비트 20여 개는 모두 부호 비트의 복사본이다. 부호 비트의 자리가 고정되어 있으니, 하드웨어는 형식을 해독하기 전부터 inst[31] 한 가닥을 상위 비트 전체로 퍼뜨려 둘 수 있다. RV64에서는 이 복사가 52비트 이상으로 늘어나므로 더 중요해진다(<a href="rv64.html">6장</a>).</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 900 382" role="img" aria-label="형식별로 즉시값의 각 비트가 명령어의 어느 비트에서 오는지 보여 주는 표">
+<text x="56" y="16" class="t-dim" style="font-size:12px">즉시값의 비트 번호 imm[31] … imm[0] — 칸 안의 글자는 그 비트를 공급하는 명령어 비트 inst[ ]</text>
+<text x="69.0" y="40" text-anchor="middle" class="t-faint" style="font-size:11px">31</text>
+<text x="95.0" y="40" text-anchor="middle" class="t-faint" style="font-size:11px">30</text>
+<text x="225.0" y="40" text-anchor="middle" class="t-faint" style="font-size:11px">25</text>
+<text x="251.0" y="40" text-anchor="middle" class="t-faint" style="font-size:11px">24</text>
+<text x="329.0" y="40" text-anchor="middle" class="t-faint" style="font-size:11px">21</text>
+<text x="355.0" y="40" text-anchor="middle" class="t-faint" style="font-size:11px">20</text>
+<text x="381.0" y="40" text-anchor="middle" class="t-faint" style="font-size:11px">19</text>
+<text x="563.0" y="40" text-anchor="middle" class="t-faint" style="font-size:11px">12</text>
+<text x="589.0" y="40" text-anchor="middle" class="t-faint" style="font-size:11px">11</text>
+<text x="615.0" y="40" text-anchor="middle" class="t-faint" style="font-size:11px">10</text>
+<text x="745.0" y="40" text-anchor="middle" class="t-faint" style="font-size:11px">5</text>
+<text x="771.0" y="40" text-anchor="middle" class="t-faint" style="font-size:11px">4</text>
+<text x="849.0" y="40" text-anchor="middle" class="t-faint" style="font-size:11px">1</text>
+<text x="875.0" y="40" text-anchor="middle" class="t-faint" style="font-size:11px">0</text>
+<text x="28.0" y="79.0" text-anchor="middle" class="t t-bold" style="font-size:19px">I</text>
+<rect x="57" y="52" width="544" height="40" rx="5" class="f-gold-soft"/>
+<text x="329.0" y="77.0" text-anchor="middle" class="t-mono" style="font-size:13px">inst[31] — 부호 확장</text>
+<rect x="603" y="52" width="154" height="40" rx="5" class="f-violet-soft"/>
+<text x="680.0" y="77.0" text-anchor="middle" class="t-mono" style="font-size:13px">inst[30:25]</text>
+<rect x="759" y="52" width="102" height="40" rx="5" class="f-teal-soft"/>
+<text x="810.0" y="77.0" text-anchor="middle" class="t-mono" style="font-size:13px">inst[24:21]</text>
+<rect x="863" y="52" width="24" height="40" rx="5" class="f-accent-soft"/>
+<text x="875.0" y="77.0" text-anchor="middle" class="t-mono" style="font-size:11.5px">20</text>
+<text x="28.0" y="129.0" text-anchor="middle" class="t t-bold" style="font-size:19px">S</text>
+<rect x="57" y="102" width="544" height="40" rx="5" class="f-gold-soft"/>
+<text x="329.0" y="127.0" text-anchor="middle" class="t-mono" style="font-size:13px">inst[31] — 부호 확장</text>
+<rect x="603" y="102" width="154" height="40" rx="5" class="f-violet-soft"/>
+<text x="680.0" y="127.0" text-anchor="middle" class="t-mono" style="font-size:13px">inst[30:25]</text>
+<rect x="759" y="102" width="102" height="40" rx="5" class="f-warn-soft"/>
+<text x="810.0" y="127.0" text-anchor="middle" class="t-mono" style="font-size:13px">inst[11:8]</text>
+<rect x="863" y="102" width="24" height="40" rx="5" class="f-bad-soft"/>
+<text x="875.0" y="127.0" text-anchor="middle" class="t-mono" style="font-size:11.5px">7</text>
+<text x="28.0" y="179.0" text-anchor="middle" class="t t-bold" style="font-size:19px">B</text>
+<rect x="57" y="152" width="518" height="40" rx="5" class="f-gold-soft"/>
+<text x="316.0" y="177.0" text-anchor="middle" class="t-mono" style="font-size:13px">inst[31] — 부호 확장</text>
+<rect x="577" y="152" width="24" height="40" rx="5" class="f-bad-soft"/>
+<text x="589.0" y="177.0" text-anchor="middle" class="t-mono" style="font-size:11.5px">7</text>
+<rect x="603" y="152" width="154" height="40" rx="5" class="f-violet-soft"/>
+<text x="680.0" y="177.0" text-anchor="middle" class="t-mono" style="font-size:13px">inst[30:25]</text>
+<rect x="759" y="152" width="102" height="40" rx="5" class="f-warn-soft"/>
+<text x="810.0" y="177.0" text-anchor="middle" class="t-mono" style="font-size:13px">inst[11:8]</text>
+<rect x="863" y="152" width="24" height="40" rx="5" class="f-surface"/>
+<text x="875.0" y="177.0" text-anchor="middle" class="t-mono" style="font-size:11.5px">0</text>
+<text x="28.0" y="229.0" text-anchor="middle" class="t t-bold" style="font-size:19px">J</text>
+<rect x="57" y="202" width="310" height="40" rx="5" class="f-gold-soft"/>
+<text x="212.0" y="227.0" text-anchor="middle" class="t-mono" style="font-size:13px">inst[31] — 부호 확장</text>
+<rect x="369" y="202" width="206" height="40" rx="5" class="f-ok-soft"/>
+<text x="472.0" y="227.0" text-anchor="middle" class="t-mono" style="font-size:13px">inst[19:12]</text>
+<rect x="577" y="202" width="24" height="40" rx="5" class="f-accent-soft"/>
+<text x="589.0" y="227.0" text-anchor="middle" class="t-mono" style="font-size:11.5px">20</text>
+<rect x="603" y="202" width="154" height="40" rx="5" class="f-violet-soft"/>
+<text x="680.0" y="227.0" text-anchor="middle" class="t-mono" style="font-size:13px">inst[30:25]</text>
+<rect x="759" y="202" width="102" height="40" rx="5" class="f-teal-soft"/>
+<text x="810.0" y="227.0" text-anchor="middle" class="t-mono" style="font-size:13px">inst[24:21]</text>
+<rect x="863" y="202" width="24" height="40" rx="5" class="f-surface"/>
+<text x="875.0" y="227.0" text-anchor="middle" class="t-mono" style="font-size:11.5px">0</text>
+<text x="28.0" y="279.0" text-anchor="middle" class="t t-bold" style="font-size:19px">U</text>
+<rect x="57" y="252" width="24" height="40" rx="5" class="f-gold-soft"/>
+<text x="69.0" y="277.0" text-anchor="middle" class="t-mono" style="font-size:11.5px">31</text>
+<rect x="83" y="252" width="154" height="40" rx="5" class="f-violet-soft"/>
+<text x="160.0" y="277.0" text-anchor="middle" class="t-mono" style="font-size:13px">inst[30:25]</text>
+<rect x="239" y="252" width="102" height="40" rx="5" class="f-teal-soft"/>
+<text x="290.0" y="277.0" text-anchor="middle" class="t-mono" style="font-size:13px">inst[24:21]</text>
+<rect x="343" y="252" width="24" height="40" rx="5" class="f-accent-soft"/>
+<text x="355.0" y="277.0" text-anchor="middle" class="t-mono" style="font-size:11.5px">20</text>
+<rect x="369" y="252" width="206" height="40" rx="5" class="f-ok-soft"/>
+<text x="472.0" y="277.0" text-anchor="middle" class="t-mono" style="font-size:13px">inst[19:12]</text>
+<rect x="577" y="252" width="310" height="40" rx="5" class="f-surface"/>
+<text x="732.0" y="277.0" text-anchor="middle" class="t-mono" style="font-size:13px">0</text>
+<rect x="56" y="311" width="16" height="16" rx="4" class="f-gold-soft"/>
+<text x="78" y="324" class="t-dim t-mono" style="font-size:12.5px">inst[31] 부호</text>
+<rect x="246" y="311" width="16" height="16" rx="4" class="f-violet-soft"/>
+<text x="268" y="324" class="t-dim t-mono" style="font-size:12.5px">inst[30:25]</text>
+<rect x="436" y="311" width="16" height="16" rx="4" class="f-teal-soft"/>
+<text x="458" y="324" class="t-dim t-mono" style="font-size:12.5px">inst[24:21]</text>
+<rect x="626" y="311" width="16" height="16" rx="4" class="f-accent-soft"/>
+<text x="648" y="324" class="t-dim t-mono" style="font-size:12.5px">inst[20]</text>
+<rect x="56" y="339" width="16" height="16" rx="4" class="f-ok-soft"/>
+<text x="78" y="352" class="t-dim t-mono" style="font-size:12.5px">inst[19:12]</text>
+<rect x="246" y="339" width="16" height="16" rx="4" class="f-warn-soft"/>
+<text x="268" y="352" class="t-dim t-mono" style="font-size:12.5px">inst[11:8]</text>
+<rect x="436" y="339" width="16" height="16" rx="4" class="f-bad-soft"/>
+<text x="458" y="352" class="t-dim t-mono" style="font-size:12.5px">inst[7]</text>
+<rect x="626" y="339" width="16" height="16" rx="4" class="f-surface"/>
+<text x="648" y="352" class="t-dim t-mono" style="font-size:12.5px">상수 0</text>
+</svg></div>
+      <figcaption><b>그림 4-4.</b> 다섯 형식이 만드는 32비트 즉시값의 각 비트가 명령어의 어느 비트에서 오는지 보여 준다(규격의 “Types of immediate produced by RISC-V instructions” 그림을 색으로 다시 그림). <b>세로로 읽으면</b> 핵심이 보인다. imm[10:5]는 U를 빼면 언제나 inst[30:25]에서, imm[19:12]는 U와 J가 같은 inst[19:12]에서 오고, 금색 부호 확장은 모두 inst[31] 한 곳에서 온다. 즉시값 비트 하나에 들어올 수 있는 후보가 대부분 2–3개뿐이다.</figcaption>
+    </figure>
+
+    <p>그림 4-4를 세로 열 하나씩 보면, 즉시값의 한 비트를 만들기 위해 하드웨어가 고를 후보가 몇 개인지 셀 수 있다. 예를 들어 imm[0]은 I에서 inst[20], S에서 inst[7], B·U·J에서 상수 0이므로 후보가 세 개다. 이 후보 수가 바로 즉시값 생성기 안의 <b>멀티플렉서 입력 수</b>다. 후보가 적을수록 회로가 작고, 명령어 비트 하나가 연결되는 곳(팬아웃)도 줄어든다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 900 260" role="img" aria-label="즉시값 비트마다 필요한 멀티플렉서 입력 수 비교">
+<line x1="56" y1="144" x2="888" y2="144" stroke="var(--grid)"/>
+<text x="48" y="148" text-anchor="end" class="t-faint" style="font-size:11px">1</text>
+<line x1="56" y1="118" x2="888" y2="118" stroke="var(--grid)"/>
+<text x="48" y="122" text-anchor="end" class="t-faint" style="font-size:11px">2</text>
+<line x1="56" y1="92" x2="888" y2="92" stroke="var(--grid)"/>
+<text x="48" y="96" text-anchor="end" class="t-faint" style="font-size:11px">3</text>
+<line x1="56" y1="66" x2="888" y2="66" stroke="var(--grid)"/>
+<text x="48" y="70" text-anchor="end" class="t-faint" style="font-size:11px">4</text>
+<line x1="56" y1="40" x2="888" y2="40" stroke="var(--grid)"/>
+<text x="48" y="44" text-anchor="end" class="t-faint" style="font-size:11px">5</text>
+<line x1="56" y1="170" x2="888" y2="170" class="s-line"/>
+<rect x="865" y="92" width="9" height="78" rx="2" class="f-bad-soft"/>
+<rect x="875" y="92" width="9" height="78" rx="2" class="f-accent"/>
+<rect x="839" y="40" width="9" height="130" rx="2" class="f-bad-soft"/>
+<rect x="849" y="92" width="9" height="78" rx="2" class="f-accent"/>
+<rect x="813" y="40" width="9" height="130" rx="2" class="f-bad-soft"/>
+<rect x="823" y="92" width="9" height="78" rx="2" class="f-accent"/>
+<rect x="787" y="40" width="9" height="130" rx="2" class="f-bad-soft"/>
+<rect x="797" y="92" width="9" height="78" rx="2" class="f-accent"/>
+<rect x="761" y="40" width="9" height="130" rx="2" class="f-bad-soft"/>
+<rect x="771" y="92" width="9" height="78" rx="2" class="f-accent"/>
+<rect x="735" y="66" width="9" height="104" rx="2" class="f-bad-soft"/>
+<rect x="745" y="118" width="9" height="52" rx="2" class="f-accent"/>
+<rect x="709" y="66" width="9" height="104" rx="2" class="f-bad-soft"/>
+<rect x="719" y="118" width="9" height="52" rx="2" class="f-accent"/>
+<rect x="683" y="66" width="9" height="104" rx="2" class="f-bad-soft"/>
+<rect x="693" y="118" width="9" height="52" rx="2" class="f-accent"/>
+<rect x="657" y="66" width="9" height="104" rx="2" class="f-bad-soft"/>
+<rect x="667" y="118" width="9" height="52" rx="2" class="f-accent"/>
+<rect x="631" y="66" width="9" height="104" rx="2" class="f-bad-soft"/>
+<rect x="641" y="118" width="9" height="52" rx="2" class="f-accent"/>
+<rect x="605" y="66" width="9" height="104" rx="2" class="f-bad-soft"/>
+<rect x="615" y="118" width="9" height="52" rx="2" class="f-accent"/>
+<rect x="579" y="66" width="9" height="104" rx="2" class="f-bad-soft"/>
+<rect x="589" y="66" width="9" height="104" rx="2" class="f-accent"/>
+<rect x="553" y="92" width="9" height="78" rx="2" class="f-bad-soft"/>
+<rect x="563" y="118" width="9" height="52" rx="2" class="f-accent"/>
+<rect x="527" y="92" width="9" height="78" rx="2" class="f-bad-soft"/>
+<rect x="537" y="118" width="9" height="52" rx="2" class="f-accent"/>
+<rect x="501" y="92" width="9" height="78" rx="2" class="f-bad-soft"/>
+<rect x="511" y="118" width="9" height="52" rx="2" class="f-accent"/>
+<rect x="475" y="92" width="9" height="78" rx="2" class="f-bad-soft"/>
+<rect x="485" y="118" width="9" height="52" rx="2" class="f-accent"/>
+<rect x="449" y="92" width="9" height="78" rx="2" class="f-bad-soft"/>
+<rect x="459" y="118" width="9" height="52" rx="2" class="f-accent"/>
+<rect x="423" y="92" width="9" height="78" rx="2" class="f-bad-soft"/>
+<rect x="433" y="118" width="9" height="52" rx="2" class="f-accent"/>
+<rect x="397" y="92" width="9" height="78" rx="2" class="f-bad-soft"/>
+<rect x="407" y="118" width="9" height="52" rx="2" class="f-accent"/>
+<rect x="371" y="92" width="9" height="78" rx="2" class="f-bad-soft"/>
+<rect x="381" y="118" width="9" height="52" rx="2" class="f-accent"/>
+<rect x="345" y="118" width="9" height="52" rx="2" class="f-bad-soft"/>
+<rect x="355" y="118" width="9" height="52" rx="2" class="f-accent"/>
+<rect x="319" y="118" width="9" height="52" rx="2" class="f-bad-soft"/>
+<rect x="329" y="118" width="9" height="52" rx="2" class="f-accent"/>
+<rect x="293" y="118" width="9" height="52" rx="2" class="f-bad-soft"/>
+<rect x="303" y="118" width="9" height="52" rx="2" class="f-accent"/>
+<rect x="267" y="118" width="9" height="52" rx="2" class="f-bad-soft"/>
+<rect x="277" y="118" width="9" height="52" rx="2" class="f-accent"/>
+<rect x="241" y="118" width="9" height="52" rx="2" class="f-bad-soft"/>
+<rect x="251" y="118" width="9" height="52" rx="2" class="f-accent"/>
+<rect x="215" y="118" width="9" height="52" rx="2" class="f-bad-soft"/>
+<rect x="225" y="118" width="9" height="52" rx="2" class="f-accent"/>
+<rect x="189" y="118" width="9" height="52" rx="2" class="f-bad-soft"/>
+<rect x="199" y="118" width="9" height="52" rx="2" class="f-accent"/>
+<rect x="163" y="118" width="9" height="52" rx="2" class="f-bad-soft"/>
+<rect x="173" y="118" width="9" height="52" rx="2" class="f-accent"/>
+<rect x="137" y="118" width="9" height="52" rx="2" class="f-bad-soft"/>
+<rect x="147" y="118" width="9" height="52" rx="2" class="f-accent"/>
+<rect x="111" y="118" width="9" height="52" rx="2" class="f-bad-soft"/>
+<rect x="121" y="118" width="9" height="52" rx="2" class="f-accent"/>
+<rect x="85" y="118" width="9" height="52" rx="2" class="f-bad-soft"/>
+<rect x="95" y="118" width="9" height="52" rx="2" class="f-accent"/>
+<rect x="59" y="144" width="9" height="26" rx="2" class="f-bad-soft"/>
+<rect x="69" y="144" width="9" height="26" rx="2" class="f-accent"/>
+<text x="69.0" y="186" text-anchor="middle" class="t-faint" style="font-size:11px">31</text>
+<text x="355.0" y="186" text-anchor="middle" class="t-faint" style="font-size:11px">20</text>
+<text x="563.0" y="186" text-anchor="middle" class="t-faint" style="font-size:11px">12</text>
+<text x="589.0" y="186" text-anchor="middle" class="t-faint" style="font-size:11px">11</text>
+<text x="745.0" y="186" text-anchor="middle" class="t-faint" style="font-size:11px">5</text>
+<text x="771.0" y="186" text-anchor="middle" class="t-faint" style="font-size:11px">4</text>
+<text x="849.0" y="186" text-anchor="middle" class="t-faint" style="font-size:11px">1</text>
+<text x="875.0" y="186" text-anchor="middle" class="t-faint" style="font-size:11px">0</text>
+<text x="472.0" y="204" text-anchor="middle" class="t-dim" style="font-size:12px">즉시값 비트 번호 (I·S·B·U·J 다섯 형식을 합쳐, 그 비트에 들어올 수 있는 서로 다른 입력의 수)</text>
+<rect x="56" y="221" width="16" height="16" rx="3" class="f-accent"/>
+<text x="78" y="234" class="t">실제 RISC-V 배치 — 입력 합계 70</text>
+<rect x="456" y="221" width="16" height="16" rx="3" class="f-bad-soft"/>
+<text x="478" y="234" class="t">S·U 를 그대로 한 칸 민 가상의 B·J — 합계 98</text>
+<text x="56" y="22" class="t-dim" style="font-size:12px">입력 수</text>
+</svg></div>
+      <figcaption><b>그림 4-5.</b> 즉시값 비트마다 들어올 수 있는 서로 다른 입력의 수. 파란 막대는 실제 RISC-V 배치, 붉은 막대는 B와 J를 S와 U의 즉시값을 통째로 한 칸 왼쪽으로 민 “상식적인” 배치로 바꿨을 때다. 이 책이 단순하게 센 모형에서도 입력 합계가 70 대 98으로 차이가 난다. 규격 해설은 실제 회로 기준으로 팬아웃과 멀티플렉서 비용이 “약 2배” 줄었다고 말한다.</figcaption>
+    </figure>
+
+    <div class="callout spec"><strong>규격 원문에서</strong>
+      <blockquote>“Sign extension is one of the most critical operations on immediates (particularly for XLEN&gt;32), and in RISC-V the sign bit for all immediates is always held in bit 31 of the instruction to allow sign extension to proceed in parallel with instruction decoding.”</blockquote>
+      <p><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html" target="_blank" rel="noopener">Volume I, RV32I · Immediate Encoding Variants</a></p></div>
+
+    <div class="callout tip"><strong>12비트 + 20비트라는 비대칭</strong><p>일반 명령의 즉시값은 12비트, <code>lui</code>·<code>auipc</code>만 20비트다. 규격은 “실제 프로그램의 즉시값은 대부분 아주 작거나, 아니면 XLEN 비트가 통째로 필요하다”는 관찰을 근거로 든다. 작은 값은 12비트로 충분하고, 큰 값은 어차피 두 명령으로 만들어야 하니, 일반 명령의 즉시값을 줄여 opcode 공간을 넓히는 쪽을 택했다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="scramble">
+    <h2>B형과 J형: 뒤섞인 비트 풀기</h2>
+    <p>B 형식은 처음 보면 가장 당혹스럽다. <code>imm[12|10:5]</code> … <code>imm[4:1|11]</code>이라니, 왜 11번 비트가 맨 끝에 붙어 있을까? 답은 <b>S 형식과의 차이를 최소로 만들기 위해서</b>다.</p>
+    <p>분기 오프셋은 늘 2의 배수다(명령어가 최소 16비트 단위로 놓이므로). 그러니 imm[0]은 언제나 0이고 인코딩할 필요가 없다. 비트 하나를 아꼈으니 S 형식과 같은 12비트 칸으로 imm[12:1], 즉 ±4 KiB를 표현할 수 있다. 흔한 방법은 “S의 12비트 값을 하드웨어에서 왼쪽으로 한 칸 민다”이다. 그러면 S와 B의 즉시값 비트가 <b>모두 한 칸씩 어긋난다</b>. RISC-V는 대신 S와 똑같이 두고, S에서 imm[0]을 담던 inst[7] 단 한 자리에 <b>imm[11]</b>을 넣었다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 880 330" role="img" aria-label="S 형식과 B 형식, 그리고 가상의 단순 B 형식의 즉시값 비트 비교">
+        <g class="t-faint" style="font-size:10.5px">
+          <text x="72.5" y="26" text-anchor="middle" class="t-faint" style="font-size:10.5px">31</text>
+          <text x="97.5" y="26" text-anchor="middle" class="t-faint" style="font-size:10.5px">30</text>
+          <text x="222.5" y="26" text-anchor="middle" class="t-faint" style="font-size:10.5px">25</text>
+          <text x="247.5" y="26" text-anchor="middle" class="t-faint" style="font-size:10.5px">24</text>
+          <text x="472.5" y="26" text-anchor="middle" class="t-faint" style="font-size:10.5px">15</text>
+          <text x="497.5" y="26" text-anchor="middle" class="t-faint" style="font-size:10.5px">14</text>
+          <text x="547.5" y="26" text-anchor="middle" class="t-faint" style="font-size:10.5px">12</text>
+          <text x="572.5" y="26" text-anchor="middle" class="t-faint" style="font-size:10.5px">11</text>
+          <text x="647.5" y="26" text-anchor="middle" class="t-faint" style="font-size:10.5px">8</text>
+          <text x="672.5" y="26" text-anchor="middle" class="t-faint" style="font-size:10.5px">7</text>
+          <text x="697.5" y="26" text-anchor="middle" class="t-faint" style="font-size:10.5px">6</text>
+          <text x="847.5" y="26" text-anchor="middle" class="t-faint" style="font-size:10.5px">0</text>
+        </g>
+        <!-- S 형식 -->
+        <text x="30" y="68" text-anchor="middle" class="t t-bold" style="font-size:19px">S</text>
+        <rect x="60" y="40" width="25" height="44" rx="4" class="f-gold-soft"/><text x="72.5" y="59" text-anchor="middle" class="t-mono" style="font-size:10px">imm</text><text x="72.5" y="72" text-anchor="middle" class="t-mono" style="font-size:10px">[11]</text>
+        <rect x="85" y="40" width="150" height="44" rx="4" class="f-gold-soft"/><text x="160" y="67" text-anchor="middle" class="t-mono">imm[10:5]</text>
+        <rect x="235" y="40" width="250" height="44" rx="4" class="f-teal-soft"/><text x="360" y="67" text-anchor="middle" class="t-mono">rs2 · rs1</text>
+        <rect x="485" y="40" width="75" height="44" rx="4" class="f-violet-soft"/><text x="522.5" y="67" text-anchor="middle" class="t-mono">funct3</text>
+        <rect x="560" y="40" width="100" height="44" rx="4" class="f-gold-soft"/><text x="610" y="67" text-anchor="middle" class="t-mono">imm[4:1]</text>
+        <rect x="660" y="40" width="25" height="44" rx="4" class="f-warn-soft blink-highlight"/><text x="672.5" y="59" text-anchor="middle" class="t-mono" style="font-size:10px">imm</text><text x="672.5" y="72" text-anchor="middle" class="t-mono" style="font-size:10px">[0]</text>
+        <rect x="685" y="40" width="175" height="44" rx="4" class="f-accent-soft"/><text x="772.5" y="67" text-anchor="middle" class="t-mono">opcode</text>
+        <!-- 같음 / 다름 표시 -->
+        <text x="72.5" y="110" text-anchor="middle" class="t-ok" style="font-size:12px">부호</text>
+        <text x="160" y="110" text-anchor="middle" class="t-ok" style="font-size:18px">=</text>
+        <text x="360" y="110" text-anchor="middle" class="t-ok" style="font-size:18px">=</text>
+        <text x="522.5" y="110" text-anchor="middle" class="t-ok" style="font-size:18px">=</text>
+        <text x="610" y="110" text-anchor="middle" class="t-ok" style="font-size:18px">=</text>
+        <text x="672.5" y="110" text-anchor="middle" class="t-bad" style="font-size:18px">≠</text>
+        <!-- B 형식 -->
+        <text x="30" y="152" text-anchor="middle" class="t t-bold" style="font-size:19px">B</text>
+        <rect x="60" y="124" width="25" height="44" rx="4" class="f-gold-soft"/><text x="72.5" y="143" text-anchor="middle" class="t-mono" style="font-size:10px">imm</text><text x="72.5" y="156" text-anchor="middle" class="t-mono" style="font-size:10px">[12]</text>
+        <rect x="85" y="124" width="150" height="44" rx="4" class="f-gold-soft"/><text x="160" y="151" text-anchor="middle" class="t-mono">imm[10:5]</text>
+        <rect x="235" y="124" width="250" height="44" rx="4" class="f-teal-soft"/><text x="360" y="151" text-anchor="middle" class="t-mono">rs2 · rs1</text>
+        <rect x="485" y="124" width="75" height="44" rx="4" class="f-violet-soft"/><text x="522.5" y="151" text-anchor="middle" class="t-mono">funct3</text>
+        <rect x="560" y="124" width="100" height="44" rx="4" class="f-gold-soft"/><text x="610" y="151" text-anchor="middle" class="t-mono">imm[4:1]</text>
+        <rect x="660" y="124" width="25" height="44" rx="4" class="f-warn-soft blink-highlight"/><text x="672.5" y="143" text-anchor="middle" class="t-mono" style="font-size:10px">imm</text><text x="672.5" y="156" text-anchor="middle" class="t-mono" style="font-size:10px">[11]</text>
+        <rect x="685" y="124" width="175" height="44" rx="4" class="f-accent-soft"/><text x="772.5" y="151" text-anchor="middle" class="t-mono">opcode</text>
+        <text x="440" y="200" text-anchor="middle" class="t-dim">실제 B 형식: 부호 비트를 빼면, S 형식과 비교해 뜻이 바뀌는 즉시값 비트는 inst[7] <tspan class="t-bad">단 하나</tspan></text>
+        <!-- 가상의 B 형식 -->
+        <text x="30" y="264" text-anchor="middle" class="t t-bold" style="font-size:19px">B*</text>
+        <rect x="60" y="236" width="175" height="44" rx="4" class="f-bad-soft"/><text x="147.5" y="263" text-anchor="middle" class="t-mono">imm[12:6]</text>
+        <rect x="235" y="236" width="250" height="44" rx="4" class="f-teal-soft"/><text x="360" y="263" text-anchor="middle" class="t-mono">rs2 · rs1</text>
+        <rect x="485" y="236" width="75" height="44" rx="4" class="f-violet-soft"/><text x="522.5" y="263" text-anchor="middle" class="t-mono">funct3</text>
+        <rect x="560" y="236" width="125" height="44" rx="4" class="f-bad-soft"/><text x="622.5" y="263" text-anchor="middle" class="t-mono">imm[5:1]</text>
+        <rect x="685" y="236" width="175" height="44" rx="4" class="f-accent-soft"/><text x="772.5" y="263" text-anchor="middle" class="t-mono">opcode</text>
+        <text x="440" y="310" text-anchor="middle" class="t-dim">가상의 B*: S의 12비트를 그대로 한 칸 민 배치 — 부호 비트를 뺀 11개 비트의 뜻이 <tspan class="t-bad">전부</tspan> S와 어긋난다</text>
+      </svg></div>
+      <figcaption><b>그림 4-6.</b> 부호 비트 inst[31]을 빼면 S 형식과 B 형식은 inst[7] 한 비트(깜빡이는 칸)만 뜻이 다르다. S에서는 imm[0], B에서는 imm[11]이다. 맨 아래 B*는 “즉시값을 한 칸 밀기”라는 흔한 방법을 썼을 때의 가상 배치로, 즉시값 비트 하나하나에 새 연결이 필요해진다.</figcaption>
+    </figure>
+
+    <p>J와 U의 관계도 똑같다. U 형식은 inst[31:12]를 즉시값의 imm[31:12]로 그대로 쓴다. J 형식은 20비트 칸으로 imm[20:1]을 표현해야 하는데, 이때 <b>imm[19:12]는 U와 같은 inst[19:12]</b>에, <b>imm[10:1]은 I 형식과 같은 inst[30:21]</b>에 두었다. 남은 imm[11]은 I 형식에서 imm[0]이 있던 inst[20]으로, 부호 비트 imm[20]은 inst[31]로 갔다. 결과적으로 J 형식에서 “새로 생긴 연결”은 거의 없다.</p>
+    <p>아래 애니메이션은 명령어 비트가 즉시값 자리로 날아가 모이는 과정을 보여 준다. 묶음 하나가 움직일 때마다, 그 연결이 다른 어느 형식과 똑같은지(즉 하드웨어가 이미 가진 배선을 다시 쓰는지) 아래 설명에 나타난다.</p>
+
+    <div class="sim" id="unscramble-sim">
+      <div class="sim-head"><span class="sim-tag animation">ANIMATION</span><h3>즉시값 비트 모으기</h3></div>
+      <div class="sim-view"><canvas id="unscramble-canvas" aria-label="명령어 비트가 즉시값 자리로 이동하는 애니메이션"></canvas></div>
+      <div class="step-description" id="unscramble-description">재생 중…</div>
+      <div class="sim-controls">
+        <div class="control"><span>형식</span><div class="segmented" id="unscramble-format"><button data-value="B" class="on">B (beq)</button><button data-value="J">J (jal)</button></div></div>
+        <div class="control"><span>재생</span><div class="button-row"><button class="button primary" id="unscramble-toggle">일시 정지</button><button class="button" id="unscramble-restart">처음부터</button><button class="button" id="unscramble-random">다른 오프셋</button></div></div>
+        <label class="control"><span>속도 <output id="unscramble-speed-output"></output></span><input type="range" id="unscramble-speed" min="25" max="200" step="25" value="100"></label>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">오프셋 (바이트)</span><span class="value" id="unscramble-offset">0</span></div>
+        <div class="stat"><span class="key">명령어</span><span class="value" id="unscramble-word">0x00000000</span></div>
+        <div class="stat"><span class="key">어셈블리</span><span class="value" id="unscramble-assembly">—</span></div>
+      </div>
+      <div class="sim-note">B에서 네 묶음 중 <b>새 연결은 inst[7] → imm[11] 하나뿐</b>이고 나머지는 모두 다른 형식에 이미 있는 연결이라는 설명을 확인하자. J로 바꾸면 inst[19:12]는 <b>전혀 움직이지 않는다</b>. U 형식과 같은 자리이기 때문이다. 끝으로 imm[0]에 0이 채워지고, inst[31]이 위쪽 비트로 복사되며 부호 확장된다.</div>
+    </div>
+
+    <div class="callout warn"><strong>사람에게는 불편하다</strong><p>뒤섞인 배치는 16진수 덤프를 눈으로 읽는 사람과, 실행 중에 기계어를 만들어 내는 JIT 컴파일러에게는 조금 번거롭다. 규격도 이 점을 인정하면서, 정적 컴파일에는 무시할 만한 비용이고 가장 흔한 “짧은 앞쪽 분기”는 인코딩이 단순하다고 덧붙인다. 하드웨어는 수십억 번 해독하지만 어셈블러는 한 번만 인코딩한다. RISC-V는 그 비대칭에 맞춰 비용을 소프트웨어 쪽에 실었다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="opcode-map">
+    <h2>opcode, funct3, funct7: 명령을 고르는 세 단계</h2>
+    <p>32비트 명령의 하위 7비트가 <span class="term">opcode</span><span class="english">(major opcode)</span>다. 그중 하위 2비트는 <code>11</code>로 정해져 있으니 실제로 고를 수 있는 것은 inst[6:2] 다섯 비트, 즉 32가지다. 규격은 이를 inst[6:5]를 행, inst[4:2]를 열로 하는 4×8 표로 그린다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 900 330" role="img" aria-label="RISC-V 32비트 명령어의 주요 opcode 지도">
+<text x="492" y="20" text-anchor="middle" class="t-dim">inst[4:2] →</text>
+<text x="142.0" y="44" text-anchor="middle" class="t-mono" style="font-size:12.5px">000</text>
+<text x="242.0" y="44" text-anchor="middle" class="t-mono" style="font-size:12.5px">001</text>
+<text x="342.0" y="44" text-anchor="middle" class="t-mono" style="font-size:12.5px">010</text>
+<text x="442.0" y="44" text-anchor="middle" class="t-mono" style="font-size:12.5px">011</text>
+<text x="542.0" y="44" text-anchor="middle" class="t-mono" style="font-size:12.5px">100</text>
+<text x="642.0" y="44" text-anchor="middle" class="t-mono" style="font-size:12.5px">101</text>
+<text x="742.0" y="44" text-anchor="middle" class="t-mono" style="font-size:12.5px">110</text>
+<text x="842.0" y="44" text-anchor="middle" class="t-mono" style="font-size:12.5px">111 (>32b)</text>
+<text x="14" y="44" class="t-dim" style="font-size:12px">inst[6:5] ↓</text>
+<text x="76" y="88.0" text-anchor="end" class="t-mono">00</text>
+<rect x="94" y="60" width="96" height="46" rx="7" class="f-accent-soft"/>
+<text x="142.0" y="81" text-anchor="middle" class="t-accent" style="font-size:12.5px">LOAD</text>
+<text x="142.0" y="98" text-anchor="middle" class="t-faint t-mono" style="font-size:10.5px">0x03</text>
+<rect x="194" y="60" width="96" height="46" rx="7" class="f-surface"/>
+<text x="242.0" y="81" text-anchor="middle" class="t-dim" style="font-size:12.5px">LOAD-FP</text>
+<text x="242.0" y="98" text-anchor="middle" class="t-faint t-mono" style="font-size:10.5px">0x07</text>
+<rect x="294" y="60" width="96" height="46" rx="7" class="f-gold-soft"/>
+<text x="342.0" y="81" text-anchor="middle" class="t-gold" style="font-size:12.5px">custom-0</text>
+<text x="342.0" y="98" text-anchor="middle" class="t-faint t-mono" style="font-size:10.5px">0x0b</text>
+<rect x="394" y="60" width="96" height="46" rx="7" class="f-accent-soft"/>
+<text x="442.0" y="81" text-anchor="middle" class="t-accent" style="font-size:12.5px">MISC-MEM</text>
+<text x="442.0" y="98" text-anchor="middle" class="t-faint t-mono" style="font-size:10.5px">0x0f</text>
+<rect x="494" y="60" width="96" height="46" rx="7" class="f-accent-soft"/>
+<text x="542.0" y="81" text-anchor="middle" class="t-accent" style="font-size:12.5px">OP-IMM</text>
+<text x="542.0" y="98" text-anchor="middle" class="t-faint t-mono" style="font-size:10.5px">0x13</text>
+<rect x="594" y="60" width="96" height="46" rx="7" class="f-accent-soft"/>
+<text x="642.0" y="81" text-anchor="middle" class="t-accent" style="font-size:12.5px">AUIPC</text>
+<text x="642.0" y="98" text-anchor="middle" class="t-faint t-mono" style="font-size:10.5px">0x17</text>
+<rect x="694" y="60" width="96" height="46" rx="7" class="f-teal-soft"/>
+<text x="742.0" y="81" text-anchor="middle" class="t-teal" style="font-size:12.5px">OP-IMM-32</text>
+<text x="742.0" y="98" text-anchor="middle" class="t-faint t-mono" style="font-size:10.5px">0x1b</text>
+<rect x="794" y="60" width="96" height="46" rx="7" class="f-bg" stroke="var(--border)" stroke-dasharray="4 4"/>
+<text x="842.0" y="81" text-anchor="middle" class="t-faint" style="font-size:12.5px">reserved</text>
+<text x="76" y="138.0" text-anchor="end" class="t-mono">01</text>
+<rect x="94" y="110" width="96" height="46" rx="7" class="f-accent-soft"/>
+<text x="142.0" y="131" text-anchor="middle" class="t-accent" style="font-size:12.5px">STORE</text>
+<text x="142.0" y="148" text-anchor="middle" class="t-faint t-mono" style="font-size:10.5px">0x23</text>
+<rect x="194" y="110" width="96" height="46" rx="7" class="f-surface"/>
+<text x="242.0" y="131" text-anchor="middle" class="t-dim" style="font-size:12.5px">STORE-FP</text>
+<text x="242.0" y="148" text-anchor="middle" class="t-faint t-mono" style="font-size:10.5px">0x27</text>
+<rect x="294" y="110" width="96" height="46" rx="7" class="f-gold-soft"/>
+<text x="342.0" y="131" text-anchor="middle" class="t-gold" style="font-size:12.5px">custom-1</text>
+<text x="342.0" y="148" text-anchor="middle" class="t-faint t-mono" style="font-size:10.5px">0x2b</text>
+<rect x="394" y="110" width="96" height="46" rx="7" class="f-surface"/>
+<text x="442.0" y="131" text-anchor="middle" class="t-dim" style="font-size:12.5px">AMO</text>
+<text x="442.0" y="148" text-anchor="middle" class="t-faint t-mono" style="font-size:10.5px">0x2f</text>
+<rect x="494" y="110" width="96" height="46" rx="7" class="f-accent-soft"/>
+<text x="542.0" y="131" text-anchor="middle" class="t-accent" style="font-size:12.5px">OP</text>
+<text x="542.0" y="148" text-anchor="middle" class="t-faint t-mono" style="font-size:10.5px">0x33</text>
+<rect x="594" y="110" width="96" height="46" rx="7" class="f-accent-soft"/>
+<text x="642.0" y="131" text-anchor="middle" class="t-accent" style="font-size:12.5px">LUI</text>
+<text x="642.0" y="148" text-anchor="middle" class="t-faint t-mono" style="font-size:10.5px">0x37</text>
+<rect x="694" y="110" width="96" height="46" rx="7" class="f-teal-soft"/>
+<text x="742.0" y="131" text-anchor="middle" class="t-teal" style="font-size:12.5px">OP-32</text>
+<text x="742.0" y="148" text-anchor="middle" class="t-faint t-mono" style="font-size:10.5px">0x3b</text>
+<rect x="794" y="110" width="96" height="46" rx="7" class="f-bg" stroke="var(--border)" stroke-dasharray="4 4"/>
+<text x="842.0" y="131" text-anchor="middle" class="t-faint" style="font-size:12.5px">reserved</text>
+<text x="76" y="188.0" text-anchor="end" class="t-mono">10</text>
+<rect x="94" y="160" width="96" height="46" rx="7" class="f-surface"/>
+<text x="142.0" y="181" text-anchor="middle" class="t-dim" style="font-size:12.5px">MADD</text>
+<text x="142.0" y="198" text-anchor="middle" class="t-faint t-mono" style="font-size:10.5px">0x43</text>
+<rect x="194" y="160" width="96" height="46" rx="7" class="f-surface"/>
+<text x="242.0" y="181" text-anchor="middle" class="t-dim" style="font-size:12.5px">MSUB</text>
+<text x="242.0" y="198" text-anchor="middle" class="t-faint t-mono" style="font-size:10.5px">0x47</text>
+<rect x="294" y="160" width="96" height="46" rx="7" class="f-surface"/>
+<text x="342.0" y="181" text-anchor="middle" class="t-dim" style="font-size:12.5px">NMSUB</text>
+<text x="342.0" y="198" text-anchor="middle" class="t-faint t-mono" style="font-size:10.5px">0x4b</text>
+<rect x="394" y="160" width="96" height="46" rx="7" class="f-surface"/>
+<text x="442.0" y="181" text-anchor="middle" class="t-dim" style="font-size:12.5px">NMADD</text>
+<text x="442.0" y="198" text-anchor="middle" class="t-faint t-mono" style="font-size:10.5px">0x4f</text>
+<rect x="494" y="160" width="96" height="46" rx="7" class="f-surface"/>
+<text x="542.0" y="181" text-anchor="middle" class="t-dim" style="font-size:12.5px">OP-FP</text>
+<text x="542.0" y="198" text-anchor="middle" class="t-faint t-mono" style="font-size:10.5px">0x53</text>
+<rect x="594" y="160" width="96" height="46" rx="7" class="f-surface"/>
+<text x="642.0" y="181" text-anchor="middle" class="t-dim" style="font-size:12.5px">OP-V</text>
+<text x="642.0" y="198" text-anchor="middle" class="t-faint t-mono" style="font-size:10.5px">0x57</text>
+<rect x="694" y="160" width="96" height="46" rx="7" class="f-gold-soft"/>
+<text x="742.0" y="181" text-anchor="middle" class="t-gold" style="font-size:12.5px">custom-2</text>
+<text x="742.0" y="198" text-anchor="middle" class="t-faint t-mono" style="font-size:10.5px">0x5b</text>
+<rect x="794" y="160" width="96" height="46" rx="7" class="f-bg" stroke="var(--border)" stroke-dasharray="4 4"/>
+<text x="842.0" y="181" text-anchor="middle" class="t-faint" style="font-size:12.5px">reserved</text>
+<text x="76" y="238.0" text-anchor="end" class="t-mono">11</text>
+<rect x="94" y="210" width="96" height="46" rx="7" class="f-accent-soft"/>
+<text x="142.0" y="231" text-anchor="middle" class="t-accent" style="font-size:12.5px">BRANCH</text>
+<text x="142.0" y="248" text-anchor="middle" class="t-faint t-mono" style="font-size:10.5px">0x63</text>
+<rect x="194" y="210" width="96" height="46" rx="7" class="f-accent-soft"/>
+<text x="242.0" y="231" text-anchor="middle" class="t-accent" style="font-size:12.5px">JALR</text>
+<text x="242.0" y="248" text-anchor="middle" class="t-faint t-mono" style="font-size:10.5px">0x67</text>
+<rect x="294" y="210" width="96" height="46" rx="7" class="f-bg" stroke="var(--border)" stroke-dasharray="4 4"/>
+<text x="342.0" y="231" text-anchor="middle" class="t-faint" style="font-size:12.5px">reserved</text>
+<rect x="394" y="210" width="96" height="46" rx="7" class="f-accent-soft"/>
+<text x="442.0" y="231" text-anchor="middle" class="t-accent" style="font-size:12.5px">JAL</text>
+<text x="442.0" y="248" text-anchor="middle" class="t-faint t-mono" style="font-size:10.5px">0x6f</text>
+<rect x="494" y="210" width="96" height="46" rx="7" class="f-accent-soft"/>
+<text x="542.0" y="231" text-anchor="middle" class="t-accent" style="font-size:12.5px">SYSTEM</text>
+<text x="542.0" y="248" text-anchor="middle" class="t-faint t-mono" style="font-size:10.5px">0x73</text>
+<rect x="594" y="210" width="96" height="46" rx="7" class="f-surface"/>
+<text x="642.0" y="231" text-anchor="middle" class="t-dim" style="font-size:12.5px">OP-VE</text>
+<text x="642.0" y="248" text-anchor="middle" class="t-faint t-mono" style="font-size:10.5px">0x77</text>
+<rect x="694" y="210" width="96" height="46" rx="7" class="f-gold-soft"/>
+<text x="742.0" y="231" text-anchor="middle" class="t-gold" style="font-size:12.5px">custom-3</text>
+<text x="742.0" y="248" text-anchor="middle" class="t-faint t-mono" style="font-size:10.5px">0x7b</text>
+<rect x="794" y="210" width="96" height="46" rx="7" class="f-bg" stroke="var(--border)" stroke-dasharray="4 4"/>
+<text x="842.0" y="231" text-anchor="middle" class="t-faint" style="font-size:12.5px">reserved</text>
+<rect x="92" y="275" width="16" height="16" rx="4" class="f-accent-soft"/>
+<text x="114" y="288" class="t-dim">RV32I 가 쓰는 11개</text>
+<rect x="292" y="275" width="16" height="16" rx="4" class="f-teal-soft"/>
+<text x="314" y="288" class="t-dim">RV64I 의 *W 명령</text>
+<rect x="492" y="275" width="16" height="16" rx="4" class="f-surface"/>
+<text x="514" y="288" class="t-dim">다른 표준 확장 (F·A·V …)</text>
+<rect x="692" y="275" width="16" height="16" rx="4" class="f-gold-soft"/>
+<text x="714" y="288" class="t-dim">사용자 정의 custom-0~3</text>
+</svg></div>
+      <figcaption><b>그림 4-7.</b> RVG의 주요 opcode 지도(규격 “RISC-V base opcode map, inst[1:0]=11”). 칸 아래 숫자는 하위 2비트 <code>11</code>까지 포함한 7비트 opcode 값이다. RV32I의 40개 명령은 파란 칸 11개에 모두 들어간다. custom-0~3은 앞으로도 표준 확장이 쓰지 않기로 약속한 자리여서 회사·연구실이 자기 명령을 넣기 좋고, reserved 칸은 미래의 표준 확장 몫이므로 피해야 한다.</figcaption>
+    </figure>
+
+    <p>opcode가 큰 무리를 고르면, <b>funct3</b>(inst[14:12])이 그 안에서 연산을 고르고, R 형식에서는 <b>funct7</b>(inst[31:25])이 한 번 더 고른다. RV32I에서 funct7이 실제로 쓰는 값은 <code>0000000</code>과 <code>0100000</code> 둘뿐이고, 둘의 차이는 <b>inst[30] 한 비트</b>다. add와 sub, srl과 sra, srli와 srai가 이 비트 하나로 갈린다. 덧셈기는 inst[30]을 “두 번째 피연산자를 뒤집고 1을 더하라”는 신호로, 시프터는 “빈자리를 부호로 채워라”는 신호로 그대로 쓸 수 있다.</p>
+
+    <div class="table-wrap"><table class="compact instruction-table opcode-table">
+      <thead><tr><th>명령</th><th>형식</th><th>opcode</th><th>funct3</th><th>funct7 / imm[11:5]</th></tr></thead>
+      <tbody>
+        <tr><td>lui</td><td>U</td><td><code>0110111</code> LUI</td><td>—</td><td>—</td></tr>
+        <tr><td>auipc</td><td>U</td><td><code>0010111</code> AUIPC</td><td>—</td><td>—</td></tr>
+        <tr><td>jal</td><td>J</td><td><code>1101111</code> JAL</td><td>—</td><td>—</td></tr>
+        <tr><td>jalr</td><td>I</td><td><code>1100111</code> JALR</td><td><code>000</code></td><td>—</td></tr>
+        <tr><td>beq · bne · blt · bge · bltu · bgeu</td><td>B</td><td><code>1100011</code> BRANCH</td><td><code>000 001 100 101 110 111</code></td><td>—</td></tr>
+        <tr><td>lb · lh · lw · lbu · lhu</td><td>I</td><td><code>0000011</code> LOAD</td><td><code>000 001 010 100 101</code></td><td>—</td></tr>
+        <tr><td>sb · sh · sw</td><td>S</td><td><code>0100011</code> STORE</td><td><code>000 001 010</code></td><td>—</td></tr>
+        <tr><td>addi · slti · sltiu · xori · ori · andi</td><td>I</td><td><code>0010011</code> OP-IMM</td><td><code>000 010 011 100 110 111</code></td><td>—</td></tr>
+        <tr><td>slli</td><td>I</td><td><code>0010011</code> OP-IMM</td><td><code>001</code></td><td><code>0000000</code></td></tr>
+        <tr><td>srli · srai</td><td>I</td><td><code>0010011</code> OP-IMM</td><td><code>101 101</code></td><td><code>0000000 0100000</code></td></tr>
+        <tr><td>add · sub</td><td>R</td><td><code>0110011</code> OP</td><td><code>000 000</code></td><td><code>0000000 0100000</code></td></tr>
+        <tr><td>sll · slt · sltu · xor · or · and</td><td>R</td><td><code>0110011</code> OP</td><td><code>001 010 011 100 110 111</code></td><td><code>0000000</code></td></tr>
+        <tr><td>srl · sra</td><td>R</td><td><code>0110011</code> OP</td><td><code>101 101</code></td><td><code>0000000 0100000</code></td></tr>
+        <tr><td>fence</td><td>I</td><td><code>0001111</code> MISC-MEM</td><td><code>000</code></td><td>(fm·pred·succ)</td></tr>
+        <tr><td>ecall · ebreak</td><td>I</td><td><code>1110011</code> SYSTEM</td><td><code>000</code></td><td>imm = 0 / 1</td></tr>
+      </tbody>
+    </table></div>
+    <p>표를 세어 보면 4 + 6 + 5 + 3 + 9 + 10 + 1 + 2 = <b>40개</b>로, 규격이 말하는 “RV32I의 40개 고유 명령”과 맞는다. 각 명령의 뜻은 <a href="rv32i.html">5장</a>에서 하나씩 실행하며 살펴본다.</p>
+
+    <div class="callout tip"><strong>시프트 즉시값은 I 형식의 특수형</strong><p>32비트 값을 31칸보다 더 밀 일은 없으므로 RV32I의 slli·srli·srai는 I 형식의 12비트 즉시값 중 하위 5비트만 시프트 양(shamt)으로 쓴다. 남는 상위 7비트는 R 형식의 funct7처럼 쓰여서, 오른쪽 시프트의 종류를 역시 inst[30]으로 고른다. RV64에서는 shamt가 6비트로 늘어난다(<a href="rv64.html">6장</a>).</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="encoder-lab">
+    <h2>직접 인코딩하고 해독하기</h2>
+    <p>이제 손으로 해 보자. 첫 번째 시뮬레이터는 어셈블러가 하는 일, 두 번째는 CPU의 해독기가 하는 일이다. 즉시값 범위를 벗어나거나 분기 오프셋을 홀수로 주면 어셈블러처럼 오류를 낸다.</p>
+
+    <div class="sim" id="encoder-sim">
+      <div class="sim-head"><span class="sim-tag">SIMULATOR</span><h3>명령어 인코더</h3></div>
+      <div class="sim-pad">
+        <div class="encoder-assembly" id="encoder-assembly">add a0, a1, a2</div>
+        <div class="scroll-x" id="encoder-bitfield-wrap"><div class="bitfield" id="encoder-bitfield"></div></div>
+        <div class="binary-line" id="encoder-binary"></div>
+        <div class="message-error" id="encoder-error" hidden></div>
+      </div>
+      <div class="sim-controls">
+        <label class="control"><span>명령</span><select id="encoder-instruction"></select></label>
+        <label class="control" id="encoder-rd-control"><span>rd</span><select id="encoder-rd"></select></label>
+        <label class="control" id="encoder-rs1-control"><span>rs1</span><select id="encoder-rs1"></select></label>
+        <label class="control" id="encoder-rs2-control"><span>rs2</span><select id="encoder-rs2"></select></label>
+        <label class="control" id="encoder-immediate-control"><span id="encoder-immediate-label">즉시값</span><input type="text" id="encoder-immediate" value="0" size="10" spellcheck="false" autocomplete="off"></label>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">형식</span><span class="value" id="encoder-format">R</span></div>
+        <div class="stat"><span class="key">16진수</span><span class="value" id="encoder-hex">0x00000000</span></div>
+        <div class="stat"><span class="key">즉시값 허용 범위</span><span class="value" id="encoder-range">—</span></div>
+      </div>
+      <div class="sim-note"><code>beq</code>를 고르고 오프셋을 <code>-8</code>, <code>2048</code>, <code>4094</code>, <code>4096</code>, <code>7</code>로 바꿔 보자. 범위를 넘거나 홀수면 오류가 난다. <code>addi</code>에서 rd만 바꾸면 inst[11:7]만, rs1만 바꾸면 inst[19:15]만 바뀌는 것도 확인하자.</div>
+    </div>
+
+    <div class="sim" id="decoder-sim">
+      <div class="sim-head"><span class="sim-tag">SIMULATOR</span><h3>명령어 디코더</h3></div>
+      <div class="sim-pad">
+        <div class="decoder-bits" id="decoder-bits" aria-label="명령어 비트. 눌러서 0과 1을 바꾼다"></div>
+        <div class="scroll-x"><div class="bitfield" id="decoder-bitfield"></div></div>
+        <div class="message-note" id="decoder-note" hidden></div>
+        <div class="table-wrap" style="margin-bottom:0"><table class="compact field-table">
+          <thead><tr><th>필드</th><th>비트</th><th>2진수</th><th>값</th><th>뜻</th></tr></thead>
+          <tbody id="decoder-table"></tbody>
+        </table></div>
+      </div>
+      <div class="sim-controls">
+        <label class="control"><span>16진수 명령어</span><input type="text" id="decoder-hex" value="0x00c58533" size="12" spellcheck="false" autocomplete="off"></label>
+        <div class="control"><span>무작위</span><div class="button-row"><button class="button primary" id="decoder-random">무작위 명령</button></div></div>
+        <div class="control wide"><span>예시</span><div class="example-row" id="decoder-examples"></div></div>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">디스어셈블</span><span class="value" id="decoder-assembly">—</span></div>
+        <div class="stat"><span class="key">형식 · opcode</span><span class="value" id="decoder-format">—</span></div>
+        <div class="stat"><span class="key">조립된 즉시값</span><span class="value" id="decoder-immediate">—</span></div>
+      </div>
+      <div class="sim-note">위의 비트를 눌러 하나씩 뒤집어 보자. inst[30]을 바꾸면 <code>add</code>가 <code>sub</code>로 바뀐다. inst[0]을 0으로 만들면 32비트 명령이 아니게 된다. <b>무작위 명령</b>을 여러 번 눌러 형식마다 즉시값이 어떻게 흩어지는지 살펴보자.</div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="constants">
+    <h2>32비트 상수 만들기: lui + addi, 그리고 auipc</h2>
+    <p>12비트 즉시값으로는 −2048부터 2047까지밖에 못 쓴다. 그보다 큰 상수는 두 명령으로 만든다. <code>lui rd, imm20</code>은 20비트 값을 레지스터의 상위 20비트에 놓고 하위 12비트를 0으로 채운다. 이어서 <code>addi rd, rd, imm12</code>로 하위 12비트를 더한다. 어셈블러의 <code>li</code> 의사 명령이 바로 이 일을 한다.</p>
+    <p>함정이 하나 있다. <b>addi의 즉시값은 부호 확장된다.</b> 하위 12비트의 맨 위 비트(bit 11)가 1이면 addi는 그것을 음수로 보고, 결과적으로 상위 부분에서 4096을 빼는 셈이 된다. 그래서 그런 경우에는 lui에 줄 상위 값을 미리 <b>1 늘려</b> 둔다. 식으로 쓰면 상위 = (값 + 0x800) &gt;&gt; 12, 하위 = 값 − (상위 &lt;&lt; 12)이다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 880 340" role="img" aria-label="0x12345FFF를 만들 때 보정 없이 하면 틀리고 상위에 1을 더하면 맞는 과정">
+        <defs><marker id="constant-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--text-faint)"/></marker></defs>
+        <text x="440" y="22" text-anchor="middle" class="t t-bold">목표: a0 = 0x12345FFF</text>
+        <rect x="170" y="34" width="360" height="40" rx="8" class="f-gold-soft"/>
+        <text x="350" y="59" text-anchor="middle" class="t-mono">상위 20비트 0x12345</text>
+        <rect x="530" y="34" width="180" height="40" rx="8" class="f-accent-soft"/>
+        <text x="620" y="59" text-anchor="middle" class="t-mono">하위 12비트 0xFFF</text>
+        <text x="620" y="96" text-anchor="middle" class="t-bad" style="font-size:13px">addi에게 0xFFF는 −1 이다</text>
+        <text x="225" y="126" text-anchor="middle" class="t-bad">① 보정 없이</text>
+        <text x="655" y="126" text-anchor="middle" class="t-ok">② 상위에 +1 보정</text>
+        <g>
+          <rect x="60" y="138" width="330" height="36" rx="8" class="f-surface"/><text x="225" y="161" text-anchor="middle" class="t-mono">lui  a0, 0x12345</text>
+          <path d="M225 174 V184" class="s-line" marker-end="url(#constant-arrow)"/>
+          <rect x="60" y="186" width="330" height="36" rx="8" class="f-elev"/><text x="225" y="209" text-anchor="middle" class="t-mono">a0 = 0x12345000</text>
+          <path d="M225 222 V232" class="s-line" marker-end="url(#constant-arrow)"/>
+          <rect x="60" y="234" width="330" height="36" rx="8" class="f-surface"/><text x="225" y="257" text-anchor="middle" class="t-mono">addi a0, a0, -1</text>
+          <path d="M225 270 V280" class="s-line" marker-end="url(#constant-arrow)"/>
+          <rect x="60" y="282" width="330" height="40" rx="8" class="f-bad-soft"/><text x="225" y="307" text-anchor="middle" class="t-mono">a0 = 0x12344FFF ✗</text>
+        </g>
+        <g>
+          <rect x="490" y="138" width="330" height="36" rx="8" class="f-surface"/><text x="655" y="161" text-anchor="middle" class="t-mono">lui  a0, 0x12346</text>
+          <path d="M655 174 V184" class="s-line" marker-end="url(#constant-arrow)"/>
+          <rect x="490" y="186" width="330" height="36" rx="8" class="f-elev"/><text x="655" y="209" text-anchor="middle" class="t-mono">a0 = 0x12346000</text>
+          <path d="M655 222 V232" class="s-line" marker-end="url(#constant-arrow)"/>
+          <rect x="490" y="234" width="330" height="36" rx="8" class="f-surface"/><text x="655" y="257" text-anchor="middle" class="t-mono">addi a0, a0, -1</text>
+          <path d="M655 270 V280" class="s-line" marker-end="url(#constant-arrow)"/>
+          <rect x="490" y="282" width="330" height="40" rx="8" class="f-ok-soft"/><text x="655" y="307" text-anchor="middle" class="t-mono">a0 = 0x12345FFF ✓</text>
+        </g>
+      </svg></div>
+      <figcaption><b>그림 4-8.</b> 0x12345FFF 만들기. 하위 12비트 0xFFF의 bit 11이 1이므로 addi는 이를 −1로 더한다. 상위 값을 그대로 쓰면 결과가 정확히 4096(0x1000) 모자란다. 상위에 1을 더해 0x12346으로 lui하면 −1을 더한 결과가 목표와 같아진다.</figcaption>
+    </figure>
+
+    <div class="sim" id="constant-sim">
+      <div class="sim-head"><span class="sim-tag">SIMULATOR</span><h3>32비트 상수 빌더</h3></div>
+      <div class="sim-pad">
+        <div class="constant-steps" id="constant-steps"></div>
+      </div>
+      <div class="sim-controls">
+        <label class="control"><span>만들 상수 (10진수 또는 0x…)</span><input type="text" id="constant-input" value="0x12345FFF" size="14" spellcheck="false" autocomplete="off"></label>
+        <div class="control wide"><span>예시</span><div class="example-row" id="constant-examples"></div></div>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">필요한 명령 수</span><span class="value" id="constant-count">2</span></div>
+        <div class="stat"><span class="key">lui 즉시값</span><span class="value" id="constant-upper">—</span></div>
+        <div class="stat"><span class="key">addi 즉시값</span><span class="value" id="constant-lower">—</span></div>
+        <div class="stat"><span class="key">에뮬레이터 검증</span><span class="value" id="constant-verify">—</span></div>
+      </div>
+      <div class="sim-note"><code>0x800</code>, <code>0x7FFFF800</code>, <code>0xFFFFF000</code>처럼 하위 12비트가 경계에 걸린 값을 넣어 보자. 하위 12비트의 맨 위 비트(밑줄)가 1일 때만 +1 보정이 생긴다. 마지막 칸은 같은 <code>li</code>를 이 책의 RV32 에뮬레이터로 실제 실행해 a0 값이 목표와 같은지 확인한 결과다.</div>
+    </div>
+
+    <h3>auipc: pc를 기준으로 한 주소</h3>
+    <p><code>auipc rd, imm20</code>(add upper immediate to pc)는 lui와 같은 U 형식이지만, 20비트 값을 상위에 놓은 뒤 <b>이 명령 자신의 주소(pc)를 더한다</b>. 여기에 12비트 즉시값을 가진 명령을 하나 더 붙이면 pc에서 32비트 범위 안의 어디든 가리킬 수 있다. <code>addi</code>를 붙이면 주소를 만들고(<code>la</code>), 적재·저장 명령을 붙이면 그 주소를 바로 읽고 쓰며, <code>jalr</code>를 붙이면 그곳으로 점프한다(<code>call</code>). 프로그램이 메모리 어디에 올라가도 상대 거리는 변하지 않으므로 <b>위치 독립 코드</b>를 만드는 핵심 도구다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 880 272" role="img" aria-label="auipc와 addi로 pc 상대 주소를 만드는 과정">
+        <defs><path id="auipc-motion-path" d="M140 170 Q420 50 700 170 Q664 236 628 170"/></defs>
+        <text x="440" y="22" text-anchor="middle" class="t-mono">la t0, msg   ⇒   auipc t0, 0x3   ;   addi t0, t0, -1584</text>
+        <line x1="40" y1="170" x2="840" y2="170" class="s-line"/>
+        <path d="M140 170 Q420 50 700 170" class="s-accent flow-dash"/>
+        <path d="M700 170 Q664 236 628 170" class="s-gold flow-dash"/>
+        <circle cx="140" cy="170" r="7" class="f-accent"/>
+        <circle cx="700" cy="170" r="6" fill="var(--bg-elev)" stroke="var(--accent)" stroke-width="2"/>
+        <circle cx="628" cy="170" r="7" class="f-gold pulse"/>
+        <text x="140" y="196" text-anchor="middle" class="t-mono">pc = 0x00010040</text>
+        <text x="620" y="196" text-anchor="end" class="t-mono">msg = 0x00012A10</text>
+        <text x="708" y="196" class="t-mono">0x00013040</text>
+        <text x="420" y="98" text-anchor="middle" class="t-accent">auipc: pc + (0x3 &lt;&lt; 12) = pc + 0x3000</text>
+        <text x="664" y="240" text-anchor="middle" class="t-gold">addi: −1584 (−0x630)</text>
+        <text x="40" y="240" class="t-faint">오프셋 0x29D0 의 하위 12비트 0x9D0 은</text>
+        <text x="40" y="256" class="t-faint">bit 11 이 1 → 상위 2 에 +1 → 3</text>
+        <circle r="5" fill="var(--accent-2)"><animateMotion dur="4s" begin="-1s" repeatCount="indefinite"><mpath href="#auipc-motion-path"/></animateMotion></circle>
+      </svg></div>
+      <figcaption><b>그림 4-9.</b> <code>la t0, msg</code>가 펼쳐진 모습. auipc는 pc에 0x3000을 더해 목표 근처로 크게 뛰고, addi가 남은 거리(−1584)를 조정한다. 여기서도 하위 12비트의 bit 11이 1이어서 상위 값에 +1 보정이 들어갔다. 어셈블러는 <code>%pcrel_hi(msg)</code>·<code>%pcrel_lo(...)</code> 같은 재배치 연산자로 이 계산을 링커에게 맡긴다.</figcaption>
+    </figure>
+
+    <div class="callout deep"><strong>%hi와 %lo도 같은 보정을 한다</strong><p>절대 주소를 만들 때 쓰는 <code>lui a0, %hi(symbol)</code> · <code>addi a0, a0, %lo(symbol)</code>에서 %hi는 단순히 상위 20비트를 잘라 오는 것이 아니라, %lo가 음수가 될 것을 감안해 0x800을 더한 뒤 자른 값이다. 이 보정 규칙은 psABI의 재배치 정의에 들어 있다(<a href="abi.html">7장</a>).</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="ranges">
+    <h2>분기와 점프는 얼마나 멀리 갈 수 있나</h2>
+    <p>즉시값 비트 수가 곧 도달 거리다. B 형식은 imm[12:1]의 12비트에 암묵적인 imm[0]=0을 더한 13비트 부호 있는 값이므로 −4096부터 +4094바이트까지, 규격 표현으로 <b>±4 KiB</b>다. J 형식은 imm[20:1]로 −1,048,576부터 +1,048,574바이트, <b>±1 MiB</b>다. 두 경우 모두 오프셋은 <b>분기·점프 명령 자신의 주소</b>를 기준으로 한다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 880 250" role="img" aria-label="분기, jal, auipc와 jalr 조합의 도달 범위 비교">
+        <path d="M440 32 V46 M440 86 V100 M440 140 V154 M440 194 V208" class="s-accent"/>
+        <text x="440" y="24" text-anchor="middle" class="t-accent">pc</text>
+        <rect x="40" y="46" width="800" height="40" rx="10" class="f-violet-soft"/>
+        <text x="440" y="71" text-anchor="middle" class="t">auipc + jalr : 32비트 pc 상대 주소 어디든 (약 ±2 GiB)</text>
+        <rect x="220" y="100" width="440" height="40" rx="10" class="f-teal-soft"/>
+        <text x="440" y="125" text-anchor="middle" class="t">jal : ±1 MiB (−1,048,576 … +1,048,574)</text>
+        <rect x="350" y="154" width="180" height="40" rx="10" class="f-gold-soft"/>
+        <text x="440" y="179" text-anchor="middle" class="t">분기 : ±4 KiB</text>
+        <circle cx="440" cy="214" r="6" class="f-accent pulse"/>
+        <text x="440" y="240" text-anchor="middle" class="t-dim">분기: −4096 … +4094 바이트 · 모두 2바이트 단위 (축척은 실제와 다름)</text>
+      </svg></div>
+      <figcaption><b>그림 4-10.</b> 제어 이동 명령의 도달 범위. 실제 비율로는 ±4 KiB 막대가 ±1 MiB 막대의 256분의 1밖에 안 된다. 그보다 먼 곳은 auipc로 상위를 만든 뒤 jalr의 12비트로 마무리한다.</figcaption>
+    </figure>
+
+    <div class="table-wrap"><table>
+      <thead><tr><th>명령</th><th>즉시값</th><th>단위</th><th>범위</th><th>기준</th></tr></thead>
+      <tbody>
+        <tr><td><code>beq</code> 등 분기</td><td>B: 12비트 + 암묵 0</td><td>2바이트</td><td>−4096 … +4094</td><td>분기 명령의 주소</td></tr>
+        <tr><td><code>jal</code></td><td>J: 20비트 + 암묵 0</td><td>2바이트</td><td>−1,048,576 … +1,048,574</td><td>jal 명령의 주소</td></tr>
+        <tr><td><code>jalr</code></td><td>I: 12비트</td><td>1바이트 (결과의 bit 0은 0으로)</td><td>rs1 −2048 … rs1 +2047</td><td>레지스터 rs1</td></tr>
+        <tr><td><code>auipc</code> + <code>jalr</code></td><td>U 20비트 + I 12비트</td><td>1바이트</td><td>32비트 pc 상대 전 범위</td><td>auipc의 주소</td></tr>
+      </tbody>
+    </table></div>
+
+    <p>jalr는 즉시값을 2배 하지 않는다. 규격은 그 이유를 “즉시값 형식을 하나 더 늘리지 않기 위해서”라고 설명한다. jalr는 대개 즉시값이 0이거나 lui·auipc와 짝을 이루므로 범위가 조금 줄어도 문제가 없다. 대신 계산된 주소의 bit 0을 0으로 지워, 함수 포인터의 최하위 비트를 다른 정보에 쓸 여지를 남겼다.</p>
+
+    <div class="callout warn"><strong>2바이트 단위인데 4바이트 정렬?</strong><p>인코딩은 2바이트 단위 오프셋을 허용하지만, 압축 명령이 없는 구현(IALIGN=32)에서는 명령이 4바이트 경계에 있어야 한다. 이때 분기가 <b>실제로 성립해서</b> 4의 배수가 아닌 주소로 뛰려 하면 명령어 주소 정렬 예외(instruction-address-misaligned)가 난다. 규격은 이 예외를 목표 명령이 아니라 <b>분기·점프 명령 자신</b>에게서 보고하도록 정했고, 성립하지 않은 분기는 예외를 내지 않는다.</p></div>
+
+    <div class="callout tip"><strong>링커 완화(relaxation)</strong><p>컴파일러는 함수가 얼마나 멀리 있을지 모르므로 <code>call</code>을 일단 <code>auipc ra, …</code> + <code>jalr ra, …(ra)</code> 두 명령으로 내보낸다. 링크할 때 실제 거리가 ±1 MiB 안이면 링커가 이를 <code>jal ra, …</code> 한 명령으로 줄인다. 즉시값 범위가 코드 크기와 직결되기 때문에 생긴 최적화다.</p></div>
+  </section>
+
+  <section class="keypoints" id="summary">
+    <h2>핵심 정리</h2>
+    <ol>
+      <li>베이스 ISA의 명령은 모두 32비트이고 하위 2비트가 <code>11</code>이다. 이 비트들로 16비트 압축 명령과 더 긴 명령의 자리를 미리 확보했다.</li>
+      <li>형식은 R·I·S·U 네 가지와, 즉시값 처리만 다른 변형 B·J 두 가지다. opcode는 언제나 [6:0], funct3은 [14:12]에 있다.</li>
+      <li><b>rs1·rs2·rd는 모든 형식에서 같은 자리</b>에 있어서, 해독이 끝나기 전에 레지스터 파일을 읽을 수 있다.</li>
+      <li>CSR의 5비트 즉시값을 빼면 즉시값은 모두 부호 확장되며, <b>부호 비트는 언제나 inst[31]</b>이어서 부호 확장을 해독과 동시에 할 수 있다.</li>
+      <li>B는 S와, J는 U·I와 최대한 겹치도록 비트를 “회전”시켰다. S와 비교해 B에서 뜻이 바뀐 것은 부호 비트를 빼면 inst[7](imm[11]) 하나이고, imm[0]은 언제나 0이라 인코딩하지 않는다.</li>
+      <li>opcode가 큰 무리를, funct3과 funct7이 세부 연산을 고른다. add/sub, srl/sra는 inst[30] 한 비트로 갈린다.</li>
+      <li>32비트 상수는 <code>lui</code>+<code>addi</code>로 만들고, 하위 12비트의 bit 11이 1이면 상위 값에 +1 한다. <code>auipc</code>는 같은 방식으로 pc 상대 주소를 만든다.</li>
+      <li>분기는 ±4 KiB, jal은 ±1 MiB, auipc+jalr는 32비트 pc 상대 전 범위에 닿는다.</li>
+    </ol>
+  </section>
+
+  <section id="quiz">
+    <h2>확인 퀴즈</h2>
+    <div class="quiz">
+      <div class="quiz-question"><p>메모리에서 읽은 명령의 첫 바이트가 <code>0x13</code>이다. 이 명령의 길이는?</p><div class="options">
+        <button class="option">16비트</button>
+        <button class="option" data-correct>32비트</button>
+        <button class="option">48비트</button>
+        <button class="option">첫 바이트만으로는 알 수 없다</button>
+      </div><div class="quiz-explanation">0x13 = 0b0001_0011. 하위 2비트가 11이고 inst[4:2]가 100(≠111)이므로 32비트 명령이다. 실제로 OP-IMM(addi 등) opcode다.</div></div>
+      <div class="quiz-question"><p>rs1·rs2·rd를 모든 형식에서 같은 자리에 둔 가장 큰 이유는?</p><div class="options">
+        <button class="option">어셈블러를 쉽게 만들려고</button>
+        <button class="option" data-correct>형식을 해독하기 전에 레지스터 파일 읽기를 시작할 수 있게 하려고</button>
+        <button class="option">레지스터 수를 32개로 늘리려고</button>
+        <button class="option">즉시값을 더 크게 만들려고</button>
+      </div><div class="quiz-explanation">레지스터 번호 해독은 구현의 임계 경로에 있다. 자리가 고정되어 있으면 해독과 레지스터 읽기를 병렬로 할 수 있다. 그 대가로 즉시값 비트가 형식마다 옮겨 다닌다.</div></div>
+      <div class="quiz-question"><p>B 형식에서 inst[7]이 담는 것은?</p><div class="options">
+        <button class="option">imm[0]</button>
+        <button class="option">imm[12]</button>
+        <button class="option" data-correct>imm[11]</button>
+        <button class="option">rd의 최하위 비트</button>
+      </div><div class="quiz-explanation">S 형식에서 imm[0]이던 자리에 B는 imm[11]을 넣었다. 분기 오프셋의 imm[0]은 항상 0이라 인코딩할 필요가 없고, 나머지 비트는 S와 같은 자리에 남는다.</div></div>
+      <div class="quiz-question"><p>모든 즉시값의 부호 비트를 inst[31]에 둔 이유로 가장 알맞은 것은?</p><div class="options">
+        <button class="option">opcode와 가장 멀리 떨어뜨리려고</button>
+        <button class="option" data-correct>형식을 몰라도 부호 확장을 해독과 동시에 시작할 수 있어서</button>
+        <button class="option">빅 엔디언 메모리와 호환되려고</button>
+        <button class="option">음수 즉시값을 금지하려고</button>
+      </div><div class="quiz-explanation">부호 확장은 즉시값 처리 중 가장 시간이 걸리는 일 중 하나다. 부호 비트 자리가 고정되어 있으면 해독 결과를 기다릴 필요가 없다.</div></div>
+      <div class="quiz-question"><p><code>li a0, 0x00012800</code>을 lui+addi로 펼치면 lui의 즉시값은?</p><div class="options">
+        <button class="option"><code>0x12</code></button>
+        <button class="option" data-correct><code>0x13</code></button>
+        <button class="option"><code>0x128</code></button>
+        <button class="option"><code>0x11</code></button>
+      </div><div class="quiz-explanation">하위 12비트 0x800은 bit 11이 1이라 addi에게 −2048이다. 그래서 상위를 0x12+1 = 0x13으로 두면 0x13000 − 2048 = 0x12800이 된다.</div></div>
+      <div class="quiz-question"><p>add와 sub를 구별하는 비트는?</p><div class="options">
+        <button class="option">opcode의 bit 5</button>
+        <button class="option">funct3의 bit 0</button>
+        <button class="option" data-correct>inst[30] (funct7의 bit 5)</button>
+        <button class="option">rd의 bit 4</button>
+      </div><div class="quiz-explanation">funct7이 0000000이면 add, 0100000이면 sub이다. 같은 비트가 srl/sra, srli/srai도 구별한다.</div></div>
+      <div class="quiz-question"><p><code>beq</code>로 바로 갈 수 있는 가장 먼 앞쪽 목표는 분기 명령으로부터 몇 바이트인가?</p><div class="options">
+        <button class="option">+2047</button>
+        <button class="option">+4095</button>
+        <button class="option" data-correct>+4094</button>
+        <button class="option">+1,048,574</button>
+      </div><div class="quiz-explanation">B 즉시값은 13비트 부호 있는 짝수 값이므로 최댓값은 2<sup>12</sup> − 2 = 4094다. +1,048,574는 jal의 최대 앞쪽 거리다.</div></div>
+      <div class="quiz-question"><p>opcode 지도에서 custom-0~3으로 표시된 칸의 뜻은?</p><div class="options">
+        <button class="option">미래의 표준 확장이 쓸 예정인 자리</button>
+        <button class="option" data-correct>표준 확장이 쓰지 않기로 약속해 사용자 정의 확장에 권장되는 자리</button>
+        <button class="option">16비트 압축 명령의 자리</button>
+        <button class="option">특권 명령 전용 자리</button>
+      </div><div class="quiz-explanation">미래 표준 확장을 위해 비워 둔 것은 reserved 칸이다. custom 칸은 표준이 피하기로 했으므로 회사·연구실이 자기 명령을 넣기에 안전하다.</div></div>
+    </div>
+  </section>
+
+  <section id="references">
+    <h2>더 읽을거리</h2>
+    <ul class="references">
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html" target="_blank" rel="noopener">The RISC-V Instruction Set Manual, Volume I — RV32I Base Integer Instruction Set</a> (v20260120): Base Instruction Formats, Immediate Encoding Variants, Control Transfer Instructions</li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/rv-32-64g.html" target="_blank" rel="noopener">Volume I — RV32/64G Instruction Set Listings</a>: opcode 지도와 전체 인코딩 표</li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/intro.html" target="_blank" rel="noopener">Volume I — Introduction</a>: Base Instruction-Length Encoding, 명령어 저장 순서</li>
+      <li><a href="https://docs.riscv.org/reference/abi/index.html" target="_blank" rel="noopener">RISC-V psABI</a>: %hi·%lo·%pcrel_hi·%pcrel_lo 재배치와 링커 완화</li>
+      <li>Andrew Waterman, “Design of the RISC-V Instruction Set Architecture”, UC Berkeley 박사 논문 (2016) — 명령어 형식 설계 결정의 배경</li>
+    </ul>
+  </section>
+</main>
+
+<script>
+/* ---------------------------------------------------------------------------
+   시뮬레이터 1: 명령어 인코더
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const Riscv = window.Riscv;
+  const REGISTER_COUNT = 32;
+  // fence 계열은 즉시값 칸에 순서 지정 비트를 담고 CSR 명령은 16장에서 따로 다루므로, 이 인코더에서는 뺀다
+  const SUPPORTED_FORMATS = new Set(["R", "I", "I-shift", "S", "B", "U", "J"]);
+  const EXCLUDED_NAMES = new Set(["fence", "fence.i"]);
+  const FORMAT_TITLES = { R: "R", I: "I", "I-shift": "I (시프트)", S: "S", B: "B", U: "U", J: "J" };
+  const DEFAULT_IMMEDIATES = { I: "42", "I-shift": "3", S: "8", B: "-8", U: "0x12345", J: "2048" };
+  const IMMEDIATE_LABELS = { I: "즉시값 (12비트)", "I-shift": "shamt (시프트 양)", S: "오프셋 (12비트)", B: "분기 오프셋 (바이트)", U: "상위 20비트 즉시값", J: "점프 오프셋 (바이트)" };
+  const RANGE_TEXTS = { R: "즉시값 없음", I: "−2048 … 2047", "I-shift": "0 … 31", S: "−2048 … 2047", B: "−4096 … 4094 짝수", U: "0 … 0xfffff", J: "±1 MiB 짝수" };
+  const OPERANDS_BY_FORMAT = {
+    R: ["rd", "rs1", "rs2"], I: ["rd", "rs1", "immediate"], "I-shift": ["rd", "rs1", "immediate"],
+    S: ["rs1", "rs2", "immediate"], B: ["rs1", "rs2", "immediate"], U: ["rd", "immediate"], J: ["rd", "immediate"],
+  };
+
+  const instructionSelect = document.getElementById("encoder-instruction");
+  const registerSelects = { rd: document.getElementById("encoder-rd"), rs1: document.getElementById("encoder-rs1"), rs2: document.getElementById("encoder-rs2") };
+  const immediateInput = document.getElementById("encoder-immediate");
+  const errorBox = document.getElementById("encoder-error");
+  const bitfieldWrap = document.getElementById("encoder-bitfield-wrap");
+
+  const instructions = Riscv.INSTRUCTIONS.filter((instruction) =>
+    !instruction.isRv64Only && !EXCLUDED_NAMES.has(instruction.name) && SUPPORTED_FORMATS.has(instruction.format) && (instruction.extension === "I" || instruction.extension === "M"));
+
+  // 형식별로 묶어 보여 주면 "어느 명령이 같은 모양인지"가 목록에서부터 드러난다
+  ["R", "I", "I-shift", "S", "B", "U", "J"].forEach((format) => {
+    const group = document.createElement("optgroup");
+    group.label = FORMAT_TITLES[format] + " 형식";
+    instructions.filter((instruction) => instruction.format === format).forEach((instruction) => {
+      const option = document.createElement("option");
+      option.value = instruction.name;
+      option.textContent = instruction.name + (instruction.extension === "M" ? " (M)" : "");
+      group.appendChild(option);
+    });
+    instructionSelect.appendChild(group);
+  });
+  Object.values(registerSelects).forEach((select) => {
+    for (let number = 0; number < REGISTER_COUNT; number += 1) {
+      const option = document.createElement("option");
+      option.value = String(number);
+      option.textContent = "x" + number + " · " + Riscv.ABI_NAMES[number];
+      select.appendChild(option);
+    }
+  });
+  instructionSelect.value = "add";
+  registerSelects.rd.value = "10";
+  registerSelects.rs1.value = "11";
+  registerSelects.rs2.value = "12";
+  let currentFormat = "R";
+
+  function bitfieldHtml(word, fields) {
+    return fields.map(([name, high, low, kind]) => {
+      const width = high - low + 1;
+      const value = Riscv.bits(word, high, low);
+      const rangeHtml = width === 1 ? "<span>" + high + "</span>" : "<span>" + high + "</span><span>" + low + "</span>";
+      return '<div class="field ' + kind + '" style="flex-grow:' + width + '"><div class="range">' + rangeHtml + '</div><div class="name" title="' + name + '">' + name + '</div><div class="value">' + book.toBinary(value, width) + "</div></div>";
+    }).join("");
+  }
+  function binaryLineHtml(word, fields) {
+    return fields.map(([name, high, low, kind]) => '<span class="group ' + kind + '" title="' + name + '">' + book.toBinary(Riscv.bits(word, high, low), high - low + 1) + "</span>").join("");
+  }
+
+  function selectedInstruction() {
+    return Riscv.INSTRUCTIONS_BY_NAME[instructionSelect.value];
+  }
+
+  function updateControlVisibility(instruction) {
+    const hasFixedImmediate = instruction.fixedImmediate !== undefined;
+    const operands = hasFixedImmediate ? [] : OPERANDS_BY_FORMAT[instruction.format];
+    ["rd", "rs1", "rs2", "immediate"].forEach((operand) => {
+      document.getElementById("encoder-" + operand + "-control").hidden = !operands.includes(operand);
+    });
+    document.getElementById("encoder-immediate-label").textContent = IMMEDIATE_LABELS[instruction.format] || "즉시값";
+    document.getElementById("encoder-range").textContent = hasFixedImmediate ? "고정 (" + instruction.fixedImmediate + ")" : RANGE_TEXTS[instruction.format];
+  }
+
+  function render() {
+    const instruction = selectedInstruction();
+    if (instruction.format !== currentFormat) {
+      // 형식이 바뀌면 이전 즉시값이 새 형식의 범위에 맞지 않을 수 있어 알맞은 기본값으로 바꾼다
+      currentFormat = instruction.format;
+      immediateInput.value = DEFAULT_IMMEDIATES[currentFormat] || "0";
+    }
+    updateControlVisibility(instruction);
+    const operandValues = {
+      rd: Number(registerSelects.rd.value),
+      rs1: Number(registerSelects.rs1.value),
+      rs2: Number(registerSelects.rs2.value),
+      immediate: 0,
+    };
+    const usesImmediate = instruction.fixedImmediate === undefined && OPERANDS_BY_FORMAT[instruction.format].includes("immediate");
+    if (instruction.fixedImmediate !== undefined) {
+      operandValues.rd = 0;
+      operandValues.rs1 = 0;
+    }
+    let word = null;
+    let errorMessage = "";
+    if (usesImmediate) {
+      const parsed = Riscv.parseInteger(immediateInput.value);
+      if (parsed === null) errorMessage = "즉시값을 숫자로 입력하세요 (예: 42, -8, 0x1f).";
+      else operandValues.immediate = parsed;
+    }
+    if (!errorMessage) {
+      try {
+        word = Riscv.encode(instruction.name, operandValues);
+      } catch (error) {
+        errorMessage = error.message;
+      }
+    }
+    const fields = Riscv.FORMAT_FIELDS[instruction.format];
+    document.getElementById("encoder-format").textContent = FORMAT_TITLES[instruction.format];
+    if (errorMessage) {
+      errorBox.hidden = false;
+      errorBox.textContent = "⚠️ " + errorMessage;
+      bitfieldWrap.classList.add("is-invalid");
+      document.getElementById("encoder-binary").classList.add("is-invalid");
+      document.getElementById("encoder-hex").textContent = "—";
+      document.getElementById("encoder-assembly").textContent = instruction.name + " …";
+      return;
+    }
+    errorBox.hidden = true;
+    bitfieldWrap.classList.remove("is-invalid");
+    document.getElementById("encoder-binary").classList.remove("is-invalid");
+    document.getElementById("encoder-bitfield").innerHTML = bitfieldHtml(word, fields);
+    document.getElementById("encoder-binary").innerHTML = binaryLineHtml(word, fields);
+    document.getElementById("encoder-hex").textContent = book.toHex(word);
+    document.getElementById("encoder-assembly").textContent = Riscv.disassemble(word);
+  }
+
+  instructionSelect.addEventListener("change", render);
+  Object.values(registerSelects).forEach((select) => select.addEventListener("change", render));
+  immediateInput.addEventListener("input", render);
+  render();
+})();
+
+/* ---------------------------------------------------------------------------
+   시뮬레이터 2: 명령어 디코더 (16진수 입력 또는 비트 클릭)
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const Riscv = window.Riscv;
+  const BITS_PER_WORD = 32;
+  const BITS_PER_BYTE = 8;
+  const LENGTH_MARK_32_BIT = 0b11;
+  const LONGER_INSTRUCTION_MARK = 0b111;
+  const ALL_ONES = 0xffffffff;
+  const SHAMT_HIGH_BIT = 25;
+  const MAXIMUM_HEX_DIGITS = 8;
+  const EXAMPLES = [
+    { label: "add a0, a1, a2", word: 0x00c58533 },
+    { label: "sub a0, a1, a2", word: Riscv.encode("sub", { rd: 10, rs1: 11, rs2: 12 }) },
+    { label: "lw ra, 12(sp)", word: Riscv.encode("lw", { rd: 1, rs1: 2, immediate: 12 }) },
+    { label: "sw a0, -4(s0)", word: Riscv.encode("sw", { rs1: 8, rs2: 10, immediate: -4 }) },
+    { label: "bne t0, t1, -16", word: Riscv.encode("bne", { rs1: 5, rs2: 6, immediate: -16 }) },
+    { label: "jal ra, +2048", word: Riscv.encode("jal", { rd: 1, immediate: 2048 }) },
+    { label: "lui a0, 0x12345", word: Riscv.encode("lui", { rd: 10, immediate: 0x12345 }) },
+    { label: "0x00000000", word: 0 },
+  ];
+  // 무작위 명령을 만들 때 형식마다 즉시값을 고르는 범위 (인코더가 받아들이는 범위와 같다)
+  const RANDOM_IMMEDIATE_RANGES = {
+    I: { minimum: -2048, maximum: 2047, step: 1 }, S: { minimum: -2048, maximum: 2047, step: 1 },
+    "I-shift": { minimum: 0, maximum: 31, step: 1 }, B: { minimum: -2048, maximum: 2047, step: 2 },
+    U: { minimum: 0, maximum: 0xfffff, step: 1 }, J: { minimum: -524288, maximum: 524287, step: 2 },
+  };
+  const RANDOM_CANDIDATES = Riscv.INSTRUCTIONS.filter((instruction) => !instruction.isRv64Only && instruction.extension !== "Zicsr" && instruction.extension !== "Zifencei" && instruction.name !== "fence");
+
+  const bitContainer = document.getElementById("decoder-bits");
+  const hexInput = document.getElementById("decoder-hex");
+  const noteBox = document.getElementById("decoder-note");
+  let word = 0x00c58533;
+  const bitElements = [];
+
+  // 32개 비트 단추를 바이트 단위로 묶는다. 좁은 화면에서도 바이트 경계에서만 줄이 바뀌게 하려는 것이다.
+  for (let byteIndex = 0; byteIndex < BITS_PER_WORD / BITS_PER_BYTE; byteIndex += 1) {
+    const group = document.createElement("div");
+    group.className = "byte-group";
+    for (let offset = 0; offset < BITS_PER_BYTE; offset += 1) {
+      const bitNumber = BITS_PER_WORD - 1 - (byteIndex * BITS_PER_BYTE + offset);
+      const element = document.createElement("span");
+      element.className = "bit";
+      element.title = "inst[" + bitNumber + "]";
+      element.setAttribute("role", "button");
+      element.setAttribute("tabindex", "0");
+      const toggle = () => { word = (word ^ (1 << bitNumber)) >>> 0; hexInput.value = book.toHex(word); render(); };
+      element.addEventListener("click", toggle);
+      element.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); toggle(); } });
+      group.appendChild(element);
+      bitElements[bitNumber] = element;
+    }
+    bitContainer.appendChild(group);
+  }
+
+  const examplesRow = document.getElementById("decoder-examples");
+  EXAMPLES.forEach((example) => {
+    const button = document.createElement("button");
+    button.className = "button";
+    button.textContent = example.label;
+    button.addEventListener("click", () => { word = example.word >>> 0; hexInput.value = book.toHex(word); render(); });
+    examplesRow.appendChild(button);
+  });
+
+  function randomInteger(minimum, maximum) {
+    return minimum + Math.floor(Math.random() * (maximum - minimum + 1));
+  }
+  function randomWord() {
+    const instruction = RANDOM_CANDIDATES[randomInteger(0, RANDOM_CANDIDATES.length - 1)];
+    const operands = { rd: randomInteger(0, 31), rs1: randomInteger(0, 31), rs2: randomInteger(0, 31), immediate: 0 };
+    // ecall·ebreak 은 rd·rs1 이 0 이어야 정상 인코딩이므로 고정한다
+    if (instruction.fixedImmediate !== undefined) { operands.rd = 0; operands.rs1 = 0; }
+    const range = RANDOM_IMMEDIATE_RANGES[instruction.format];
+    if (range) operands.immediate = randomInteger(range.minimum, range.maximum) * range.step;
+    return Riscv.encode(instruction.name, operands);
+  }
+
+  function meaningOf(field, decoded) {
+    if (field.kind === "register") return "x" + field.value + " (" + Riscv.ABI_NAMES[field.value] + ")";
+    if (field.kind === "opcode") return (Riscv.OPCODE_NAMES[field.value] || "?") + " 무리";
+    if (field.kind === "function") return decoded.name + " 을(를) 고름";
+    if (field.name === "shamt") return field.value + "칸 시프트";
+    return "즉시값 조각";
+  }
+
+  function bitfieldHtml(fields) {
+    return fields.map((field) => {
+      const width = field.high - field.low + 1;
+      const rangeHtml = width === 1 ? "<span>" + field.high + "</span>" : "<span>" + field.high + "</span><span>" + field.low + "</span>";
+      return '<div class="field ' + field.kind + '" style="flex-grow:' + width + '"><div class="range">' + rangeHtml + '</div><div class="name" title="' + field.name + '">' + field.name + '</div><div class="value">' + book.toBinary(field.value, width) + "</div></div>";
+    }).join("");
+  }
+
+  function collectNotes(decoded) {
+    const notes = [];
+    if ((word & LENGTH_MARK_32_BIT) !== LENGTH_MARK_32_BIT) notes.push("하위 2비트가 11이 아니다 → 32비트 명령이 아니라 16비트 압축 명령(C 확장)의 영역이다.");
+    else if (((word >>> 2) & LONGER_INSTRUCTION_MARK) === LONGER_INSTRUCTION_MARK) notes.push("inst[4:2] = 111 → 32비트보다 긴 명령을 위해 비워 둔 영역이다.");
+    if (word === 0) notes.push("모든 비트가 0인 명령은 규격상 언제나 불법 명령이다.");
+    if (word === ALL_ONES) notes.push("모든 비트가 1인 명령도 불법으로 정해져 있다.");
+    if (decoded.instruction && decoded.instruction.isRv64Only) notes.push(decoded.name + " 은(는) RV64 전용 명령이다. RV32에서는 불법 명령이다 (6장).");
+    if (decoded.format === "I-shift" && !decoded.instruction.isRv64Only && Riscv.bits(word, SHAMT_HIGH_BIT, SHAMT_HIGH_BIT) === 1) {
+      notes.push("RV32에서 시프트 즉시값의 inst[25](shamt[5])가 1인 인코딩은 예약되어 있다. RV64에서만 6비트 shamt로 쓰인다.");
+    }
+    return notes;
+  }
+
+  function render() {
+    bitElements.forEach((element, bitNumber) => {
+      element.textContent = (word >>> bitNumber) & 1;
+      element.classList.toggle("on", ((word >>> bitNumber) & 1) === 1);
+      element.classList.remove("kind-opcode", "kind-register", "kind-immediate", "kind-function");
+    });
+    const decoded = Riscv.decode(word);
+    decoded.fields.forEach((field) => {
+      for (let bitNumber = field.low; bitNumber <= field.high; bitNumber += 1) bitElements[bitNumber].classList.add("kind-" + field.kind);
+    });
+    document.getElementById("decoder-bitfield").innerHTML = bitfieldHtml(decoded.fields);
+    const rows = decoded.fields.map((field) => {
+      const width = field.high - field.low + 1;
+      const bitsText = width === 1 ? "[" + field.high + "]" : "[" + field.high + ":" + field.low + "]";
+      const meaning = decoded.name ? meaningOf(field, decoded) : "알 수 없는 opcode";
+      return "<tr><td><span class=\"chip " + field.kind + "\"></span>" + field.name + '</td><td class="mono">' + bitsText + '</td><td class="mono">' + book.toBinary(field.value, width) + '</td><td class="mono">' + field.value + "</td><td>" + meaning + "</td></tr>";
+    });
+    document.getElementById("decoder-table").innerHTML = rows.join("");
+    const notes = collectNotes(decoded);
+    noteBox.hidden = notes.length === 0;
+    noteBox.innerHTML = notes.join("<br>");
+    document.getElementById("decoder-assembly").textContent = decoded.name ? Riscv.disassemble(word) : "알 수 없음";
+    const opcodeName = Riscv.OPCODE_NAMES[decoded.opcode] || "0b" + book.toBinary(decoded.opcode, 7);
+    document.getElementById("decoder-format").textContent = decoded.name ? decoded.format + " · " + opcodeName : opcodeName;
+    const hasImmediate = decoded.name && decoded.format !== "R" && decoded.format !== "I-csr";
+    let immediateText = "—";
+    if (hasImmediate && decoded.format === "U") immediateText = book.toHex(decoded.immediate << 12);
+    else if (hasImmediate) immediateText = String(decoded.immediate);
+    document.getElementById("decoder-immediate").textContent = immediateText;
+  }
+
+  hexInput.addEventListener("input", () => {
+    const cleaned = hexInput.value.trim().replace(/^0x/i, "").replace(/[\s_]/g, "");
+    const isValid = /^[0-9a-f]+$/i.test(cleaned) && cleaned.length <= MAXIMUM_HEX_DIGITS;
+    hexInput.setAttribute("aria-invalid", isValid ? "false" : "true");
+    if (!isValid) {
+      noteBox.hidden = false;
+      noteBox.textContent = "16진수 8자리 이내로 입력하세요 (예: 0x00c58533).";
+      return;
+    }
+    word = parseInt(cleaned, 16) >>> 0;
+    render();
+  });
+  document.getElementById("decoder-random").addEventListener("click", () => {
+    word = randomWord() >>> 0;
+    hexInput.value = book.toHex(word);
+    render();
+  });
+  render();
+})();
+
+/* ---------------------------------------------------------------------------
+   애니메이션: B·J 즉시값 비트가 명령어 자리에서 즉시값 자리로 모이는 과정
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const Riscv = window.Riscv;
+  const BITS_PER_WORD = 32;
+  const MOVE_SECONDS = 1.3;
+  const ZERO_SECONDS = 0.8;
+  const SIGN_SECONDS = 1.6;
+  const HOLD_SECONDS = 2.2;
+  const MARGIN = 14;
+  const PERCENT = 100;
+  const FIELD_NAME_MINIMUM_CELL_WIDTH = 19;
+  // 묶음마다 "이 연결을 이미 쓰는 다른 형식"을 적어 둔다. layout 항목 순서와 같다.
+  const SHARING_NOTES = {
+    B: [
+      "모든 형식에서 부호 비트가 있는 자리다.",
+      "I·S·J 형식의 imm[10:5]와 똑같은 연결이다.",
+      "S 형식의 imm[4:1]과 똑같은 연결이다.",
+      "B만의 새 연결이다. S 형식에서는 같은 inst[7]이 imm[0]이었다.",
+    ],
+    J: [
+      "모든 형식에서 부호 비트가 있는 자리다.",
+      "I 형식의 imm[10:1]과 똑같은 연결이다.",
+      "J만의 새 연결이다. I 형식에서는 같은 inst[20]이 imm[0]이었다.",
+      "U 형식과 똑같은 연결이고, 비트 번호까지 같아 제자리에 떨어진다.",
+    ],
+  };
+  const SETTINGS = {
+    B: {
+      signBit: 12, minimum: -2048, maximum: 2047, defaultOffset: -24,
+      encodeWord: (offset) => Riscv.encode("beq", { rs1: 10, rs2: 11, immediate: offset }),
+    },
+    J: {
+      signBit: 20, minimum: -524288, maximum: 524287, defaultOffset: 0x1a2c,
+      encodeWord: (offset) => Riscv.encode("jal", { rd: 1, immediate: offset }),
+    },
+  };
+
+  const canvas = document.getElementById("unscramble-canvas");
+  const description = document.getElementById("unscramble-description");
+  const toggleButton = document.getElementById("unscramble-toggle");
+  let format = "B";
+  let offset = SETTINGS.B.defaultOffset;
+  let word = 0;
+  let immediate = 0;
+  let elapsed = 0;
+  let speed = 1;
+  let phases = [];
+  let lastDescription = "";
+
+  function buildPhases() {
+    const layout = Riscv.IMMEDIATE_LAYOUTS[format];
+    phases = layout.map((entry, index) => ({ kind: "move", entry, groupIndex: index, duration: MOVE_SECONDS }));
+    phases.push({ kind: "zero", duration: ZERO_SECONDS });
+    phases.push({ kind: "sign", duration: SIGN_SECONDS });
+    phases.push({ kind: "hold", duration: HOLD_SECONDS });
+  }
+  function totalDuration() {
+    return phases.reduce((sum, phase) => sum + phase.duration, 0);
+  }
+  function locatePhase() {
+    let remaining = elapsed % totalDuration();
+    for (let index = 0; index < phases.length; index += 1) {
+      if (remaining < phases[index].duration) return { index, fraction: remaining / phases[index].duration };
+      remaining -= phases[index].duration;
+    }
+    return { index: phases.length - 1, fraction: 1 };
+  }
+
+  function prepare() {
+    const settings = SETTINGS[format];
+    word = settings.encodeWord(offset);
+    immediate = Riscv.gatherImmediate(format, word);
+    buildPhases();
+    document.getElementById("unscramble-offset").textContent = offset;
+    document.getElementById("unscramble-word").textContent = book.toHex(word);
+    document.getElementById("unscramble-assembly").textContent = Riscv.disassemble(word);
+  }
+
+  function groupColors(colors) {
+    return [
+      { fill: colors.goldSoft, stroke: colors.gold },
+      { fill: colors.violetSoft, stroke: colors.violet },
+      { fill: colors.tealSoft, stroke: colors.teal },
+      { fill: colors.okSoft, stroke: colors.ok },
+    ];
+  }
+  function kindColor(kind, colors) {
+    if (kind === "immediate") return colors.goldSoft;
+    if (kind === "register") return colors.tealSoft;
+    if (kind === "function") return colors.violetSoft;
+    return colors.accentSoft;
+  }
+
+  // 즉시값의 비트 번호가 이 형식에서 어느 묶음(layout 항목)에 속하는지 미리 찾아 둔다
+  function groupOfImmediateBit(bit) {
+    const layout = Riscv.IMMEDIATE_LAYOUTS[format];
+    for (let index = 0; index < layout.length; index += 1) {
+      const [immediateHigh, immediateLow] = layout[index];
+      if (bit >= immediateLow && bit <= immediateHigh) return index;
+    }
+    return -1;
+  }
+
+  function draw(context, width, height, colors) {
+    const settings = SETTINGS[format];
+    const cellWidth = (width - 2 * MARGIN) / BITS_PER_WORD;
+    const cellHeight = book.clamp(cellWidth * 1.3, 20, 32);
+    const fontSize = book.clamp(Math.floor(cellWidth * 0.55), 9, 14);
+    const topY = 46;
+    const bottomY = height - cellHeight - 64;
+    const columnX = (bit) => MARGIN + (BITS_PER_WORD - 1 - bit) * cellWidth;
+    const palette = groupColors(colors);
+    const { index: phaseIndex, fraction } = locatePhase();
+    const phase = phases[phaseIndex];
+    const isGroupDone = (groupIndex) => phaseIndex > groupIndex;
+
+    // 명령어 행
+    book.drawText(context, "명령어 inst[31:0]", MARGIN, 16, { size: 13, bold: true, color: colors.text });
+    const fields = Riscv.FORMAT_FIELDS[format];
+    fields.forEach(([name, high, low, kind]) => {
+      const x = columnX(high);
+      const fieldWidth = (high - low + 1) * cellWidth;
+      context.fillStyle = kindColor(kind, colors);
+      book.roundedRectangle(context, x + 1, topY, fieldWidth - 2, cellHeight, 4);
+      context.fill();
+      if (cellWidth >= FIELD_NAME_MINIMUM_CELL_WIDTH && fieldWidth > name.length * 6.5) {
+        book.drawText(context, name, x + fieldWidth / 2, topY - 9, { size: 10.5, color: colors.dim, align: "center", mono: true });
+      }
+    });
+    for (let bit = 0; bit < BITS_PER_WORD; bit += 1) {
+      const bitValue = (word >>> bit) & 1;
+      book.drawText(context, String(bitValue), columnX(bit) + cellWidth / 2, topY + cellHeight / 2, { size: fontSize, color: colors.text, align: "center", mono: true });
+    }
+    // 지금 움직이는 묶음의 원래 자리를 테두리로 강조한다
+    if (phase.kind === "move") {
+      const [, , instructionHigh, instructionLow] = phase.entry;
+      context.strokeStyle = palette[phase.groupIndex].stroke;
+      context.lineWidth = 2;
+      book.roundedRectangle(context, columnX(instructionHigh) + 1, topY - 1, (instructionHigh - instructionLow + 1) * cellWidth - 2, cellHeight + 2, 4);
+      context.stroke();
+    }
+    if (phase.kind === "sign") {
+      context.strokeStyle = colors.gold;
+      context.lineWidth = 2;
+      book.roundedRectangle(context, columnX(31) + 1, topY - 1, cellWidth - 2, cellHeight + 2, 4);
+      context.stroke();
+    }
+
+    // 즉시값 행
+    book.drawText(context, "즉시값 imm[31:0]", MARGIN, bottomY - 14, { size: 13, bold: true, color: colors.text });
+    for (let bit = 0; bit < BITS_PER_WORD; bit += 1) {
+      const x = columnX(bit);
+      const groupIndex = groupOfImmediateBit(bit);
+      let isFilled = false;
+      let fill = colors.surface;
+      if (groupIndex >= 0 && isGroupDone(groupIndex)) { isFilled = true; fill = palette[groupIndex].fill; }
+      if (bit === 0 && (phaseIndex > phases.length - 3 || (phase.kind === "zero" && fraction > 0.5))) { isFilled = true; fill = colors.surface2; }
+      if (bit > settings.signBit) {
+        const signCount = BITS_PER_WORD - 1 - settings.signBit;
+        const order = bit - settings.signBit - 1;
+        const isSignDone = phase.kind === "hold" || (phase.kind === "sign" && fraction * 1.25 - (order / signCount) * 0.85 >= 0.4);
+        if (isSignDone) { isFilled = true; fill = colors.goldSoft; }
+      }
+      book.roundedRectangle(context, x + 1, bottomY, cellWidth - 2, cellHeight, 4);
+      if (isFilled) {
+        context.fillStyle = fill;
+        context.fill();
+        book.drawText(context, String((immediate >>> bit) & 1), x + cellWidth / 2, bottomY + cellHeight / 2, { size: fontSize, color: colors.text, align: "center", mono: true });
+      } else {
+        context.save();
+        context.setLineDash([3, 3]);
+        context.strokeStyle = colors.border;
+        context.lineWidth = 1;
+        context.stroke();
+        context.restore();
+      }
+    }
+    // 비트 번호 몇 개만 표시해 위치를 가늠하게 한다
+    [31, settings.signBit, 11, 0].forEach((bit) => {
+      book.drawText(context, String(bit), columnX(bit) + cellWidth / 2, bottomY + cellHeight + 11, { size: 10, color: colors.faint, align: "center", mono: true });
+    });
+
+    // 움직이는 비트
+    const travel = (fromX, toX, progress, label, stroke) => {
+      const eased = book.easeInOut(book.clamp(progress, 0, 1));
+      const startY = topY + cellHeight / 2;
+      const endY = bottomY + cellHeight / 2;
+      const controlX = (fromX + toX) / 2;
+      const controlY = (startY + endY) / 2 + 10;
+      const oneMinus = 1 - eased;
+      const x = oneMinus * oneMinus * fromX + 2 * oneMinus * eased * controlX + eased * eased * toX;
+      const y = oneMinus * oneMinus * startY + 2 * oneMinus * eased * controlY + eased * eased * endY;
+      context.fillStyle = colors.elevated;
+      context.strokeStyle = stroke;
+      context.lineWidth = 2;
+      book.roundedRectangle(context, x - cellWidth / 2 + 1, y - cellHeight / 2, cellWidth - 2, cellHeight, 4);
+      context.fill();
+      context.stroke();
+      book.drawText(context, label, x, y, { size: fontSize, bold: true, color: colors.text, align: "center", mono: true });
+    };
+    let caption = "";
+    if (phase.kind === "move") {
+      const [immediateHigh, immediateLow, instructionHigh, instructionLow] = phase.entry;
+      for (let offsetIndex = 0; offsetIndex <= immediateHigh - immediateLow; offsetIndex += 1) {
+        const instructionBit = instructionLow + offsetIndex;
+        const immediateBit = immediateLow + offsetIndex;
+        // 묶음 안에서도 살짝 시차를 두어 비트들이 한 덩어리로 겹쳐 보이지 않게 한다
+        const progress = fraction * 1.2 - offsetIndex * 0.02;
+        travel(columnX(instructionBit) + cellWidth / 2, columnX(immediateBit) + cellWidth / 2, progress, String((word >>> instructionBit) & 1), palette[phase.groupIndex].stroke);
+      }
+      const instructionRange = instructionHigh === instructionLow ? "inst[" + instructionHigh + "]" : "inst[" + instructionHigh + ":" + instructionLow + "]";
+      const immediateRange = immediateHigh === immediateLow ? "imm[" + immediateHigh + "]" : "imm[" + immediateHigh + ":" + immediateLow + "]";
+      const distance = Math.abs(instructionLow - immediateLow);
+      caption = instructionRange + " → " + immediateRange + (distance === 0 ? "  (제자리!)" : "  (" + distance + "칸 이동)");
+      describe("<b>" + instructionRange + "</b> → 즉시값 <b>" + immediateRange + "</b>. " + SHARING_NOTES[format][phase.groupIndex]);
+    } else if (phase.kind === "zero") {
+      travel(columnX(0) + cellWidth / 2, columnX(0) + cellWidth / 2, 1, "0", colors.faint);
+      caption = "imm[0] = 0 (인코딩하지 않음)";
+      describe("오프셋은 언제나 2의 배수이므로 <b>imm[0]은 항상 0</b>이다. 명령어에 담지 않고 하드웨어가 0을 붙인다.");
+    } else if (phase.kind === "sign") {
+      const signCount = BITS_PER_WORD - 1 - settings.signBit;
+      for (let order = 0; order < signCount; order += 1) {
+        const progress = (fraction * 1.25 - (order / signCount) * 0.85) / 0.4;
+        if (progress > 0 && progress < 1) travel(columnX(31) + cellWidth / 2, columnX(settings.signBit + 1 + order) + cellWidth / 2, progress, String((word >>> 31) & 1), colors.gold);
+      }
+      caption = "inst[31] → imm[31:" + (settings.signBit + 1) + "] 부호 확장";
+      describe("마지막으로 <b>inst[31]</b> 하나가 imm[31:" + (settings.signBit + 1) + "] 전체로 복사된다. 부호 비트 자리가 고정이라 이 일은 해독과 동시에 할 수 있다.");
+    } else {
+      caption = "완성: imm = " + immediate + " (" + book.toHex(immediate >>> 0) + ")";
+      describe("완성된 즉시값은 <b>" + immediate + "</b>이다. 분기·점프 명령의 주소에 이 값을 더한 곳이 목표 주소다.");
+    }
+    book.drawText(context, caption, width / 2, height - 22, { size: 14, bold: true, color: colors.accent, align: "center", mono: true });
+  }
+
+  function describe(html) {
+    if (html === lastDescription) return;
+    lastDescription = html;
+    description.innerHTML = html;
+  }
+
+  // 캔버스를 만들면 곧바로 한 번 그리므로, 그 전에 단계 목록을 준비해 둔다
+  prepare();
+  const view = book.createCanvas(canvas, draw, { aspectRatio: 0.34, minimumHeight: 250, maximumHeight: 300 });
+  const loop = book.animationLoop(canvas, (deltaSeconds) => {
+    elapsed += deltaSeconds * speed;
+    view.redraw();
+  });
+  function refreshToggleLabel() {
+    toggleButton.textContent = loop.isRunning() ? "일시 정지" : "재생";
+  }
+  toggleButton.addEventListener("click", () => {
+    if (loop.isRunning()) loop.stop();
+    else loop.start();
+    refreshToggleLabel();
+  });
+  document.getElementById("unscramble-restart").addEventListener("click", () => { elapsed = 0; view.redraw(); });
+  document.getElementById("unscramble-random").addEventListener("click", () => {
+    const settings = SETTINGS[format];
+    const half = settings.minimum + Math.floor(Math.random() * (settings.maximum - settings.minimum + 1));
+    offset = half * 2;
+    elapsed = 0;
+    prepare();
+    view.redraw();
+  });
+  book.segmented("unscramble-format", (value) => {
+    format = value;
+    offset = SETTINGS[format].defaultOffset;
+    elapsed = 0;
+    prepare();
+    view.redraw();
+  });
+  book.range("unscramble-speed", (value) => { speed = value / PERCENT; }, (value) => value + "%");
+  refreshToggleLabel();
+})();
+
+/* ---------------------------------------------------------------------------
+   시뮬레이터 4: lui + addi 32비트 상수 빌더
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const Riscv = window.Riscv;
+  const LOWER_BIT_COUNT = 12;
+  const UPPER_BIT_COUNT = 20;
+  const LOWER_MASK = 0xfff;
+  const LOWER_SIGN_MASK = 0x800;
+  const SMALLEST_IMMEDIATE = -2048;
+  const LARGEST_IMMEDIATE = 2047;
+  const SMALLEST_SIGNED = -2147483648;
+  const LARGEST_UNSIGNED = 4294967295;
+  const MAXIMUM_STEPS = 10;
+  const RESULT_REGISTER = 10;
+  const EXAMPLES = ["0x12345FFF", "0x12345678", "0xDEADBEEF", "0x800", "0x7FFFF800", "0xFFFFF000", "-1", "1000"];
+
+  const input = document.getElementById("constant-input");
+  const steps = document.getElementById("constant-steps");
+  const examplesRow = document.getElementById("constant-examples");
+  EXAMPLES.forEach((example) => {
+    const button = document.createElement("button");
+    button.className = "button";
+    button.textContent = example;
+    button.addEventListener("click", () => { input.value = example; render(); });
+    examplesRow.appendChild(button);
+  });
+
+  const hex = (value) => book.toHex(value >>> 0);
+  const row = (label, content) => '<div class="constant-row"><div class="label">' + label + '</div><div class="content">' + content + "</div></div>";
+
+  // 에뮬레이터로 li 를 실제 실행해 본다. 어셈블러의 의사 명령 펼치기와 이 장의 설명이 같은 답을 내는지 확인하는 용도다.
+  function runOnEmulator(signedValue) {
+    const machine = new Riscv.Machine();
+    const program = machine.load("li a0, " + signedValue);
+    if (program.errors.length) return { isMatch: false, text: program.errors[0].message, words: [] };
+    machine.run(MAXIMUM_STEPS);
+    const result = machine.registers[RESULT_REGISTER];
+    return { isMatch: result === signedValue, text: hex(result), words: program.words };
+  }
+
+  function render() {
+    const parsed = Riscv.parseInteger(input.value);
+    if (parsed === null || parsed < SMALLEST_SIGNED || parsed > LARGEST_UNSIGNED) {
+      steps.innerHTML = '<div class="message-error">32비트 범위의 정수를 입력하세요. 10진수(-1, 1000) 또는 16진수(0x12345678)를 쓸 수 있다.</div>';
+      ["constant-count", "constant-upper", "constant-lower", "constant-verify"].forEach((id) => { document.getElementById(id).textContent = "—"; });
+      return;
+    }
+    const unsignedValue = parsed >>> 0;
+    const signedValue = parsed | 0;
+    const lowerBits = unsignedValue & LOWER_MASK;
+    const isLowerNegative = (lowerBits & LOWER_SIGN_MASK) !== 0;
+    const split = Riscv.splitUpperLower(signedValue);
+    const naiveUpper = unsignedValue >>> LOWER_BIT_COUNT;
+    const luiValue = (split.upper << LOWER_BIT_COUNT) | 0;
+    const finalValue = (luiValue + split.lower) | 0;
+    const naiveLuiValue = (naiveUpper << LOWER_BIT_COUNT) | 0;
+    const naiveFinal = (naiveLuiValue + split.lower) | 0;
+    const fitsInAddi = signedValue >= SMALLEST_IMMEDIATE && signedValue <= LARGEST_IMMEDIATE;
+
+    const binary = book.toBinary(unsignedValue, 32);
+    const upperText = binary.slice(0, UPPER_BIT_COUNT);
+    const lowerText = binary.slice(UPPER_BIT_COUNT);
+    const binaryHtml = '<span class="split-upper">' + upperText + '</span> <span class="split-lower"><span class="split-sign">' + lowerText[0] + "</span>" + lowerText.slice(1) + "</span>";
+
+    let html = "";
+    html += row("목표 값", hex(unsignedValue) + " = " + signedValue + (signedValue < 0 ? " (부호 없이 " + unsignedValue + ")" : ""));
+    html += row("2진수로 나누기", binaryHtml + '<span class="explain">금색 = lui 가 맡을 상위 20비트, 파랑 = addi 가 맡을 하위 12비트, 밑줄 = 하위 12비트의 bit 11</span>');
+    html += row("하위 12비트", "0x" + lowerBits.toString(16).padStart(3, "0") + " → addi 즉시값 " + split.lower +
+      '<span class="explain">' + (isLowerNegative ? "bit 11이 1이므로 addi는 이 값을 <b>음수</b>로 부호 확장한다. 상위에서 4096을 빼는 효과가 생기므로 상위에 1을 더해 미리 갚아 둔다." : "bit 11이 0이므로 양수다. 보정이 필요 없다.") + "</span>");
+    html += row("상위 20비트", "0x" + naiveUpper.toString(16) + (isLowerNegative ? " + 1 → <b>0x" + split.upper.toString(16) + "</b>" : " → 그대로 0x" + split.upper.toString(16)) +
+      (isLowerNegative && split.upper === 0 ? '<span class="explain">0xfffff + 1 은 20비트에서 넘쳐 0이 된다. 32비트 덧셈도 넘치므로 결과는 여전히 맞다.</span>' : ""));
+    if (isLowerNegative) {
+      html += row("보정 유무 비교", '<div class="lane-grid"><div class="lane"><h4 class="verdict-bad">① 보정 없이</h4><div>lui → ' + hex(naiveLuiValue) + "</div><div>+ (" + split.lower + ") → " + hex(naiveFinal) + ' <span class="verdict-bad">✗</span></div></div>' +
+        '<div class="lane"><h4 class="verdict-ok">② +1 보정</h4><div>lui → ' + hex(luiValue) + "</div><div>+ (" + split.lower + ") → " + hex(finalValue) + ' <span class="verdict-ok">✓</span></div></div></div>');
+    }
+    const emulator = runOnEmulator(signedValue);
+    let sequence = "";
+    if (fitsInAddi) sequence = "addi a0, zero, " + signedValue + "    # 12비트에 들어가므로 한 명령";
+    else {
+      sequence = "lui  a0, 0x" + split.upper.toString(16) + "        # a0 = " + hex(luiValue);
+      if (split.lower !== 0) sequence += "\naddi a0, a0, " + split.lower + "      # a0 = " + hex(finalValue);
+      else sequence += "\n# 하위 12비트가 0 이므로 addi 가 필요 없다";
+    }
+    html += row("명령 순서", '<div class="codebox" style="margin:0">' + Riscv.highlightAssembly(sequence) + "</div>");
+    steps.innerHTML = html;
+    document.getElementById("constant-count").textContent = String(emulator.words.length || (fitsInAddi ? 1 : 2));
+    document.getElementById("constant-upper").textContent = fitsInAddi ? "(필요 없음)" : "0x" + split.upper.toString(16);
+    document.getElementById("constant-lower").textContent = fitsInAddi ? String(signedValue) : String(split.lower);
+    document.getElementById("constant-verify").textContent = emulator.isMatch ? "a0 = " + emulator.text + " ✓" : "불일치: " + emulator.text;
+  }
+
+  input.addEventListener("input", render);
+  render();
+})();
+</script>
+</body>
+</html>

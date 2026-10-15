@@ -1,0 +1,1408 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>24 명령어 카드·용어집·종합 퀴즈 · RISC-V Book</title>
+<meta name="description" content="검색·필터가 되는 RISC-V 명령어 레퍼런스 카드, 주 opcode 지도, 레지스터·CSR 카드, 비준 확장 지도, 장별 링크가 달린 용어집, 그리고 책 전체를 돌아보는 24문항 종합 퀴즈.">
+<link rel="icon" href="../assets/img/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/style.css">
+<script src="../assets/js/book.js"></script>
+<script src="../assets/js/riscv.js"></script>
+<style>
+  /* 명령어 카드 */
+  .card-filters { padding: 14px 16px; display: grid; gap: 10px; border-bottom: 1px solid var(--border); }
+  .filter-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .filter-row > .label { font-size: 12.5px; font-weight: 700; color: var(--text-faint); margin-right: 4px; min-width: 42px; }
+  .filter-chip { font: inherit; font-size: 13px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--border); background: var(--bg); color: var(--text-dim); cursor: pointer; line-height: 1.5; }
+  .filter-chip:hover { border-color: var(--accent); }
+  .filter-chip.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 700; }
+  .search-input { font: inherit; font-size: 14.5px; color: var(--text); background: var(--canvas-bg); border: 1px solid var(--border); border-radius: 9px; padding: 7px 11px; width: 100%; max-width: 360px; min-width: 0; }
+  .search-input:focus { outline: 2px solid var(--accent); outline-offset: 0; }
+  .format-select { font: inherit; font-size: 14px; color: var(--text); background: var(--canvas-bg); border: 1px solid var(--border); border-radius: 9px; padding: 6px 9px; }
+  .opcode-filter-tag { display: inline-flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 12.5px; padding: 2px 4px 2px 10px; border-radius: 999px; background: var(--accent-2-soft); color: var(--accent-2); font-weight: 700; }
+  .opcode-filter-tag button { font: inherit; border: 0; background: transparent; color: inherit; cursor: pointer; padding: 0 6px; }
+  .instruction-detail { padding: 14px 16px; border-bottom: 1px solid var(--border); background: var(--canvas-bg); min-height: 150px; }
+  .instruction-detail h4 { margin: 0 0 4px; font-family: var(--mono); font-size: 20px; color: var(--accent); }
+  .instruction-detail .meta { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+  .instruction-detail p { margin: 4px 0; font-size: 14.5px; color: var(--text-dim); }
+  .instruction-detail .example { font-family: var(--mono); font-size: 13.5px; margin-top: 8px; overflow-wrap: anywhere; }
+  .instruction-detail .example b { color: var(--accent-2); }
+  .bitfield.compressed { max-width: 62%; }
+  @media (max-width: 640px) { .bitfield.compressed { max-width: 100%; } .bitfield .field .name { font-size: 11px; } .bitfield .field .value { font-size: 10.5px; } }
+  .card-table-wrap { max-height: 520px; overflow: auto; border: 0; border-radius: 0; margin: 0; }
+  .card-table-wrap thead th { position: sticky; top: 0; z-index: 1; }
+  table.card-table td, table.card-table th { padding: 6px 10px; font-size: 13.5px; }
+  table.card-table td.mnemonic { font-family: var(--mono); font-weight: 700; color: var(--accent); white-space: nowrap; }
+  table.card-table td.syntax, table.card-table td.encoding { font-family: var(--mono); font-size: 12.5px; white-space: nowrap; }
+  table.card-table tbody tr { cursor: pointer; }
+  table.card-table tbody tr:hover { background: var(--surface); }
+  table.card-table tbody tr.selected { background: var(--accent-soft); }
+  @media (max-width: 640px) { table.card-table .column-encoding, table.card-table .column-format { display: none; } table.card-table td.meaning { min-width: 150px; } }
+
+  /* opcode 지도 */
+  .opcode-map svg .opcode-cell { cursor: pointer; }
+  .opcode-map svg .opcode-cell rect { transition: stroke-width 0.2s; }
+  .opcode-map svg .opcode-cell:hover rect { stroke-width: 2.6; }
+  .opcode-map svg #opcode-cursor { transition: transform 0.45s cubic-bezier(.3,.8,.3,1); }
+  .opcode-info { font-size: 14.5px; padding: 10px 4px 0; min-height: 52px; color: var(--text-dim); }
+  .opcode-info b { color: var(--text); font-family: var(--mono); }
+
+  /* 확장 지도 */
+  .extension-map svg a .map-chip { transition: fill 0.2s; }
+  .extension-map svg a:hover .map-chip { fill: var(--accent-soft); }
+
+  /* 용어집 */
+  .flip-stage { padding: 18px; display: grid; place-items: center; background: var(--canvas-bg); }
+  .flip-card { perspective: 1100px; width: min(460px, 100%); height: 220px; cursor: pointer; }
+  .flip-inner { position: relative; width: 100%; height: 100%; transition: transform 0.8s cubic-bezier(.4,.2,.2,1); transform-style: preserve-3d; }
+  .flip-card.flipped .flip-inner { transform: rotateY(180deg); }
+  .flip-face { position: absolute; inset: 0; border-radius: 16px; border: 1px solid var(--border); backface-visibility: hidden; -webkit-backface-visibility: hidden; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; padding: 16px 20px; gap: 6px; }
+  .flip-front { background: linear-gradient(135deg, var(--accent-soft), var(--accent-2-soft)); }
+  .flip-front .term-name { font-size: 28px; font-weight: 800; letter-spacing: -0.02em; }
+  .flip-front .term-english { font-family: var(--mono); color: var(--text-dim); font-size: 14px; }
+  .flip-back { background: var(--bg-elev); transform: rotateY(180deg); font-size: 15px; line-height: 1.6; color: var(--text); }
+  .flip-back .chapter-link { font-size: 13px; }
+  @media (prefers-reduced-motion: reduce) { .flip-inner { transition: none; } }
+  .glossary-controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 18px 0 12px; }
+  .glossary-list { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); }
+  .glossary-entry { border: 1px solid var(--border); border-radius: 12px; padding: 11px 14px; background: var(--bg-elev); }
+  .glossary-entry .entry-head { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+  .glossary-entry b { font-size: 15.5px; }
+  .glossary-entry .entry-english { font-family: var(--mono); font-size: 12px; color: var(--text-faint); }
+  .glossary-entry p { margin: 5px 0 6px; font-size: 14px; color: var(--text-dim); line-height: 1.6; }
+  .glossary-entry a { font-size: 12.5px; }
+  .glossary-count { font-size: 13.5px; color: var(--text-faint); }
+</style>
+</head>
+<body data-chapter="reference">
+<main class="chapter">
+  <header class="chapter-hero">
+    <div class="eyebrow">Chapter 24</div>
+    <h1>명령어 카드·용어집·종합 퀴즈</h1>
+    <p class="lead">마지막 장은 책을 덮은 뒤에도 곁에 두고 찾아보는 <strong>참고 자료실</strong>이다. 검색과 필터가 되는 명령어 레퍼런스 카드, 32비트 명령어의 주 opcode 지도, 레지스터·CSR 카드, ISA 매뉴얼 v20260120에 실린 확장 전체를 한 장에 모은 확장 지도, 장별 링크가 달린 용어집이 들어 있다. 끝에는 1장부터 23장까지를 한 문제씩 되짚는 24문항 종합 퀴즈가 기다린다.</p>
+    <ul class="objectives">
+      <li>명령어 이름·확장·형식으로 명령을 찾고, 비트 필드와 실제 인코딩 예를 확인한다.</li>
+      <li>opcode 지도에서 32비트 명령어 공간이 어떻게 나뉘어 있는지 한눈에 본다.</li>
+      <li>정수·부동소수점 레지스터의 ABI 이름과 자주 쓰는 CSR 주소를 찾는다.</li>
+      <li>비준된 확장이 규격 문서와 이 책의 어느 장에 있는지 지도로 찾아간다.</li>
+      <li>용어집으로 핵심 용어를 복습하고, 종합 퀴즈로 책 전체를 점검한다.</li>
+    </ul>
+    <div class="spec-meta">
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/unpriv/rv-32-64g.html" target="_blank" rel="noopener">RV32/64G Instruction Set Listings</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/priv/priv-csrs.html" target="_blank" rel="noopener">Privileged · CSR Listing</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/priv/priv-insns.html" target="_blank" rel="noopener">Privileged Instruction Listings</a>
+    </div>
+  </header>
+
+  <!-- ============================================================ -->
+  <section id="instruction-card">
+    <h2>명령어 레퍼런스 카드</h2>
+    <p>아래 카드는 RV32I·RV64I 베이스, M, A, F·D(주요 명령), Zicsr·Zifencei, C(주요 명령), Zba·Zbb·Zbs, Zicond, 그리고 특권 명령(<code>mret</code>, <code>sret</code>, <code>wfi</code>, <code>sfence.vma</code>, <code>hfence.*</code> 등)을 담고 있다. 인코딩 값은 ISA 매뉴얼 v20260120의 명령어 목록(비특권 35장, 특권 18장)과 B·Zicond 장의 인코딩 그림에서 옮겼다. 먼저 32비트 명령의 여섯 가지 기본 형식을 다시 떠올려 보자(<a href="encoding.html">4장</a>).</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 330" role="img" aria-label="R, R4, I, S, B, U, J 형식의 비트 배치">
+        <g font-size="12">
+          <text x="120" y="22" class="t-faint">31</text><text x="214" y="22" class="t-faint">25</text><text x="252" y="22" class="t-faint">24</text><text x="356" y="22" class="t-faint">20</text><text x="378" y="22" class="t-faint">19</text><text x="480" y="22" class="t-faint">15</text><text x="502" y="22" class="t-faint">14</text><text x="562" y="22" class="t-faint">12</text><text x="584" y="22" class="t-faint">11</text><text x="688" y="22" class="t-faint">7</text><text x="708" y="22" class="t-faint">6</text><text x="828" y="22" class="t-faint">0</text>
+        </g>
+        <!-- 행마다: 형식 이름 + 필드 -->
+        <g transform="translate(0,32)">
+          <text x="20" y="25" class="t t-bold">R</text>
+          <rect x="120" y="4" width="126" height="32" class="f-violet-soft"/><text x="183" y="25" text-anchor="middle" class="t-mono">funct7</text>
+          <rect x="246" y="4" width="126" height="32" class="f-teal-soft"/><text x="309" y="25" text-anchor="middle" class="t-mono">rs2</text>
+          <rect x="372" y="4" width="126" height="32" class="f-teal-soft"/><text x="435" y="25" text-anchor="middle" class="t-mono">rs1</text>
+          <rect x="498" y="4" width="80" height="32" class="f-violet-soft"/><text x="538" y="25" text-anchor="middle" class="t-mono">funct3</text>
+          <rect x="578" y="4" width="126" height="32" class="f-teal-soft"/><text x="641" y="25" text-anchor="middle" class="t-mono">rd</text>
+          <rect x="704" y="4" width="136" height="32" class="f-accent-soft"/><text x="772" y="25" text-anchor="middle" class="t-mono">opcode</text>
+        </g>
+        <g transform="translate(0,72)">
+          <text x="20" y="25" class="t t-bold">R4</text>
+          <rect x="120" y="4" width="90" height="32" class="f-teal-soft"/><text x="165" y="25" text-anchor="middle" class="t-mono">rs3</text>
+          <rect x="210" y="4" width="36" height="32" class="f-violet-soft"/><text x="228" y="25" text-anchor="middle" class="t-mono" style="font-size:11px">fmt</text>
+          <rect x="246" y="4" width="126" height="32" class="f-teal-soft"/><text x="309" y="25" text-anchor="middle" class="t-mono">rs2</text>
+          <rect x="372" y="4" width="126" height="32" class="f-teal-soft"/><text x="435" y="25" text-anchor="middle" class="t-mono">rs1</text>
+          <rect x="498" y="4" width="80" height="32" class="f-violet-soft"/><text x="538" y="25" text-anchor="middle" class="t-mono">rm</text>
+          <rect x="578" y="4" width="126" height="32" class="f-teal-soft"/><text x="641" y="25" text-anchor="middle" class="t-mono">rd</text>
+          <rect x="704" y="4" width="136" height="32" class="f-accent-soft"/><text x="772" y="25" text-anchor="middle" class="t-mono">opcode</text>
+        </g>
+        <g transform="translate(0,112)">
+          <text x="20" y="25" class="t t-bold">I</text>
+          <rect x="120" y="4" width="252" height="32" class="f-gold-soft"/><text x="246" y="25" text-anchor="middle" class="t-mono">imm[11:0]</text>
+          <rect x="372" y="4" width="126" height="32" class="f-teal-soft"/><text x="435" y="25" text-anchor="middle" class="t-mono">rs1</text>
+          <rect x="498" y="4" width="80" height="32" class="f-violet-soft"/><text x="538" y="25" text-anchor="middle" class="t-mono">funct3</text>
+          <rect x="578" y="4" width="126" height="32" class="f-teal-soft"/><text x="641" y="25" text-anchor="middle" class="t-mono">rd</text>
+          <rect x="704" y="4" width="136" height="32" class="f-accent-soft"/><text x="772" y="25" text-anchor="middle" class="t-mono">opcode</text>
+        </g>
+        <g transform="translate(0,152)">
+          <text x="20" y="25" class="t t-bold">S</text>
+          <rect x="120" y="4" width="126" height="32" class="f-gold-soft"/><text x="183" y="25" text-anchor="middle" class="t-mono">imm[11:5]</text>
+          <rect x="246" y="4" width="126" height="32" class="f-teal-soft"/><text x="309" y="25" text-anchor="middle" class="t-mono">rs2</text>
+          <rect x="372" y="4" width="126" height="32" class="f-teal-soft"/><text x="435" y="25" text-anchor="middle" class="t-mono">rs1</text>
+          <rect x="498" y="4" width="80" height="32" class="f-violet-soft"/><text x="538" y="25" text-anchor="middle" class="t-mono">funct3</text>
+          <rect x="578" y="4" width="126" height="32" class="f-gold-soft"/><text x="641" y="25" text-anchor="middle" class="t-mono">imm[4:0]</text>
+          <rect x="704" y="4" width="136" height="32" class="f-accent-soft"/><text x="772" y="25" text-anchor="middle" class="t-mono">opcode</text>
+        </g>
+        <g transform="translate(0,192)">
+          <text x="20" y="25" class="t t-bold">B</text>
+          <rect x="120" y="4" width="126" height="32" class="f-gold-soft"/><text x="183" y="25" text-anchor="middle" class="t-mono">imm[12|10:5]</text>
+          <rect x="246" y="4" width="126" height="32" class="f-teal-soft"/><text x="309" y="25" text-anchor="middle" class="t-mono">rs2</text>
+          <rect x="372" y="4" width="126" height="32" class="f-teal-soft"/><text x="435" y="25" text-anchor="middle" class="t-mono">rs1</text>
+          <rect x="498" y="4" width="80" height="32" class="f-violet-soft"/><text x="538" y="25" text-anchor="middle" class="t-mono">funct3</text>
+          <rect x="578" y="4" width="126" height="32" class="f-gold-soft"/><text x="641" y="25" text-anchor="middle" class="t-mono">imm[4:1|11]</text>
+          <rect x="704" y="4" width="136" height="32" class="f-accent-soft"/><text x="772" y="25" text-anchor="middle" class="t-mono">opcode</text>
+        </g>
+        <g transform="translate(0,232)">
+          <text x="20" y="25" class="t t-bold">U</text>
+          <rect x="120" y="4" width="458" height="32" class="f-gold-soft"/><text x="349" y="25" text-anchor="middle" class="t-mono">imm[31:12]</text>
+          <rect x="578" y="4" width="126" height="32" class="f-teal-soft"/><text x="641" y="25" text-anchor="middle" class="t-mono">rd</text>
+          <rect x="704" y="4" width="136" height="32" class="f-accent-soft"/><text x="772" y="25" text-anchor="middle" class="t-mono">opcode</text>
+        </g>
+        <g transform="translate(0,272)">
+          <text x="20" y="25" class="t t-bold">J</text>
+          <rect x="120" y="4" width="458" height="32" class="f-gold-soft"/><text x="349" y="25" text-anchor="middle" class="t-mono">imm[20|10:1|11|19:12]</text>
+          <rect x="578" y="4" width="126" height="32" class="f-teal-soft"/><text x="641" y="25" text-anchor="middle" class="t-mono">rd</text>
+          <rect x="704" y="4" width="136" height="32" class="f-accent-soft"/><text x="772" y="25" text-anchor="middle" class="t-mono">opcode</text>
+        </g>
+        <text x="60" y="56" text-anchor="middle" class="t-faint">정수</text>
+        <text x="60" y="96" text-anchor="middle" class="t-faint">FMA</text>
+      </svg></div>
+      <figcaption><b>그림 24-1.</b> 32비트 명령 형식. rs1·rs2·rd(청록)는 모든 형식에서 같은 자리에 있고, 즉시값(금색)만 형식마다 흩어진다. R4는 F·D의 융합 곱셈-덧셈(<code>fmadd</code> 등)이 쓰는 형식으로, 세 번째 원천 레지스터 rs3와 정밀도 칸 fmt, 반올림 모드 rm이 있다.</figcaption>
+    </figure>
+
+    <div class="sim" id="card-sim">
+      <div class="sim-head"><span class="sim-tag">EXPLORER</span><h3>명령어 레퍼런스 카드</h3></div>
+      <div class="card-filters">
+        <div class="filter-row"><span class="label">확장</span><span id="card-extension-filters" style="display:contents"></span></div>
+        <div class="filter-row">
+          <span class="label">찾기</span>
+          <input type="text" class="search-input" id="card-search" placeholder="예: add, 부동소수점, amo, czero" autocomplete="off">
+          <select class="format-select" id="card-format" aria-label="형식">
+            <option value="all">모든 형식</option>
+            <option value="R">R</option><option value="R4">R4</option><option value="I">I</option><option value="S">S</option>
+            <option value="B">B</option><option value="U">U</option><option value="J">J</option><option value="C">16비트 압축 (C*)</option>
+          </select>
+          <span id="card-opcode-tag"></span>
+        </div>
+      </div>
+      <div class="instruction-detail" id="card-detail"></div>
+      <div class="table-wrap card-table-wrap"><table class="card-table">
+        <thead><tr><th>명령</th><th>확장</th><th class="column-format">형식</th><th>문법</th><th>의미</th><th class="column-encoding">opcode · funct3 · funct7</th></tr></thead>
+        <tbody id="card-body"></tbody>
+      </table></div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">표시 중</span><span class="value" id="card-shown">0</span></div>
+        <div class="stat"><span class="key">카드 전체</span><span class="value" id="card-total">0</span></div>
+      </div>
+      <div class="sim-note">행을 누르면 위쪽에 비트 필드와 예시 인코딩이 나온다. 레지스터는 rd=a0(x10), rs1=a1(x11), rs2=a2(x12), rs3=fa3로 채웠다. RV32I·RV64I·M·Zicsr처럼 <code>riscv.js</code> 인코더가 아는 명령은 그 인코더로, 나머지 32비트 명령은 규격 목록의 고정 비트에 같은 예시 값을 끼워 계산했다. 16비트 압축 명령은 즉시값 비트가 복잡하게 흩어지므로 필드 배치만 보여 준다.</div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="opcode-map">
+    <h2>주 opcode 지도</h2>
+    <p>32비트 명령의 하위 두 비트 <code>inst[1:0]</code>는 언제나 <code>11</code>이다(<code>00</code>·<code>01</code>·<code>10</code>은 16비트 압축 명령의 세 사분면). 남은 <code>inst[6:2]</code> 다섯 비트가 32가지 <span class="term">주 opcode</span><span class="english">(major opcode)</span>를 고른다. 규격의 표는 <code>inst[6:5]</code>를 행으로, <code>inst[4:2]</code>를 열로 놓는다.</p>
+    <figure class="diagram opcode-map">
+      <div class="scroll-x"><svg id="opcode-map-svg" viewBox="0 0 860 300" role="img" aria-label="RISC-V 32비트 주 opcode 지도. 칸을 누르면 그 opcode 의 명령이 명령어 카드에 걸러진다."></svg></div>
+      <div class="opcode-info" id="opcode-info"></div>
+      <figcaption><b>그림 24-2.</b> RISC-V 주 opcode 지도(<code>inst[1:0]=11</code>). ISA 매뉴얼 v20260120 비특권 35장의 표를 그대로 옮겼다. 금색 테두리가 칸을 하나씩 돌며 설명을 보여 주고, 칸을 누르면 그 opcode를 쓰는 명령만 위의 명령어 카드에 걸러진다. <i>custom-0~3</i>은 앞으로 표준 확장이 쓰지 않을 사용자 정의 공간이고, <i>reserved</i>는 미래 표준 확장을 위해 비워 둔 공간이다. 맨 오른쪽 열은 32비트보다 긴 명령어 길이 인코딩에 쓰인다.</figcaption>
+    </figure>
+    <p>압축 명령(<a href="compressed.html">13장</a>)도 같은 방식의 지도를 가진다. 하위 두 비트 <code>op</code>가 사분면을, 상위 세 비트 <code>funct3</code>(<code>inst[15:13]</code>)가 칸을 고른다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 236" role="img" aria-label="RVC 16비트 압축 명령 opcode 지도">
+        <g font-size="12">
+          <text x="70" y="22" text-anchor="middle" class="t-faint">op \ funct3</text>
+          <text x="152" y="22" text-anchor="middle" class="t-mono">000</text><text x="240" y="22" text-anchor="middle" class="t-mono">001</text><text x="328" y="22" text-anchor="middle" class="t-mono">010</text><text x="416" y="22" text-anchor="middle" class="t-mono">011</text><text x="504" y="22" text-anchor="middle" class="t-mono">100</text><text x="592" y="22" text-anchor="middle" class="t-mono">101</text><text x="680" y="22" text-anchor="middle" class="t-mono">110</text><text x="768" y="22" text-anchor="middle" class="t-mono">111</text>
+        </g>
+        <g class="t-mono" font-size="12">
+          <text x="70" y="62" text-anchor="middle" class="t-mono">00</text>
+          <rect x="110" y="36" width="84" height="44" rx="6" class="f-accent-soft"/><text x="152" y="62" text-anchor="middle" class="t-mono" style="font-size:11.5px">ADDI4SPN</text>
+          <rect x="198" y="36" width="84" height="44" rx="6" class="f-violet-soft"/><text x="240" y="62" text-anchor="middle" class="t-mono" style="font-size:11.5px">FLD</text>
+          <rect x="286" y="36" width="84" height="44" rx="6" class="f-teal-soft"/><text x="328" y="62" text-anchor="middle" class="t-mono" style="font-size:11.5px">LW</text>
+          <rect x="374" y="36" width="84" height="44" rx="6" class="f-teal-soft"/><text x="416" y="56" text-anchor="middle" class="t-mono" style="font-size:11px">FLW (32)</text><text x="416" y="72" text-anchor="middle" class="t-mono" style="font-size:11px">LD (64)</text>
+          <rect x="462" y="36" width="84" height="44" rx="6" class="f-surface"/><text x="504" y="62" text-anchor="middle" class="t-faint">reserved</text>
+          <rect x="550" y="36" width="84" height="44" rx="6" class="f-violet-soft"/><text x="592" y="62" text-anchor="middle" class="t-mono" style="font-size:11.5px">FSD</text>
+          <rect x="638" y="36" width="84" height="44" rx="6" class="f-teal-soft"/><text x="680" y="62" text-anchor="middle" class="t-mono" style="font-size:11.5px">SW</text>
+          <rect x="726" y="36" width="84" height="44" rx="6" class="f-teal-soft"/><text x="768" y="56" text-anchor="middle" class="t-mono" style="font-size:11px">FSW (32)</text><text x="768" y="72" text-anchor="middle" class="t-mono" style="font-size:11px">SD (64)</text>
+        </g>
+        <g>
+          <text x="70" y="110" text-anchor="middle" class="t-mono">01</text>
+          <rect x="110" y="84" width="84" height="44" rx="6" class="f-accent-soft"/><text x="152" y="110" text-anchor="middle" class="t-mono" style="font-size:11.5px">ADDI</text>
+          <rect x="198" y="84" width="84" height="44" rx="6" class="f-gold-soft"/><text x="240" y="104" text-anchor="middle" class="t-mono" style="font-size:11px">JAL (32)</text><text x="240" y="120" text-anchor="middle" class="t-mono" style="font-size:11px">ADDIW (64)</text>
+          <rect x="286" y="84" width="84" height="44" rx="6" class="f-accent-soft"/><text x="328" y="110" text-anchor="middle" class="t-mono" style="font-size:11.5px">LI</text>
+          <rect x="374" y="84" width="84" height="44" rx="6" class="f-accent-soft"/><text x="416" y="104" text-anchor="middle" class="t-mono" style="font-size:11px">LUI /</text><text x="416" y="120" text-anchor="middle" class="t-mono" style="font-size:11px">ADDI16SP</text>
+          <rect x="462" y="84" width="84" height="44" rx="6" class="f-accent-soft"/><text x="504" y="110" text-anchor="middle" class="t-mono" style="font-size:11.5px">MISC-ALU</text>
+          <rect x="550" y="84" width="84" height="44" rx="6" class="f-gold-soft"/><text x="592" y="110" text-anchor="middle" class="t-mono" style="font-size:11.5px">J</text>
+          <rect x="638" y="84" width="84" height="44" rx="6" class="f-gold-soft"/><text x="680" y="110" text-anchor="middle" class="t-mono" style="font-size:11.5px">BEQZ</text>
+          <rect x="726" y="84" width="84" height="44" rx="6" class="f-gold-soft"/><text x="768" y="110" text-anchor="middle" class="t-mono" style="font-size:11.5px">BNEZ</text>
+        </g>
+        <g>
+          <text x="70" y="158" text-anchor="middle" class="t-mono">10</text>
+          <rect x="110" y="132" width="84" height="44" rx="6" class="f-accent-soft"/><text x="152" y="158" text-anchor="middle" class="t-mono" style="font-size:11.5px">SLLI</text>
+          <rect x="198" y="132" width="84" height="44" rx="6" class="f-violet-soft"/><text x="240" y="158" text-anchor="middle" class="t-mono" style="font-size:11.5px">FLDSP</text>
+          <rect x="286" y="132" width="84" height="44" rx="6" class="f-teal-soft"/><text x="328" y="158" text-anchor="middle" class="t-mono" style="font-size:11.5px">LWSP</text>
+          <rect x="374" y="132" width="84" height="44" rx="6" class="f-teal-soft"/><text x="416" y="152" text-anchor="middle" class="t-mono" style="font-size:11px">FLWSP (32)</text><text x="416" y="168" text-anchor="middle" class="t-mono" style="font-size:11px">LDSP (64)</text>
+          <rect x="462" y="132" width="84" height="44" rx="6" class="f-gold-soft"/><text x="504" y="152" text-anchor="middle" class="t-mono" style="font-size:11px">J[AL]R /</text><text x="504" y="168" text-anchor="middle" class="t-mono" style="font-size:11px">MV / ADD</text>
+          <rect x="550" y="132" width="84" height="44" rx="6" class="f-violet-soft"/><text x="592" y="158" text-anchor="middle" class="t-mono" style="font-size:11.5px">FSDSP</text>
+          <rect x="638" y="132" width="84" height="44" rx="6" class="f-teal-soft"/><text x="680" y="158" text-anchor="middle" class="t-mono" style="font-size:11.5px">SWSP</text>
+          <rect x="726" y="132" width="84" height="44" rx="6" class="f-teal-soft"/><text x="768" y="152" text-anchor="middle" class="t-mono" style="font-size:11px">FSWSP (32)</text><text x="768" y="168" text-anchor="middle" class="t-mono" style="font-size:11px">SDSP (64)</text>
+        </g>
+        <g>
+          <text x="70" y="206" text-anchor="middle" class="t-mono">11</text>
+          <rect x="110" y="180" width="700" height="44" rx="6" class="f-surface-2"/><text x="460" y="207" text-anchor="middle" class="t-dim">16비트가 아님 — 32비트 이상 명령 (그림 24-2 의 지도로)</text>
+        </g>
+      </svg></div>
+      <figcaption><b>그림 24-3.</b> RVC 압축 명령 opcode 지도(비특권 27장의 표). 같은 칸이 RV32와 RV64에서 다른 명령을 뜻하는 경우가 있다. 예를 들어 사분면 01의 <code>001</code>은 RV32에서 <code>c.jal</code>, RV64에서 <code>c.addiw</code>다. 색은 정수 연산(파랑), 적재·저장(청록), 부동소수점 적재·저장(보라), 분기·점프(금색)를 뜻한다.</figcaption>
+    </figure>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="registers">
+    <h2>레지스터 카드</h2>
+    <p>정수 레지스터의 ABI 이름(<a href="registers.html">3장</a>, <a href="abi.html">7장</a>)과 부동소수점 레지스터의 ABI 이름(<a href="floating-point.html">12장</a>)을 한 장에 모았다. 이름과 역할은 RISC-V psABI의 호출 규약 표를 따른다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg id="register-card-svg" viewBox="0 0 860 440" role="img" aria-label="정수 레지스터 x0–x31 과 부동소수점 레지스터 f0–f31 의 ABI 이름 카드"></svg></div>
+      <figcaption><b>그림 24-4.</b> 레지스터 카드. ★는 함수 호출을 건너서도 값이 보존되어야 하는(피호출자 저장) 레지스터다. <code>gp</code>·<code>tp</code>는 할당하지 않는 레지스터, <code>x0</code>은 늘 0이다. 부동소수점 쪽의 <code>fs0–fs11</code>은 피호출자 저장이며, psABI는 이 보존 의무를 그 ABI가 다루는 부동소수점 폭까지로 한정한다.</figcaption>
+    </figure>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="csr">
+    <h2>CSR 빠른 표</h2>
+    <p>CSR 주소는 12비트이고, 상위 비트에 접근 규칙이 들어 있다(<a href="privilege.html">17장</a>). 규격은 “상위 두 비트 <code>csr[11:10]</code>는 읽기/쓰기(00·01·10)인지 읽기 전용(11)인지, 다음 두 비트 <code>csr[9:8]</code>는 접근할 수 있는 가장 낮은 특권 수준을 나타내며 10은 하이퍼바이저 CSR”이라고 정한다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 300" role="img" aria-label="12비트 CSR 주소의 비트 의미와 예">
+        <g transform="translate(110,20)">
+          <rect x="0" y="0" width="140" height="44" rx="6" class="f-gold-soft"/><text x="70" y="27" text-anchor="middle" class="t-mono">[11:10]</text>
+          <rect x="140" y="0" width="140" height="44" rx="6" class="f-violet-soft"/><text x="210" y="27" text-anchor="middle" class="t-mono">[9:8]</text>
+          <rect x="280" y="0" width="360" height="44" rx="6" class="f-surface"/><text x="460" y="27" text-anchor="middle" class="t-mono">[7:0] 번호</text>
+          <text x="70" y="64" text-anchor="middle" class="t-dim">11 = 읽기 전용</text>
+          <text x="70" y="82" text-anchor="middle" class="t-faint">그 밖 = 읽기/쓰기</text>
+          <text x="210" y="64" text-anchor="middle" class="t-dim">최저 특권</text>
+          <text x="210" y="82" text-anchor="middle" class="t-faint">00 U · 01 S · 10 H · 11 M</text>
+        </g>
+        <g font-size="13">
+          <text x="30" y="136" class="t-faint">예</text>
+          <g transform="translate(110,118)">
+            <text x="0" y="22" class="t-mono t-bold">mstatus</text><text x="120" y="22" class="t-mono">0x300</text>
+            <text x="220" y="22" class="t-mono"><tspan class="t-gold">00</tspan> <tspan class="t-violet">11</tspan> 0000 0000</text>
+            <text x="440" y="22" class="t-dim">읽기/쓰기 · M 모드</text>
+          </g>
+          <g transform="translate(110,152)">
+            <text x="0" y="22" class="t-mono t-bold">sstatus</text><text x="120" y="22" class="t-mono">0x100</text>
+            <text x="220" y="22" class="t-mono"><tspan class="t-gold">00</tspan> <tspan class="t-violet">01</tspan> 0000 0000</text>
+            <text x="440" y="22" class="t-dim">읽기/쓰기 · S 모드</text>
+          </g>
+          <g transform="translate(110,186)">
+            <text x="0" y="22" class="t-mono t-bold">hstatus</text><text x="120" y="22" class="t-mono">0x600</text>
+            <text x="220" y="22" class="t-mono"><tspan class="t-gold">01</tspan> <tspan class="t-violet">10</tspan> 0000 0000</text>
+            <text x="440" y="22" class="t-dim">읽기/쓰기 · 하이퍼바이저(HS)</text>
+          </g>
+          <g transform="translate(110,220)">
+            <text x="0" y="22" class="t-mono t-bold">cycle</text><text x="120" y="22" class="t-mono">0xC00</text>
+            <text x="220" y="22" class="t-mono"><tspan class="t-gold">11</tspan> <tspan class="t-violet">00</tspan> 0000 0000</text>
+            <text x="440" y="22" class="t-dim">읽기 전용 · U 모드도 읽음</text>
+          </g>
+          <g transform="translate(110,254)">
+            <text x="0" y="22" class="t-mono t-bold">mhartid</text><text x="120" y="22" class="t-mono">0xF14</text>
+            <text x="220" y="22" class="t-mono"><tspan class="t-gold">11</tspan> <tspan class="t-violet">11</tspan> 0001 0100</text>
+            <text x="440" y="22" class="t-dim">읽기 전용 · M 모드</text>
+          </g>
+        </g>
+      </svg></div>
+      <figcaption><b>그림 24-5.</b> CSR 주소에 새겨진 접근 규칙. 하드웨어는 주소의 상위 네 비트만 보고 “읽기 전용 CSR에 쓰려 한다”거나 “특권이 부족하다”는 것을 판단해 잘못된 명령 예외를 낼 수 있다. 다만 규격은 구현이 더 높은 특권에서 허용된 접근을 가로채는 것도 허락한다.</figcaption>
+    </figure>
+
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>주소</th><th>이름</th><th>권한</th><th>뜻</th><th>장</th></tr></thead>
+      <tbody>
+        <tr><td><code>0x001</code>–<code>0x003</code></td><td><code>fflags</code> · <code>frm</code> · <code>fcsr</code></td><td>URW</td><td>부동소수점 누적 예외 · 동적 반올림 모드 · 둘을 합친 제어·상태</td><td><a href="floating-point.html">12</a></td></tr>
+        <tr><td><code>0x008</code> · <code>0x009</code> · <code>0x00A</code> · <code>0x00F</code></td><td><code>vstart</code> · <code>vxsat</code> · <code>vxrm</code> · <code>vcsr</code></td><td>URW</td><td>벡터 시작 위치 · 고정소수점 포화 · 고정소수점 반올림 · 벡터 제어·상태</td><td><a href="vector.html">15</a></td></tr>
+        <tr><td><code>0xC20</code> · <code>0xC21</code> · <code>0xC22</code></td><td><code>vl</code> · <code>vtype</code> · <code>vlenb</code></td><td>URO</td><td>벡터 길이 · 벡터 자료형 · 벡터 레지스터 바이트 길이</td><td><a href="vector.html">15</a></td></tr>
+        <tr><td><code>0xC00</code> · <code>0xC01</code> · <code>0xC02</code></td><td><code>cycle</code> · <code>time</code> · <code>instret</code></td><td>URO</td><td>사이클 · 실시간 · 완료한 명령 수 카운터 (RV32는 <code>0xC80</code>–<code>0xC82</code>에 상위 32비트)</td><td><a href="small-extensions.html">16</a></td></tr>
+        <tr><td><code>0x015</code></td><td><code>seed</code></td><td>URW</td><td>엔트로피 원천 (Zkr)</td><td><a href="bit-manipulation.html">14</a></td></tr>
+        <tr><td><code>0x100</code> · <code>0x104</code> · <code>0x105</code> · <code>0x106</code></td><td><code>sstatus</code> · <code>sie</code> · <code>stvec</code> · <code>scounteren</code></td><td>SRW</td><td>S 모드 상태 · 인터럽트 허용 · 트랩 벡터 · 카운터 허용</td><td><a href="trap.html">18</a></td></tr>
+        <tr><td><code>0x10A</code></td><td><code>senvcfg</code></td><td>SRW</td><td>S 모드 환경 설정</td><td><a href="privilege.html">17</a></td></tr>
+        <tr><td><code>0x140</code>–<code>0x144</code></td><td><code>sscratch</code> · <code>sepc</code> · <code>scause</code> · <code>stval</code> · <code>sip</code></td><td>SRW</td><td>S 모드 트랩 처리용 레지스터</td><td><a href="trap.html">18</a></td></tr>
+        <tr><td><code>0x14D</code></td><td><code>stimecmp</code></td><td>SRW</td><td>S 모드 타이머 비교값 (Sstc)</td><td><a href="trap.html">18</a></td></tr>
+        <tr><td><code>0x180</code></td><td><code>satp</code></td><td>SRW</td><td>주소 변환 방식·ASID·루트 페이지 테이블</td><td><a href="virtual-memory.html">19</a></td></tr>
+        <tr><td><code>0x600</code> · <code>0x602</code> · <code>0x603</code></td><td><code>hstatus</code> · <code>hedeleg</code> · <code>hideleg</code></td><td>HRW</td><td>하이퍼바이저 상태 · 예외 위임 · 인터럽트 위임</td><td><a href="hypervisor.html">21</a></td></tr>
+        <tr><td><code>0x680</code></td><td><code>hgatp</code></td><td>HRW</td><td>게스트 물리 주소 변환(G-stage)</td><td><a href="hypervisor.html">21</a></td></tr>
+        <tr><td><code>0x200</code> · <code>0x280</code></td><td><code>vsstatus</code> · <code>vsatp</code></td><td>HRW</td><td>가상 S 모드의 상태 · 주소 변환</td><td><a href="hypervisor.html">21</a></td></tr>
+        <tr><td><code>0xF11</code>–<code>0xF15</code></td><td><code>mvendorid</code> · <code>marchid</code> · <code>mimpid</code> · <code>mhartid</code> · <code>mconfigptr</code></td><td>MRO</td><td>제조사 · 아키텍처 · 구현 ID · 하트 번호 · 설정 구조 포인터</td><td><a href="privilege.html">17</a></td></tr>
+        <tr><td><code>0x300</code> · <code>0x301</code></td><td><code>mstatus</code> · <code>misa</code></td><td>MRW</td><td>M 모드 상태 · ISA와 확장</td><td><a href="privilege.html">17</a></td></tr>
+        <tr><td><code>0x302</code> · <code>0x303</code> · <code>0x304</code> · <code>0x305</code></td><td><code>medeleg</code> · <code>mideleg</code> · <code>mie</code> · <code>mtvec</code></td><td>MRW</td><td>예외 위임 · 인터럽트 위임 · 인터럽트 허용 · 트랩 벡터</td><td><a href="trap.html">18</a></td></tr>
+        <tr><td><code>0x306</code> · <code>0x30A</code> · <code>0x310</code></td><td><code>mcounteren</code> · <code>menvcfg</code> · <code>mstatush</code></td><td>MRW</td><td>카운터 허용 · 환경 설정 · mstatus 상위(RV32 전용)</td><td><a href="privilege.html">17</a></td></tr>
+        <tr><td><code>0x340</code>–<code>0x344</code></td><td><code>mscratch</code> · <code>mepc</code> · <code>mcause</code> · <code>mtval</code> · <code>mip</code></td><td>MRW</td><td>M 모드 트랩 처리용 레지스터</td><td><a href="trap.html">18</a></td></tr>
+        <tr><td><code>0x3A0</code>–<code>0x3AF</code> · <code>0x3B0</code>–<code>0x3EF</code></td><td><code>pmpcfg0</code>–<code>pmpcfg15</code> · <code>pmpaddr0</code>–<code>pmpaddr63</code></td><td>MRW</td><td>물리 메모리 보호 설정 · 주소</td><td><a href="memory-protection.html">20</a></td></tr>
+        <tr><td><code>0x747</code></td><td><code>mseccfg</code></td><td>MRW</td><td>M 모드 보안 설정 (Smepmp 등)</td><td><a href="memory-protection.html">20</a></td></tr>
+        <tr><td><code>0xB00</code> · <code>0xB02</code> · <code>0x320</code></td><td><code>mcycle</code> · <code>minstret</code> · <code>mcountinhibit</code></td><td>MRW</td><td>M 모드 사이클·명령 카운터 · 카운터 정지</td><td><a href="privilege.html">17</a></td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="extension-map">
+    <h2>확장 지도</h2>
+    <p>ISA 매뉴얼 v20260120의 목차에 실린 확장을 무리별로 모았다. 위쪽은 1권(비특권), 아래쪽은 2권(특권)이다. 이름을 누르면 그 확장을 다루는 이 책의 장으로 간다. <code>Svade</code>·<code>Ziccif</code> 같은 프로파일 정의 이름, AIA·SBI처럼 ISA 매뉴얼 밖에 있는 규격은 지도에 넣지 않았다(<a href="profiles.html">23장</a>, <a href="platform.html">22장</a>).</p>
+    <figure class="diagram extension-map">
+      <div class="scroll-x"><svg id="extension-map-svg" viewBox="0 0 900 760" role="img" aria-label="ISA 매뉴얼 v20260120 에 실린 확장을 무리별로 묶은 지도"></svg></div>
+      <figcaption><b>그림 24-6.</b> RISC-V 확장 지도. 무리 상자의 오른쪽 위 숫자는 이 책의 장 번호다. 같은 장(예: 비특권 29장 “B”)이 여러 Z 확장을 함께 정의하는 경우가 많아서, 규격 목차의 장 하나가 지도에서는 여러 이름으로 나타난다. <code>Zve*</code>·<code>Zvl*</code>·<code>Zvkn*</code> 같은 별표는 같은 접두어의 여러 확장을 묶어 적은 것이다.</figcaption>
+    </figure>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="glossary">
+    <h2>용어집</h2>
+    <p>이 책에 나온 핵심 용어를 한국어 정의와 함께 모았다. 각 항목의 링크는 그 용어를 자세히 다룬 장으로 간다. 먼저 오늘의 용어 카드로 가볍게 몸을 풀자.</p>
+    <div class="sim" id="term-card-sim">
+      <div class="sim-head"><span class="sim-tag animation">ANIMATION</span><h3>오늘의 용어 카드</h3></div>
+      <div class="flip-stage">
+        <div class="flip-card" id="term-card" role="button" tabindex="0" aria-label="눌러서 카드 뒤집기">
+          <div class="flip-inner">
+            <div class="flip-face flip-front"><div class="term-name" id="term-card-name"></div><div class="term-english" id="term-card-english"></div><div class="t-faint" style="font-size:12.5px;color:var(--text-faint)">카드를 누르면 뒤집힌다</div></div>
+            <div class="flip-face flip-back"><div id="term-card-definition"></div><a class="chapter-link" id="term-card-link" href="#"></a></div>
+          </div>
+        </div>
+      </div>
+      <div class="sim-controls">
+        <div class="control"><span>카드</span><div class="button-row"><button class="button primary" id="term-card-next">다음 용어</button><button class="button" id="term-card-flip">뒤집기</button><button class="button" id="term-card-auto">자동 넘김 끄기</button></div></div>
+      </div>
+      <div class="sim-note">자동 넘김이 켜져 있으면 카드가 몇 초마다 스스로 뒤집히고 다음 용어로 넘어간다. 앞면만 보고 뜻을 먼저 말해 본 뒤 뒤집어 확인하자.</div>
+    </div>
+
+    <div class="glossary-controls">
+      <input type="text" class="search-input" id="glossary-search" placeholder="용어 찾기: 예) NaN, 위임, 페이지" autocomplete="off">
+      <select class="format-select" id="glossary-chapter" aria-label="장으로 거르기"><option value="all">모든 장</option></select>
+      <span class="glossary-count" id="glossary-count"></span>
+    </div>
+    <div class="glossary-list" id="glossary-list"></div>
+  </section>
+
+  <section class="keypoints" id="summary">
+    <h2>핵심 정리</h2>
+    <ol>
+      <li>32비트 명령은 <code>inst[1:0]=11</code>이고 <code>inst[6:2]</code>의 주 opcode로 크게 갈린다. 그 안에서 <code>funct3</code>·<code>funct7</code>(또는 funct5·funct6·고정 즉시값)가 명령을 고른다.</li>
+      <li>rs1·rs2·rd는 모든 형식에서 같은 자리에 있고, 즉시값만 형식마다 흩어진다. R4 형식은 융합 곱셈-덧셈에 쓰인다.</li>
+      <li>16비트 압축 명령은 <code>op</code> 두 비트(00·01·10)로 사분면을, <code>funct3</code>로 칸을 고르며, 같은 칸이 RV32·RV64에서 다른 명령일 수 있다.</li>
+      <li>정수 레지스터는 zero·ra·sp·gp·tp·t·s·a, 부동소수점 레지스터는 ft·fs·fa로 나뉜다. s와 fs는 피호출자 저장이다.</li>
+      <li>CSR 주소의 <code>[11:10]</code>은 읽기 전용 여부, <code>[9:8]</code>은 최저 특권을 나타낸다.</li>
+      <li>확장 지도와 용어집의 링크를 따라가면 어떤 개념이든 이 책의 해당 장과 규격 원문으로 바로 돌아갈 수 있다.</li>
+    </ol>
+  </section>
+
+  <section id="quiz">
+    <h2>종합 퀴즈</h2>
+    <p>1장부터 24장까지 한 장에 한 문제씩, 모두 24문제다.</p>
+    <div class="quiz">
+      <div class="quiz-question"><p>[1장] 다음 중 ISA가 정하는 것은?</p><div class="options">
+        <button class="option">L2 캐시의 크기</button>
+        <button class="option">분기 예측기의 구조</button>
+        <button class="option" data-correct>예외가 났을 때 바뀌는 CSR 상태</button>
+        <button class="option">파이프라인 단계 수</button>
+      </div><div class="quiz-explanation">트랩이 났을 때 mepc·mcause 등이 어떻게 바뀌는지는 ISA(특권 규격)가 정한다. 나머지는 마이크로아키텍처의 자유다.</div></div>
+      <div class="quiz-question"><p>[2장] ISA 이름의 <code>G</code>가 뜻하는 조합은?</p><div class="options">
+        <button class="option">IMAFDC</button>
+        <button class="option" data-correct>IMAFD_Zicsr_Zifencei</button>
+        <button class="option">IMAC_Zicsr</button>
+        <button class="option">IMAFDQV</button>
+      </div><div class="quiz-explanation">규격의 이름 규칙 장은 G를 “IMAFDZicsr_Zifencei” 묶음의 약자로 정의한다. C는 따로 붙인다(RV64GC).</div></div>
+      <div class="quiz-question"><p>[3장] <code>addi x0, x5, 7</code>을 실행하면?</p><div class="options">
+        <button class="option">x0이 x5+7이 된다</button>
+        <button class="option" data-correct>결과는 버려지고 x0은 계속 0이다</button>
+        <button class="option">잘못된 명령 예외가 난다</button>
+        <button class="option">x5가 7 증가한다</button>
+      </div><div class="quiz-explanation">x0에 쓰기는 무시된다. rd=x0인 이런 명령 중 일부는 HINT 인코딩으로 쓰이기도 한다.</div></div>
+      <div class="quiz-question"><p>[4장] B 형식의 오프셋이 늘 짝수(2의 배수)인 이유는?</p><div class="options">
+        <button class="option">명령어가 항상 4바이트라서 하위 두 비트를 버린다</button>
+        <button class="option" data-correct>imm[0]은 인코딩하지 않고 0으로 보며, 16비트 명령을 위해 2바이트 단위로 둔다</button>
+        <button class="option">부호 비트를 맨 아래에 두기 때문이다</button>
+        <button class="option">funct3가 오프셋 일부를 담기 때문이다</button>
+      </div><div class="quiz-explanation">B·J 형식은 imm[0]을 생략한다. 4바이트 단위로 하지 않은 것은 압축 명령(IALIGN=16)과 맞추기 위해서다.</div></div>
+      <div class="quiz-question"><p>[5장] 의사 명령 <code>li a0, 0x12345678</code>은 보통 어떤 명령들로 바뀌나?</p><div class="options">
+        <button class="option">addi 하나</button>
+        <button class="option" data-correct>lui + addi</button>
+        <button class="option">auipc + jalr</button>
+        <button class="option">ld 하나</button>
+      </div><div class="quiz-explanation">상위 20비트는 lui, 하위 12비트는 addi로 채운다. addi가 부호 확장하므로 하위가 음수면 상위에 1을 더해 보정한다.</div></div>
+      <div class="quiz-question"><p>[6장] RV64I에서 <code>addw</code>의 결과는?</p><div class="options">
+        <button class="option">64비트 덧셈 결과 그대로</button>
+        <button class="option" data-correct>하위 32비트 합을 64비트로 부호 확장한 값</button>
+        <button class="option">하위 32비트 합을 0 확장한 값</button>
+        <button class="option">상위 32비트 합</button>
+      </div><div class="quiz-explanation">W 명령은 32비트 결과를 만들고 항상 부호 확장해 rd에 쓴다. 그래서 RV64에서 32비트 int 연산이 자연스럽다.</div></div>
+      <div class="quiz-question"><p>[7장] 표준 호출 규약에서 정수 함수의 첫 번째 인자와 반환값이 들어가는 레지스터는?</p><div class="options">
+        <button class="option">ra</button>
+        <button class="option">t0</button>
+        <button class="option" data-correct>a0 (x10)</button>
+        <button class="option">s0 (x8)</button>
+      </div><div class="quiz-explanation">a0–a7(x10–x17)이 인자 레지스터이고, a0·a1이 반환값을 담는다.</div></div>
+      <div class="quiz-question"><p>[8장] 5단 파이프라인에서 <code>lw</code> 바로 다음 명령이 그 결과를 쓰면(load-use)?</p><div class="options">
+        <button class="option">포워딩만으로 지연 없이 해결된다</button>
+        <button class="option" data-correct>값이 MEM 단계 끝에야 나오므로 한 사이클 멈춘 뒤 포워딩한다</button>
+        <button class="option">ISA가 지연 슬롯을 두어 해결한다</button>
+        <button class="option">잘못된 결과가 나온다</button>
+      </div><div class="quiz-explanation">RISC-V에는 적재 지연 슬롯이 없으므로 하드웨어가 해저드를 감지해 거품을 넣는다.</div></div>
+      <div class="quiz-question"><p>[9장] <code>div a0, a1, a2</code>에서 a2=0이면?</p><div class="options">
+        <button class="option">0으로 나누기 예외가 난다</button>
+        <button class="option" data-correct>몫은 모든 비트가 1(−1)이 되고 트랩은 없다</button>
+        <button class="option">a0은 바뀌지 않는다</button>
+        <button class="option">몫은 0이 된다</button>
+      </div><div class="quiz-explanation">RISC-V는 0으로 나누기에 트랩을 두지 않는다. 필요하면 소프트웨어가 분기 하나로 검사한다. 나머지(rem)는 피제수가 된다.</div></div>
+      <div class="quiz-question"><p>[10장] <code>sc.w</code>가 성공했을 때 rd에 쓰이는 값은?</p><div class="options">
+        <button class="option" data-correct>0</button>
+        <button class="option">1</button>
+        <button class="option">메모리의 이전 값</button>
+        <button class="option">저장한 값</button>
+      </div><div class="quiz-explanation">성공하면 0, 실패하면 0이 아닌 값을 쓴다. 그래서 <code>bnez</code>로 재시도 루프를 만든다.</div></div>
+      <div class="quiz-question"><p>[11장] RVWMO에서 서로 다른 주소로의 “저장 후 적재” 순서를 다른 하트에게도 지키게 하려면?</p><div class="options">
+        <button class="option">아무것도 필요 없다, 늘 지켜진다</button>
+        <button class="option" data-correct>둘 사이에 <code>fence w, r</code>(또는 더 강한 fence)를 넣는다</button>
+        <button class="option"><code>fence.i</code>를 넣는다</button>
+        <button class="option">nop을 넣는다</button>
+      </div><div class="quiz-explanation">RVWMO의 보존 프로그램 순서(PPO)에는 서로 다른 주소의 저장→적재 순서가 들어 있지 않다. fence.i는 명령어 페치용이다.</div></div>
+      <div class="quiz-question"><p>[12장] FLEN=64인 하트에서 <code>flw</code>로 단정밀도 값을 적재하면 f 레지스터의 상위 32비트는?</p><div class="options">
+        <button class="option">0</button>
+        <button class="option">부호 확장</button>
+        <button class="option" data-correct>모두 1 (NaN 박싱)</button>
+        <button class="option">이전 값 유지</button>
+      </div><div class="quiz-explanation">좁은 값은 상위 비트를 모두 1로 채워 저장한다. 그래야 잘못 박싱된 값을 넓은 연산이 NaN으로 본다.</div></div>
+      <div class="quiz-question"><p>[13장] C 확장(또는 Zca)이 있으면 IALIGN은?</p><div class="options">
+        <button class="option" data-correct>16비트</button>
+        <button class="option">32비트</button>
+        <button class="option">8비트</button>
+        <button class="option">64비트</button>
+      </div><div class="quiz-explanation">압축 명령이 섞이면 명령 주소가 2바이트 경계에 놓일 수 있으므로 IALIGN이 16으로 줄어든다.</div></div>
+      <div class="quiz-question"><p>[14장] Zba의 <code>sh2add rd, rs1, rs2</code>가 계산하는 것은?</p><div class="options">
+        <button class="option">rd = rs1 + (rs2 &lt;&lt; 2)</button>
+        <button class="option" data-correct>rd = rs2 + (rs1 &lt;&lt; 2)</button>
+        <button class="option">rd = (rs1 + rs2) &lt;&lt; 2</button>
+        <button class="option">rd = rs1 &lt;&lt; rs2</button>
+      </div><div class="quiz-explanation">rs1을 2비트 왼쪽으로 민 뒤 rs2에 더한다. int 배열의 주소 계산(base + index×4)에 딱 맞는다.</div></div>
+      <div class="quiz-question"><p>[15장] VLEN=128, SEW=32, LMUL=2일 때 VLMAX는?</p><div class="options">
+        <button class="option">4</button>
+        <button class="option" data-correct>8</button>
+        <button class="option">16</button>
+        <button class="option">2</button>
+      </div><div class="quiz-explanation">VLMAX = LMUL × VLEN / SEW = 2 × 128 / 32 = 8.</div></div>
+      <div class="quiz-question"><p>[16장] Zicond의 <code>czero.eqz rd, rs1, rs2</code>에서 rs2가 0이면?</p><div class="options">
+        <button class="option">rd = rs1</button>
+        <button class="option" data-correct>rd = 0</button>
+        <button class="option">rd = rs2</button>
+        <button class="option">분기한다</button>
+      </div><div class="quiz-explanation">“rs2가 0이면(eqz) 결과를 0으로” 만들고, 아니면 rs1을 그대로 쓴다. 두 개를 조합하면 분기 없는 선택이 된다.</div></div>
+      <div class="quiz-question"><p>[17장] CSR 주소 <code>0xC01</code>(time)의 상위 두 비트 <code>11</code>이 뜻하는 것은?</p><div class="options">
+        <button class="option">M 모드 전용</button>
+        <button class="option" data-correct>읽기 전용</button>
+        <button class="option">하이퍼바이저 CSR</button>
+        <button class="option">사용자 정의 CSR</button>
+      </div><div class="quiz-explanation">csr[11:10]=11은 읽기 전용이다. csr[9:8]=00이므로 U 모드도 읽을 수 있다(카운터 허용 비트가 켜져 있다면).</div></div>
+      <div class="quiz-question"><p>[18장] <code>mcause</code>의 최상위 비트가 1이면?</p><div class="options">
+        <button class="option">예외가 두 번 겹쳤다</button>
+        <button class="option" data-correct>트랩의 원인이 인터럽트다</button>
+        <button class="option">S 모드로 위임되었다</button>
+        <button class="option">처리기가 벡터 모드다</button>
+      </div><div class="quiz-explanation">Interrupt 비트가 1이면 인터럽트, 0이면 예외이고, 나머지 비트가 원인 코드다.</div></div>
+      <div class="quiz-question"><p>[19장] Sv39 페이지 테이블은 몇 단계이고 기본 페이지 크기는?</p><div class="options">
+        <button class="option">2단계, 4 KiB</button>
+        <button class="option" data-correct>3단계, 4 KiB</button>
+        <button class="option">4단계, 4 KiB</button>
+        <button class="option">3단계, 64 KiB</button>
+      </div><div class="quiz-explanation">39비트 가상 주소 = 9+9+9비트의 VPN 세 단계 + 12비트 오프셋. 중간 단계의 잎 PTE는 2 MiB·1 GiB 슈퍼페이지가 된다.</div></div>
+      <div class="quiz-question"><p>[20장] PMP 항목 i가 TOR 모드일 때 영역의 아래 경계는?</p><div class="options">
+        <button class="option">항상 0</button>
+        <button class="option" data-correct>바로 앞 항목의 pmpaddr(i−1)</button>
+        <button class="option">pmpaddr(i)의 하위 비트가 정하는 2의 거듭제곱 크기</button>
+        <button class="option">mtvec</button>
+      </div><div class="quiz-explanation">TOR은 pmpaddr(i−1) ≤ 주소 &lt; pmpaddr(i)를 잡는다(항목 0이면 아래 경계 0). 2의 거듭제곱 크기는 NAPOT 방식이다.</div></div>
+      <div class="quiz-question"><p>[21장] H 확장의 G-stage 변환이 하는 일은?</p><div class="options">
+        <button class="option">가상 주소 → 게스트 가상 주소</button>
+        <button class="option" data-correct>게스트 물리 주소 → 슈퍼바이저(호스트) 물리 주소, <code>hgatp</code>가 가리키는 표로</button>
+        <button class="option">물리 주소 → 캐시 색인</button>
+        <button class="option">I/O 주소 → 메모리 주소</button>
+      </div><div class="quiz-explanation">VS-stage(vsatp)가 게스트 가상 → 게스트 물리를, G-stage(hgatp)가 게스트 물리 → 실제 물리를 맡는 2단계 변환이다.</div></div>
+      <div class="quiz-question"><p>[22장] S 모드 커널이 SBI를 호출할 때 확장 ID(EID)를 넣는 레지스터는?</p><div class="options">
+        <button class="option">a0</button>
+        <button class="option">a6</button>
+        <button class="option" data-correct>a7</button>
+        <button class="option">t0</button>
+      </div><div class="quiz-explanation">SBI 호출 규약은 a7에 EID, a6에 함수 ID(FID)를 넣고 ecall한다. 오류 코드는 a0, 값은 a1로 돌아온다.</div></div>
+      <div class="quiz-question"><p>[23장] RVA22U64에서는 옵션이었고 RVA23U64에서 필수가 된 것은?</p><div class="options">
+        <button class="option">Zba</button>
+        <button class="option" data-correct>V</button>
+        <button class="option">Zifencei</button>
+        <button class="option">Zkn</button>
+      </div><div class="quiz-explanation">V는 RVA23U64에서 필수가 되었다. RVA23S64에서는 하이퍼바이저(H, Sha)도 필수다.</div></div>
+      <div class="quiz-question"><p>[24장] 주 opcode 지도에서 <code>custom-0</code>~<code>custom-3</code>의 의미는?</p><div class="options">
+        <button class="option">미래 표준 확장을 위해 예약된 공간</button>
+        <button class="option" data-correct>앞으로 표준 확장이 쓰지 않을, 사용자 정의 확장용 공간</button>
+        <button class="option">압축 명령 공간</button>
+        <button class="option">특권 명령 전용 공간</button>
+      </div><div class="quiz-explanation">규격은 custom-0~3을 표준 확장이 피할 공간으로, reserved는 미래 표준 확장이 쓸 수 있으니 사용자 정의가 피해야 할 공간으로 구분한다.</div></div>
+    </div>
+  </section>
+
+  <section id="references">
+    <h2>더 읽을거리</h2>
+    <ul class="references">
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/rv-32-64g.html" target="_blank" rel="noopener">ISA Manual Vol. I, Ch. 35 — RV32/64G Instruction Set Listings</a> (opcode 지도, RV32/64 I·M·A·F·D 인코딩)</li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/c-st-ext.html" target="_blank" rel="noopener">Vol. I, Ch. 27 — “C” Extension</a>, <a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/b-st-ext.html" target="_blank" rel="noopener">Ch. 29 — “B” Extension</a>, <a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/zicond.html" target="_blank" rel="noopener">Ch. 10 — “Zicond”</a></li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/priv/priv-insns.html" target="_blank" rel="noopener">Vol. II, Ch. 18 — Privileged Instruction Set Listings</a>, <a href="https://docs.riscv.org/reference/isa/v20260120/priv/priv-csrs.html" target="_blank" rel="noopener">Ch. 1 — Control and Status Registers</a></li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/unpriv-index.html" target="_blank" rel="noopener">ISA Manual v20260120 비특권 목차</a>, <a href="https://docs.riscv.org/reference/isa/v20260120/priv/priv-index.html" target="_blank" rel="noopener">특권 목차</a> (확장 지도의 출처)</li>
+      <li><a href="https://github.com/riscv-non-isa/riscv-elf-psabi-doc" target="_blank" rel="noopener">RISC-V ELF psABI</a> — 정수·부동소수점 레지스터 호출 규약</li>
+      <li><a href="https://docs.riscv.org/reference/home/index.html" target="_blank" rel="noopener">RISC-V Ratified Specifications 라이브러리</a> — SBI, AIA, 프로파일 등 ISA 밖 규격</li>
+    </ul>
+  </section>
+</main>
+
+<script>
+/* ---------------------------------------------------------------------------
+   명령어 카드 자료
+   - 베이스(RV32I·RV64I 일부)·M·Zicsr·Zifencei 는 riscv.js 의 Riscv.INSTRUCTIONS 를 그대로 쓴다.
+   - 나머지는 ISA 매뉴얼 v20260120 의 명령어 목록에서 고정 비트를 옮겨 적었다.
+   필드 배열은 상위 비트부터: { name, high, low, kind, fixedValue(null 이면 피연산자) }
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const Riscv = window.Riscv;
+  const OPCODE = {
+    LOAD_FP: 0b0000111, MISC_MEM: 0b0001111, OP_IMM: 0b0010011, OP_IMM_32: 0b0011011, STORE_FP: 0b0100111, AMO: 0b0101111,
+    OP: 0b0110011, OP_32: 0b0111011, MADD: 0b1000011, MSUB: 0b1000111, NMSUB: 0b1001011, NMADD: 0b1001111, OP_FP: 0b1010011, SYSTEM: 0b1110011,
+  };
+  const field = (name, high, low, kind, fixedValue) => ({ name, high, low, kind, fixedValue: fixedValue === undefined ? null : fixedValue });
+  const destination = () => field("rd", 11, 7, "register");
+  const sourceOne = () => field("rs1", 19, 15, "register");
+  const sourceTwo = () => field("rs2", 24, 20, "register");
+  const opcodeField = (value) => field("opcode", 6, 0, "opcode", value);
+  const functionThree = (value) => field("funct3", 14, 12, "function", value);
+  const roundingMode = () => field("rm", 14, 12, "function");
+
+  // 형식별 필드 배치를 만드는 작은 도우미들
+  const registerFields = (funct7, funct3, opcode) => [field("funct7", 31, 25, "function", funct7), sourceTwo(), sourceOne(), functionThree(funct3), destination(), opcodeField(opcode)];
+  const unaryFields = (funct7, sourceTwoValue, funct3, opcode) => [field("funct7", 31, 25, "function", funct7), field("rs2", 24, 20, "function", sourceTwoValue), sourceOne(),
+    funct3 === null ? roundingMode() : functionThree(funct3), destination(), opcodeField(opcode)];
+  const roundingFields = (funct7) => [field("funct7", 31, 25, "function", funct7), sourceTwo(), sourceOne(), roundingMode(), destination(), opcodeField(OPCODE.OP_FP)];
+  const fusedFields = (format, opcode) => [field("rs3", 31, 27, "register"), field("fmt", 26, 25, "function", format), sourceTwo(), sourceOne(), roundingMode(), destination(), opcodeField(opcode)];
+  const atomicFields = (funct5, funct3, hasSourceTwo) => [field("funct5", 31, 27, "function", funct5), field("aq", 26, 26, "plain"), field("rl", 25, 25, "plain"),
+    hasSourceTwo ? sourceTwo() : field("rs2", 24, 20, "function", 0), sourceOne(), functionThree(funct3), destination(), opcodeField(OPCODE.AMO)];
+  const loadFields = (funct3, opcode) => [field("imm[11:0]", 31, 20, "immediate"), sourceOne(), functionThree(funct3), destination(), opcodeField(opcode)];
+  const storeFields = (funct3, opcode) => [field("imm[11:5]", 31, 25, "immediate"), sourceTwo(), sourceOne(), functionThree(funct3), field("imm[4:0]", 11, 7, "immediate"), opcodeField(opcode)];
+  const fixedImmediateFields = (immediateValue, funct3, opcode) => [field("imm[11:0]", 31, 20, "function", immediateValue), sourceOne(), functionThree(funct3), destination(), opcodeField(opcode)];
+  const shiftSixFields = (funct6, funct3, opcode) => [field("funct6", 31, 26, "function", funct6), field("shamt", 25, 20, "immediate"), sourceOne(), functionThree(funct3), destination(), opcodeField(opcode)];
+  const shiftFiveFields = (funct7, funct3, opcode) => [field("funct7", 31, 25, "function", funct7), field("shamt", 24, 20, "immediate"), sourceOne(), functionThree(funct3), destination(), opcodeField(opcode)];
+  const systemFixedFields = (funct7, sourceTwoValue) => [field("funct7", 31, 25, "function", funct7), field("rs2", 24, 20, "function", sourceTwoValue), field("rs1", 19, 15, "plain", 0),
+    functionThree(0), field("rd", 11, 7, "plain", 0), opcodeField(OPCODE.SYSTEM)];
+  const systemFenceFields = (funct7) => [field("funct7", 31, 25, "function", funct7), sourceTwo(), sourceOne(), functionThree(0), field("rd", 11, 7, "plain", 0), opcodeField(OPCODE.SYSTEM)];
+  const hypervisorLoadFields = (funct7, sourceTwoValue) => [field("funct7", 31, 25, "function", funct7), field("rs2", 24, 20, "function", sourceTwoValue), sourceOne(), functionThree(0b100), destination(), opcodeField(OPCODE.SYSTEM)];
+  const hypervisorStoreFields = (funct7) => [field("funct7", 31, 25, "function", funct7), sourceTwo(), sourceOne(), functionThree(0b100), field("rd", 11, 7, "plain", 0), opcodeField(OPCODE.SYSTEM)];
+  const fenceFixedFields = (fenceMode, predecessor, successor) => [field("fm", 31, 28, "function", fenceMode), field("pred", 27, 24, "function", predecessor), field("succ", 23, 20, "function", successor),
+    field("rs1", 19, 15, "plain", 0), functionThree(0), field("rd", 11, 7, "plain", 0), opcodeField(OPCODE.MISC_MEM)];
+
+  // 16비트 압축 명령의 필드 (op 와 funct 만 고정 값, 즉시값은 비트 순서를 이름에 적는다)
+  const compressedOp = (value) => field("op", 1, 0, "opcode", value);
+  const compressedFunctThree = (value) => field("funct3", 15, 13, "function", value);
+  const compressedFormats = {
+    CR: (funct4, op, sourceTwoValue) => [field("funct4", 15, 12, "function", funct4), field("rd/rs1", 11, 7, "register"), sourceTwoValue === undefined ? field("rs2", 6, 2, "register") : field("rs2", 6, 2, "function", sourceTwoValue), compressedOp(op)],
+    CI: (funct3, op, highName, lowName, registerName) => [compressedFunctThree(funct3), field(highName, 12, 12, "immediate"), field(registerName || "rd/rs1", 11, 7, "register"), field(lowName, 6, 2, "immediate"), compressedOp(op)],
+    CSS: (funct3, op, immediateName) => [compressedFunctThree(funct3), field(immediateName, 12, 7, "immediate"), field("rs2", 6, 2, "register"), compressedOp(op)],
+    CIW: (funct3, op, immediateName) => [compressedFunctThree(funct3), field(immediateName, 12, 5, "immediate"), field("rd′", 4, 2, "register"), compressedOp(op)],
+    CL: (funct3, op, highName, lowName) => [compressedFunctThree(funct3), field(highName, 12, 10, "immediate"), field("rs1′", 9, 7, "register"), field(lowName, 6, 5, "immediate"), field("rd′", 4, 2, "register"), compressedOp(op)],
+    CS: (funct3, op, highName, lowName) => [compressedFunctThree(funct3), field(highName, 12, 10, "immediate"), field("rs1′", 9, 7, "register"), field(lowName, 6, 5, "immediate"), field("rs2′", 4, 2, "register"), compressedOp(op)],
+    CA: (funct6, funct2) => [field("funct6", 15, 10, "function", funct6), field("rd′/rs1′", 9, 7, "register"), field("funct2", 6, 5, "function", funct2), field("rs2′", 4, 2, "register"), compressedOp(0b01)],
+    CBBranch: (funct3) => [compressedFunctThree(funct3), field("off[8|4:3]", 12, 10, "immediate"), field("rs1′", 9, 7, "register"), field("off[7:6|2:1|5]", 6, 2, "immediate"), compressedOp(0b01)],
+    CBArithmetic: (funct2) => [compressedFunctThree(0b100), field("imm[5]", 12, 12, "immediate"), field("funct2", 11, 10, "function", funct2), field("rd′/rs1′", 9, 7, "register"), field("imm[4:0]", 6, 2, "immediate"), compressedOp(0b01)],
+    CJ: (funct3) => [compressedFunctThree(funct3), field("imm[11|4|9:8|10|6|7|3:1|5]", 12, 2, "immediate"), compressedOp(0b01)],
+  };
+
+  /* ---------- 1) riscv.js 가 아는 명령: 표를 그대로 옮기고 문법만 만든다 */
+  function baseSyntax(instruction) {
+    const name = instruction.name;
+    if (name === "ecall" || name === "ebreak" || name === "fence.i") return name;
+    if (name === "fence") return "fence pred, succ";
+    if (instruction.format === "R") return name + " rd, rs1, rs2";
+    if (instruction.format === "I-shift") return name + " rd, rs1, shamt";
+    if (instruction.format === "I-csr") return name.endsWith("i") ? name + " rd, csr, uimm" : name + " rd, csr, rs1";
+    if (instruction.format === "S") return name + " rs2, imm(rs1)";
+    if (instruction.format === "B") return name + " rs1, rs2, offset";
+    if (instruction.format === "U") return name + " rd, imm";
+    if (instruction.format === "J") return name + " rd, offset";
+    if (instruction.opcode === Riscv.OPCODES.LOAD || name === "jalr") return name + " rd, imm(rs1)";
+    return name + " rd, rs1, imm";
+  }
+  function baseGroup(instruction) {
+    if (instruction.extension === "M") return { group: "m", label: "M" };
+    if (instruction.extension === "Zicsr" || instruction.extension === "Zifencei") return { group: "zicsr", label: instruction.extension };
+    if (instruction.isRv64Only) return { group: "rv64i", label: "RV64I" };
+    return { group: "rv32i", label: "RV32I" };
+  }
+  const baseEntries = Riscv.INSTRUCTIONS.map((instruction) => {
+    const grouping = baseGroup(instruction);
+    const format = instruction.format.startsWith("I") ? "I" : instruction.format;
+    return {
+      name: instruction.name, group: grouping.group, extension: grouping.label, format, formatDetail: instruction.format,
+      syntax: baseSyntax(instruction), meaning: instruction.description, formula: instruction.meaning,
+      isEncodableByRiscv: true, opcode: instruction.opcode, funct3: instruction.funct3, funct7: instruction.funct7,
+      bitWidth: 32,
+    };
+  });
+
+  /* ---------- 2) 그 밖의 명령: 이름, 무리, 확장 표시, 형식, 문법, 뜻, 필드 */
+  const extraEntries = [];
+  function add(name, group, extension, format, syntax, meaning, fields, options) {
+    extraEntries.push(Object.assign({ name, group, extension, format, syntax, meaning, fields, bitWidth: 32 }, options || {}));
+  }
+
+  // 베이스에 속하지만 riscv.js 표에 없는 두 인코딩
+  add("fence.tso", "rv32i", "RV32I", "I", "fence.tso", "TSO 순서의 펜스 — fence rw,rw 에서 저장→적재 순서만 푼 것", fenceFixedFields(0b1000, 0b0011, 0b0011));
+  add("pause", "other", "Zihintpause", "I", "pause", "잠깐 쉬라는 힌트 (pred=W, succ=0 인 fence 인코딩)", fenceFixedFields(0b0000, 0b0001, 0b0000));
+
+  // RV64M
+  [["mulw", 0b000, "32비트 곱의 하위 32비트를 부호 확장"], ["divw", 0b100, "32비트 부호 있는 나눗셈"], ["divuw", 0b101, "32비트 부호 없는 나눗셈"],
+    ["remw", 0b110, "32비트 부호 있는 나머지"], ["remuw", 0b111, "32비트 부호 없는 나머지"]].forEach(([name, funct3, meaning]) =>
+    add(name, "m", "M (RV64)", "R", name + " rd, rs1, rs2", meaning, registerFields(0b0000001, funct3, OPCODE.OP_32)));
+
+  // A: .w 와 .d 모두. funct5 는 규격 목록 그대로
+  const ATOMIC_OPERATIONS = [["lr", 0b00010, "적재 예약 — 주소를 예약 집합에 등록"], ["sc", 0b00011, "조건부 저장 — 예약이 살아 있으면 저장하고 rd=0"],
+    ["amoswap", 0b00001, "원자적 교환"], ["amoadd", 0b00000, "원자적 덧셈"], ["amoxor", 0b00100, "원자적 XOR"], ["amoand", 0b01100, "원자적 AND"],
+    ["amoor", 0b01000, "원자적 OR"], ["amomin", 0b10000, "원자적 최솟값 (부호 있음)"], ["amomax", 0b10100, "원자적 최댓값 (부호 있음)"],
+    ["amominu", 0b11000, "원자적 최솟값 (부호 없음)"], ["amomaxu", 0b11100, "원자적 최댓값 (부호 없음)"]];
+  [[".w", 0b010, "A"], [".d", 0b011, "A (RV64)"]].forEach(([suffix, funct3, extensionLabel]) => {
+    ATOMIC_OPERATIONS.forEach(([base, funct5, meaning]) => {
+      const name = base + suffix;
+      let syntax = name + " rd, rs2, (rs1)";
+      if (base === "lr") syntax = name + " rd, (rs1)";
+      add(name, "a", extensionLabel, "R", syntax, meaning + (suffix === ".d" ? " (64비트)" : " (32비트)"), atomicFields(funct5, funct3, base !== "lr"));
+    });
+  });
+
+  // F 와 D. precision: 표시용 접미사, fmt: R4 의 fmt 값과 funct7 하위 2비트(S=00, D=01)
+  [["s", 0b00, "F", "단정밀도"], ["d", 0b01, "D", "배정밀도"]].forEach(([precision, fmt, extensionLabel, precisionText]) => {
+    const group = extensionLabel === "F" ? "f" : "d";
+    const withFormat = (upperFive) => (upperFive << 2) | fmt;
+    const loadName = precision === "s" ? "flw" : "fld";
+    const storeName = precision === "s" ? "fsw" : "fsd";
+    const width = precision === "s" ? 0b010 : 0b011;
+    add(loadName, group, extensionLabel, "I", loadName + " fd, imm(rs1)", precisionText + " 값을 메모리에서 적재", loadFields(width, OPCODE.LOAD_FP));
+    add(storeName, group, extensionLabel, "S", storeName + " fs2, imm(rs1)", precisionText + " 값을 메모리에 저장", storeFields(width, OPCODE.STORE_FP));
+    [["fmadd", OPCODE.MADD, "fd = fs1×fs2 + fs3 (한 번만 반올림)"], ["fmsub", OPCODE.MSUB, "fd = fs1×fs2 − fs3"], ["fnmsub", OPCODE.NMSUB, "fd = −(fs1×fs2) + fs3"], ["fnmadd", OPCODE.NMADD, "fd = −(fs1×fs2) − fs3"]]
+      .forEach(([base, opcode, meaning]) => add(base + "." + precision, group, extensionLabel, "R4", base + "." + precision + " fd, fs1, fs2, fs3", meaning, fusedFields(fmt, opcode)));
+    [["fadd", 0b00000, "덧셈"], ["fsub", 0b00001, "뺄셈"], ["fmul", 0b00010, "곱셈"], ["fdiv", 0b00011, "나눗셈"]]
+      .forEach(([base, upper, meaning]) => add(base + "." + precision, group, extensionLabel, "R", base + "." + precision + " fd, fs1, fs2", precisionText + " " + meaning, roundingFields(withFormat(upper))));
+    add("fsqrt." + precision, group, extensionLabel, "R", "fsqrt." + precision + " fd, fs1", precisionText + " 제곱근", unaryFields(withFormat(0b01011), 0, null, OPCODE.OP_FP));
+    [["fsgnj", 0b000, "부호 주입: fs1 의 크기 + fs2 의 부호 (fmv 의사 명령)"], ["fsgnjn", 0b001, "fs2 의 반대 부호 주입 (fneg)"], ["fsgnjx", 0b010, "부호 XOR (fabs)"]]
+      .forEach(([base, funct3, meaning]) => add(base + "." + precision, group, extensionLabel, "R", base + "." + precision + " fd, fs1, fs2", meaning, registerFields(withFormat(0b00100), funct3, OPCODE.OP_FP)));
+    [["fmin", 0b000, "최솟값"], ["fmax", 0b001, "최댓값"]]
+      .forEach(([base, funct3, meaning]) => add(base + "." + precision, group, extensionLabel, "R", base + "." + precision + " fd, fs1, fs2", precisionText + " " + meaning, registerFields(withFormat(0b00101), funct3, OPCODE.OP_FP)));
+    [["feq", 0b010, "같으면 rd=1"], ["flt", 0b001, "작으면 rd=1"], ["fle", 0b000, "작거나 같으면 rd=1"]]
+      .forEach(([base, funct3, meaning]) => add(base + "." + precision, group, extensionLabel, "R", base + "." + precision + " rd, fs1, fs2", "비교: " + meaning, registerFields(withFormat(0b10100), funct3, OPCODE.OP_FP)));
+    add("fclass." + precision, group, extensionLabel, "R", "fclass." + precision + " rd, fs1", "값의 종류(±무한, 정규, NaN 등)를 10비트 마스크로", unaryFields(withFormat(0b11100), 0, 0b001, OPCODE.OP_FP));
+    add("fcvt.w." + precision, group, extensionLabel, "R", "fcvt.w." + precision + " rd, fs1", precisionText + " → 32비트 부호 있는 정수", unaryFields(withFormat(0b11000), 0b00000, null, OPCODE.OP_FP));
+    add("fcvt.wu." + precision, group, extensionLabel, "R", "fcvt.wu." + precision + " rd, fs1", precisionText + " → 32비트 부호 없는 정수", unaryFields(withFormat(0b11000), 0b00001, null, OPCODE.OP_FP));
+    add("fcvt." + precision + ".w", group, extensionLabel, "R", "fcvt." + precision + ".w fd, rs1", "32비트 부호 있는 정수 → " + precisionText, unaryFields(withFormat(0b11010), 0b00000, null, OPCODE.OP_FP));
+    add("fcvt." + precision + ".wu", group, extensionLabel, "R", "fcvt." + precision + ".wu fd, rs1", "32비트 부호 없는 정수 → " + precisionText, unaryFields(withFormat(0b11010), 0b00001, null, OPCODE.OP_FP));
+    add("fcvt.l." + precision, group, extensionLabel + " (RV64)", "R", "fcvt.l." + precision + " rd, fs1", precisionText + " → 64비트 부호 있는 정수", unaryFields(withFormat(0b11000), 0b00010, null, OPCODE.OP_FP));
+    add("fcvt." + precision + ".l", group, extensionLabel + " (RV64)", "R", "fcvt." + precision + ".l fd, rs1", "64비트 부호 있는 정수 → " + precisionText, unaryFields(withFormat(0b11010), 0b00010, null, OPCODE.OP_FP));
+  });
+  add("fmv.x.w", "f", "F", "R", "fmv.x.w rd, fs1", "f 레지스터의 하위 32비트 비트 패턴을 그대로 x 레지스터로 (부호 확장)", unaryFields(0b1110000, 0, 0b000, OPCODE.OP_FP));
+  add("fmv.w.x", "f", "F", "R", "fmv.w.x fd, rs1", "x 레지스터의 하위 32비트를 f 레지스터로 (NaN 박싱)", unaryFields(0b1111000, 0, 0b000, OPCODE.OP_FP));
+  add("fcvt.s.d", "d", "D", "R", "fcvt.s.d fd, fs1", "배정밀도 → 단정밀도", unaryFields(0b0100000, 0b00001, null, OPCODE.OP_FP));
+  add("fcvt.d.s", "d", "D", "R", "fcvt.d.s fd, fs1", "단정밀도 → 배정밀도 (항상 정확)", unaryFields(0b0100001, 0b00000, null, OPCODE.OP_FP));
+  add("fmv.x.d", "d", "D (RV64)", "R", "fmv.x.d rd, fs1", "f 레지스터의 64비트 비트 패턴을 x 레지스터로", unaryFields(0b1110001, 0, 0b000, OPCODE.OP_FP));
+  add("fmv.d.x", "d", "D (RV64)", "R", "fmv.d.x fd, rs1", "x 레지스터의 64비트 비트 패턴을 f 레지스터로", unaryFields(0b1111001, 0, 0b000, OPCODE.OP_FP));
+
+  // Zba
+  [["sh1add", 0b010, "rd = rs2 + (rs1 << 1)"], ["sh2add", 0b100, "rd = rs2 + (rs1 << 2)"], ["sh3add", 0b110, "rd = rs2 + (rs1 << 3)"]]
+    .forEach(([name, funct3, meaning]) => add(name, "b", "Zba", "R", name + " rd, rs1, rs2", "주소 계산: " + meaning, registerFields(0b0010000, funct3, OPCODE.OP)));
+  add("add.uw", "b", "Zba (RV64)", "R", "add.uw rd, rs1, rs2", "rd = rs2 + zext(rs1[31:0]) (zext.w 의사 명령의 바탕)", registerFields(0b0000100, 0b000, OPCODE.OP_32));
+  [["sh1add.uw", 0b010, 1], ["sh2add.uw", 0b100, 2], ["sh3add.uw", 0b110, 3]]
+    .forEach(([name, funct3, amount]) => add(name, "b", "Zba (RV64)", "R", name + " rd, rs1, rs2", "rd = rs2 + (zext(rs1[31:0]) << " + amount + ")", registerFields(0b0010000, funct3, OPCODE.OP_32)));
+  add("slli.uw", "b", "Zba (RV64)", "I", "slli.uw rd, rs1, shamt", "rd = zext(rs1[31:0]) << shamt", shiftSixFields(0b000010, 0b001, OPCODE.OP_IMM_32));
+  // Zbb
+  [["andn", 0b111, "rd = rs1 & ~rs2"], ["orn", 0b110, "rd = rs1 | ~rs2"], ["xnor", 0b100, "rd = ~(rs1 ^ rs2)"]]
+    .forEach(([name, funct3, meaning]) => add(name, "b", "Zbb", "R", name + " rd, rs1, rs2", "부정 논리 연산: " + meaning, registerFields(0b0100000, funct3, OPCODE.OP)));
+  [["clz", 0x600, "앞쪽(최상위)부터 0인 비트 수"], ["ctz", 0x601, "뒤쪽(최하위)부터 0인 비트 수"], ["cpop", 0x602, "1인 비트 수"],
+    ["sext.b", 0x604, "하위 8비트를 부호 확장"], ["sext.h", 0x605, "하위 16비트를 부호 확장"]]
+    .forEach(([name, immediateValue, meaning]) => add(name, "b", "Zbb", "I", name + " rd, rs1", meaning, fixedImmediateFields(immediateValue, 0b001, OPCODE.OP_IMM)));
+  [["clzw", 0x600, "하위 32비트의 앞쪽 0 비트 수"], ["ctzw", 0x601, "하위 32비트의 뒤쪽 0 비트 수"], ["cpopw", 0x602, "하위 32비트에서 1인 비트 수"]]
+    .forEach(([name, immediateValue, meaning]) => add(name, "b", "Zbb (RV64)", "I", name + " rd, rs1", meaning, fixedImmediateFields(immediateValue, 0b001, OPCODE.OP_IMM_32)));
+  [["max", 0b110, "최댓값 (부호 있음)"], ["maxu", 0b111, "최댓값 (부호 없음)"], ["min", 0b100, "최솟값 (부호 있음)"], ["minu", 0b101, "최솟값 (부호 없음)"]]
+    .forEach(([name, funct3, meaning]) => add(name, "b", "Zbb", "R", name + " rd, rs1, rs2", meaning, registerFields(0b0000101, funct3, OPCODE.OP)));
+  add("zext.h", "b", "Zbb", "R", "zext.h rd, rs1", "하위 16비트를 0 확장 (RV64 인코딩; RV32 는 opcode 가 OP)", unaryFields(0b0000100, 0, 0b100, OPCODE.OP_32));
+  [["rol", 0b001, "왼쪽 회전"], ["ror", 0b101, "오른쪽 회전"]]
+    .forEach(([name, funct3, meaning]) => add(name, "b", "Zbb", "R", name + " rd, rs1, rs2", meaning + " (rs2 만큼)", registerFields(0b0110000, funct3, OPCODE.OP)));
+  add("rori", "b", "Zbb", "I", "rori rd, rs1, shamt", "즉시값만큼 오른쪽 회전 (RV64 의 6비트 shamt 인코딩)", shiftSixFields(0b011000, 0b101, OPCODE.OP_IMM));
+  [["rolw", 0b001, "하위 32비트 왼쪽 회전"], ["rorw", 0b101, "하위 32비트 오른쪽 회전"]]
+    .forEach(([name, funct3, meaning]) => add(name, "b", "Zbb (RV64)", "R", name + " rd, rs1, rs2", meaning, registerFields(0b0110000, funct3, OPCODE.OP_32)));
+  add("roriw", "b", "Zbb (RV64)", "I", "roriw rd, rs1, shamt", "하위 32비트를 즉시값만큼 오른쪽 회전", shiftFiveFields(0b0110000, 0b101, OPCODE.OP_IMM_32));
+  add("orc.b", "b", "Zbb", "I", "orc.b rd, rs1", "바이트마다: 하나라도 1이면 0xFF, 아니면 0x00 (문자열 끝 찾기)", fixedImmediateFields(0x287, 0b101, OPCODE.OP_IMM));
+  add("rev8", "b", "Zbb", "I", "rev8 rd, rs1", "바이트 순서 뒤집기 (RV64 인코딩 0x6B8; RV32 는 0x698)", fixedImmediateFields(0x6b8, 0b101, OPCODE.OP_IMM));
+  // Zbs
+  [["bclr", 0b0100100, 0b001, "rs2 번째 비트를 0으로"], ["bext", 0b0100100, 0b101, "rs2 번째 비트를 꺼내 rd 의 0번 비트로"],
+    ["binv", 0b0110100, 0b001, "rs2 번째 비트를 뒤집기"], ["bset", 0b0010100, 0b001, "rs2 번째 비트를 1로"]]
+    .forEach(([name, funct7, funct3, meaning]) => add(name, "b", "Zbs", "R", name + " rd, rs1, rs2", meaning, registerFields(funct7, funct3, OPCODE.OP)));
+  [["bclri", 0b010010, 0b001, "shamt 번째 비트를 0으로"], ["bexti", 0b010010, 0b101, "shamt 번째 비트를 꺼내기"],
+    ["binvi", 0b011010, 0b001, "shamt 번째 비트를 뒤집기"], ["bseti", 0b001010, 0b001, "shamt 번째 비트를 1로"]]
+    .forEach(([name, funct6, funct3, meaning]) => add(name, "b", "Zbs", "I", name + " rd, rs1, shamt", meaning + " (RV64 의 6비트 shamt 인코딩)", shiftSixFields(funct6, funct3, OPCODE.OP_IMM)));
+  // Zicond
+  add("czero.eqz", "other", "Zicond", "R", "czero.eqz rd, rs1, rs2", "rs2 == 0 이면 rd = 0, 아니면 rd = rs1", registerFields(0b0000111, 0b101, OPCODE.OP));
+  add("czero.nez", "other", "Zicond", "R", "czero.nez rd, rs1, rs2", "rs2 != 0 이면 rd = 0, 아니면 rd = rs1", registerFields(0b0000111, 0b111, OPCODE.OP));
+
+  // 특권 명령 (특권 규격 18장 목록)
+  add("sret", "privileged", "S", "R", "sret", "S 모드 트랩에서 복귀: pc ← sepc, 특권 ← sstatus.SPP", systemFixedFields(0b0001000, 0b00010));
+  add("mret", "privileged", "M", "R", "mret", "M 모드 트랩에서 복귀: pc ← mepc, 특권 ← mstatus.MPP", systemFixedFields(0b0011000, 0b00010));
+  add("wfi", "privileged", "M", "R", "wfi", "인터럽트가 올 때까지 쉬어도 된다는 힌트", systemFixedFields(0b0001000, 0b00101));
+  add("sfence.vma", "privileged", "S", "R", "sfence.vma rs1, rs2", "주소 변환 캐시(TLB) 동기화 — rs1=가상 주소, rs2=ASID", systemFenceFields(0b0001001));
+  add("sinval.vma", "privileged", "Svinval", "R", "sinval.vma rs1, rs2", "세밀한 TLB 무효화 (sfence.w.inval / sfence.inval.ir 과 함께)", systemFenceFields(0b0001011));
+  add("hfence.vvma", "privileged", "H", "R", "hfence.vvma rs1, rs2", "VS-stage 변환 캐시 동기화 (rs2=게스트 ASID)", systemFenceFields(0b0010001));
+  add("hfence.gvma", "privileged", "H", "R", "hfence.gvma rs1, rs2", "G-stage 변환 캐시 동기화 (rs1=게스트 물리 주소>>2, rs2=VMID)", systemFenceFields(0b0110001));
+  add("hlv.w", "privileged", "H", "R", "hlv.w rd, (rs1)", "게스트(VS/VU)의 주소 변환으로 32비트 적재", hypervisorLoadFields(0b0110100, 0b00000));
+  add("hsv.w", "privileged", "H", "R", "hsv.w rs2, (rs1)", "게스트의 주소 변환으로 32비트 저장", hypervisorStoreFields(0b0110101));
+
+  // C: 주요 압축 명령 (비특권 27장 목록과 RVC opcode 지도)
+  const addCompressed = (name, extension, format, syntax, meaning, fields) => extraEntries.push({ name, group: "c", extension, format: "C", formatDetail: format, syntax, meaning, fields, bitWidth: 16 });
+  addCompressed("c.addi4spn", "C", "CIW", "c.addi4spn rd′, sp, nzuimm", "addi rd′, sp, nzuimm — 스택 주소 만들기", compressedFormats.CIW(0b000, 0b00, "nzuimm[5:4|9:6|2|3]"));
+  addCompressed("c.lw", "C", "CL", "c.lw rd′, uimm(rs1′)", "lw rd′, uimm(rs1′)", compressedFormats.CL(0b010, 0b00, "uimm[5:3]", "uimm[2|6]"));
+  addCompressed("c.ld", "C (RV64)", "CL", "c.ld rd′, uimm(rs1′)", "ld rd′, uimm(rs1′)", compressedFormats.CL(0b011, 0b00, "uimm[5:3]", "uimm[7:6]"));
+  addCompressed("c.sw", "C", "CS", "c.sw rs2′, uimm(rs1′)", "sw rs2′, uimm(rs1′)", compressedFormats.CS(0b110, 0b00, "uimm[5:3]", "uimm[2|6]"));
+  addCompressed("c.sd", "C (RV64)", "CS", "c.sd rs2′, uimm(rs1′)", "sd rs2′, uimm(rs1′)", compressedFormats.CS(0b111, 0b00, "uimm[5:3]", "uimm[7:6]"));
+  addCompressed("c.addi", "C", "CI", "c.addi rd, nzimm", "addi rd, rd, nzimm (rd=0 이면 c.nop)", compressedFormats.CI(0b000, 0b01, "nzimm[5]", "nzimm[4:0]"));
+  addCompressed("c.jal", "C (RV32)", "CJ", "c.jal offset", "jal ra, offset", compressedFormats.CJ(0b001));
+  addCompressed("c.addiw", "C (RV64)", "CI", "c.addiw rd, imm", "addiw rd, rd, imm", compressedFormats.CI(0b001, 0b01, "imm[5]", "imm[4:0]"));
+  addCompressed("c.li", "C", "CI", "c.li rd, imm", "addi rd, x0, imm", compressedFormats.CI(0b010, 0b01, "imm[5]", "imm[4:0]"));
+  addCompressed("c.addi16sp", "C", "CI", "c.addi16sp nzimm", "addi sp, sp, nzimm (16의 배수) — rd 자리가 2", compressedFormats.CI(0b011, 0b01, "nzimm[9]", "nzimm[4|6|8:7|5]", "rd=2"));
+  addCompressed("c.lui", "C", "CI", "c.lui rd, nzimm", "lui rd, nzimm (rd ≠ x0, x2)", compressedFormats.CI(0b011, 0b01, "nzimm[17]", "nzimm[16:12]"));
+  addCompressed("c.srli", "C", "CB", "c.srli rd′, shamt", "srli rd′, rd′, shamt", compressedFormats.CBArithmetic(0b00));
+  addCompressed("c.srai", "C", "CB", "c.srai rd′, shamt", "srai rd′, rd′, shamt", compressedFormats.CBArithmetic(0b01));
+  addCompressed("c.andi", "C", "CB", "c.andi rd′, imm", "andi rd′, rd′, imm", compressedFormats.CBArithmetic(0b10));
+  [["c.sub", 0b100011, 0b00, "sub"], ["c.xor", 0b100011, 0b01, "xor"], ["c.or", 0b100011, 0b10, "or"], ["c.and", 0b100011, 0b11, "and"]]
+    .forEach(([name, funct6, funct2, base]) => addCompressed(name, "C", "CA", name + " rd′, rs2′", base + " rd′, rd′, rs2′", compressedFormats.CA(funct6, funct2)));
+  addCompressed("c.j", "C", "CJ", "c.j offset", "jal x0, offset", compressedFormats.CJ(0b101));
+  addCompressed("c.beqz", "C", "CB", "c.beqz rs1′, offset", "beq rs1′, x0, offset", compressedFormats.CBBranch(0b110));
+  addCompressed("c.bnez", "C", "CB", "c.bnez rs1′, offset", "bne rs1′, x0, offset", compressedFormats.CBBranch(0b111));
+  addCompressed("c.slli", "C", "CI", "c.slli rd, shamt", "slli rd, rd, shamt", compressedFormats.CI(0b000, 0b10, "shamt[5]", "shamt[4:0]"));
+  addCompressed("c.lwsp", "C", "CI", "c.lwsp rd, uimm(sp)", "lw rd, uimm(sp)", compressedFormats.CI(0b010, 0b10, "uimm[5]", "uimm[4:2|7:6]"));
+  addCompressed("c.ldsp", "C (RV64)", "CI", "c.ldsp rd, uimm(sp)", "ld rd, uimm(sp)", compressedFormats.CI(0b011, 0b10, "uimm[5]", "uimm[4:3|8:6]"));
+  addCompressed("c.jr", "C", "CR", "c.jr rs1", "jalr x0, 0(rs1)", compressedFormats.CR(0b1000, 0b10, 0));
+  addCompressed("c.mv", "C", "CR", "c.mv rd, rs2", "add rd, x0, rs2", compressedFormats.CR(0b1000, 0b10));
+  addCompressed("c.ebreak", "C", "CR", "c.ebreak", "ebreak (rd/rs1 = 0, rs2 = 0)", compressedFormats.CR(0b1001, 0b10, 0));
+  addCompressed("c.jalr", "C", "CR", "c.jalr rs1", "jalr ra, 0(rs1)", compressedFormats.CR(0b1001, 0b10, 0));
+  addCompressed("c.add", "C", "CR", "c.add rd, rs2", "add rd, rd, rs2", compressedFormats.CR(0b1001, 0b10));
+  addCompressed("c.swsp", "C", "CSS", "c.swsp rs2, uimm(sp)", "sw rs2, uimm(sp)", compressedFormats.CSS(0b110, 0b10, "uimm[5:2|7:6]"));
+  addCompressed("c.sdsp", "C (RV64)", "CSS", "c.sdsp rs2, uimm(sp)", "sd rs2, uimm(sp)", compressedFormats.CSS(0b111, 0b10, "uimm[5:3|8:6]"));
+
+  // 필드 배열에서 opcode·funct3·funct7(또는 funct5/funct6) 고정 값을 뽑아 표의 인코딩 칸에 쓴다
+  extraEntries.forEach((entry) => {
+    const fixedOf = (names) => {
+      const found = entry.fields.find((item) => names.includes(item.name) && item.fixedValue !== null);
+      return found ? found : null;
+    };
+    const opcodeItem = fixedOf(["opcode", "op"]);
+    entry.opcode = opcodeItem ? opcodeItem.fixedValue : null;
+    const functionThreeItem = fixedOf(["funct3"]);
+    entry.funct3 = functionThreeItem ? functionThreeItem.fixedValue : undefined;
+    const functionSevenItem = fixedOf(["funct7", "funct6", "funct5", "funct4", "imm[11:0]", "fm"]);
+    entry.funct7 = functionSevenItem ? functionSevenItem.fixedValue : undefined;
+    entry.functionSevenLabel = functionSevenItem ? functionSevenItem.name : null;
+    entry.functionSevenWidth = functionSevenItem ? functionSevenItem.high - functionSevenItem.low + 1 : 0;
+  });
+
+  window.RiscvReferenceData = { entries: baseEntries.concat(extraEntries), OPCODE };
+})();
+
+/* ---------------------------------------------------------------------------
+   명령어 카드 화면: 필터·검색·표·상세(비트 필드와 예시 인코딩)
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const Riscv = window.Riscv;
+  const entries = window.RiscvReferenceData.entries;
+  const GROUPS = [
+    ["rv32i", "RV32I"], ["rv64i", "RV64I"], ["m", "M"], ["a", "A"], ["f", "F"], ["d", "D"], ["zicsr", "Zicsr·Zifencei"],
+    ["c", "C"], ["b", "Zba·Zbb·Zbs"], ["other", "Zicond·Zihintpause"], ["privileged", "특권"],
+  ];
+  // 예시 인코딩에 쓰는 피연산자 값. a0/a1/a2 와 fa0~fa3 가 되도록 골랐다.
+  const EXAMPLE_VALUES = { rd: 10, rs1: 11, rs2: 12, rs3: 13, rm: 7, aq: 0, rl: 0, shamt: 3 };
+  const EXAMPLE_IMMEDIATE = 8;
+  const FLOAT_ABI_NAMES = ["ft0", "ft1", "ft2", "ft3", "ft4", "ft5", "ft6", "ft7", "fs0", "fs1", "fa0", "fa1", "fa2", "fa3", "fa4", "fa5", "fa6", "fa7",
+    "fs2", "fs3", "fs4", "fs5", "fs6", "fs7", "fs8", "fs9", "fs10", "fs11", "ft8", "ft9", "ft10", "ft11"];
+  const MAXIMUM_ROWS_SHOWN = 400;
+
+  const enabledGroups = new Set(GROUPS.map(([key]) => key));
+  let searchText = "";
+  let formatFilter = "all";
+  let opcodeFilter = null;
+  let selectedName = "add";
+
+  const filterContainer = document.getElementById("card-extension-filters");
+  filterContainer.innerHTML = GROUPS.map(([key, label]) => '<button class="filter-chip on" data-group="' + key + '">' + label + "</button>").join("") +
+    '<button class="filter-chip" data-group="__all">모두</button><button class="filter-chip" data-group="__none">해제</button>';
+  const body = document.getElementById("card-body");
+  const detail = document.getElementById("card-detail");
+  const opcodeTag = document.getElementById("card-opcode-tag");
+  document.getElementById("card-total").textContent = entries.length;
+
+  const toBinaryText = (value, width) => (value >>> 0).toString(2).padStart(width, "0");
+  function escapeHtml(text) {
+    return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+
+  function encodingText(entry) {
+    if (entry.bitWidth === 16) {
+      const funct3Text = entry.funct3 !== undefined ? " · funct3=" + toBinaryText(entry.funct3, 3) : "";
+      return "op=" + toBinaryText(entry.opcode, 2) + funct3Text;
+    }
+    const parts = [toBinaryText(entry.opcode, 7)];
+    parts.push(entry.funct3 !== undefined ? toBinaryText(entry.funct3, 3) : "—");
+    if (entry.funct7 !== undefined && entry.isEncodableByRiscv) parts.push(toBinaryText(entry.funct7, 7));
+    else if (entry.funct7 !== undefined && entry.functionSevenWidth) parts.push(entry.functionSevenLabel === "funct7" ? toBinaryText(entry.funct7, 7) : entry.functionSevenLabel + "=" + toBinaryText(entry.funct7, entry.functionSevenWidth));
+    else parts.push("—");
+    return parts.join(" · ");
+  }
+
+  function matches(entry) {
+    if (!enabledGroups.has(entry.group)) return false;
+    if (formatFilter !== "all" && entry.format !== formatFilter) return false;
+    if (opcodeFilter !== null && (entry.bitWidth !== 32 || entry.opcode !== opcodeFilter.value)) return false;
+    if (!searchText) return true;
+    const haystack = (entry.name + " " + entry.extension + " " + entry.meaning + " " + (entry.formula || "") + " " + entry.syntax).toLowerCase();
+    return haystack.includes(searchText);
+  }
+
+  function renderTable() {
+    const shown = entries.filter(matches);
+    body.innerHTML = shown.slice(0, MAXIMUM_ROWS_SHOWN).map((entry) =>
+      '<tr data-name="' + entry.name + '"' + (entry.name === selectedName ? ' class="selected"' : "") + '><td class="mnemonic">' + entry.name + "</td><td>" + entry.extension +
+      '</td><td class="column-format">' + (entry.formatDetail && entry.format === "C" ? entry.formatDetail : entry.format) + '</td><td class="syntax">' + escapeHtml(entry.syntax) +
+      '</td><td class="meaning">' + escapeHtml(entry.meaning) + '</td><td class="encoding column-encoding">' + encodingText(entry) + "</td></tr>").join("");
+    if (!shown.length) body.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text-faint)">조건에 맞는 명령이 없다</td></tr>';
+    document.getElementById("card-shown").textContent = shown.length;
+    opcodeTag.innerHTML = opcodeFilter ? '<span class="opcode-filter-tag">opcode ' + toBinaryText(opcodeFilter.value, 7) + " (" + opcodeFilter.label + ')<button aria-label="opcode 필터 지우기" id="card-opcode-clear">✕</button></span>' : "";
+    const clearButton = document.getElementById("card-opcode-clear");
+    if (clearButton) clearButton.addEventListener("click", () => { opcodeFilter = null; renderTable(); });
+  }
+
+  // 베이스 명령의 예시 피연산자. riscv.js 의 encode 범위 검사를 통과하는 값으로 골랐다.
+  function baseExampleOperands(entry) {
+    const instruction = Riscv.INSTRUCTIONS_BY_NAME[entry.name];
+    if (entry.name === "fence") return { immediate: 0x0ff };
+    if (entry.name === "fence.i" || entry.name === "ecall" || entry.name === "ebreak") return {};
+    if (entry.name === "jalr") return { rd: 1, rs1: 11, immediate: 0 };
+    switch (instruction.format) {
+      case "R": return { rd: 10, rs1: 11, rs2: 12 };
+      case "I-shift": return { rd: 10, rs1: 11, immediate: 3 };
+      case "I-csr": return { rd: 10, rs1: entry.name.endsWith("i") ? 5 : 11, csr: Riscv.CSR_NAMES.mstatus };
+      case "S": return { rs1: 11, rs2: 12, immediate: EXAMPLE_IMMEDIATE };
+      case "B": return { rs1: 11, rs2: 12, immediate: 16 };
+      case "U": return { rd: 10, immediate: 0x12345 };
+      case "J": return { rd: 1, immediate: 2048 };
+      default: return { rd: 10, rs1: 11, immediate: instruction.opcode === Riscv.OPCODES.LOAD ? EXAMPLE_IMMEDIATE : 42 };
+    }
+  }
+
+  // 규격 목록의 고정 비트에 예시 값을 끼워 32비트 명령 하나를 만든다
+  function exampleWordFromFields(entry) {
+    let word = 0;
+    let hasImmediate = false;
+    entry.fields.forEach((item) => {
+      const width = item.high - item.low + 1;
+      const mask = width === 32 ? 0xffffffff : (1 << width) - 1;
+      if (item.fixedValue !== null) { word |= (item.fixedValue & mask) << item.low; return; }
+      if (item.kind === "immediate" && item.name !== "shamt") { hasImmediate = true; return; }
+      const value = EXAMPLE_VALUES[item.name] || 0;
+      word |= (value & mask) << item.low;
+    });
+    if (hasImmediate) word |= Riscv.scatterImmediate(entry.format === "S" ? "S" : "I", EXAMPLE_IMMEDIATE);
+    return word >>> 0;
+  }
+  function exampleAssembly(entry) {
+    const replacements = { rd: Riscv.ABI_NAMES[EXAMPLE_VALUES.rd], rs1: Riscv.ABI_NAMES[EXAMPLE_VALUES.rs1], rs2: Riscv.ABI_NAMES[EXAMPLE_VALUES.rs2],
+      fd: FLOAT_ABI_NAMES[EXAMPLE_VALUES.rd], fs1: FLOAT_ABI_NAMES[EXAMPLE_VALUES.rs1], fs2: FLOAT_ABI_NAMES[EXAMPLE_VALUES.rs2], fs3: FLOAT_ABI_NAMES[EXAMPLE_VALUES.rs3],
+      shamt: String(EXAMPLE_VALUES.shamt), imm: String(EXAMPLE_IMMEDIATE) };
+    return entry.syntax.replace(/\b(rd|rs1|rs2|fd|fs1|fs2|fs3|shamt|imm)\b/g, (token) => replacements[token]);
+  }
+
+  function bitfieldHtml(fields, word, bitWidth) {
+    return '<div class="bitfield' + (bitWidth === 16 ? " compressed" : "") + '">' + fields.map((item) => {
+      const width = item.high - item.low + 1;
+      let valueText = "";
+      if (word !== null) valueText = toBinaryText((word >>> item.low) & (width === 32 ? 0xffffffff : (1 << width) - 1), width);
+      else if (item.fixedValue !== null) valueText = toBinaryText(item.fixedValue, width);
+      else valueText = "·".repeat(Math.min(width, 6));
+      const rangeText = width === 1 ? "<span>" + item.high + "</span>" : "<span>" + item.high + "</span><span>" + item.low + "</span>";
+      return '<div class="field ' + item.kind + '" style="flex-grow:' + width + '"><div class="range">' + rangeText + '</div><div class="name" title="' + item.name + '">' + item.name +
+        '</div><div class="value">' + valueText + "</div></div>";
+    }).join("") + "</div>";
+  }
+
+  function renderDetail() {
+    const entry = entries.find((item) => item.name === selectedName);
+    if (!entry) { detail.innerHTML = '<p>표에서 명령을 누르면 여기에 자세한 정보가 나온다.</p>'; return; }
+    let fieldsHtml = "";
+    let exampleHtml = "";
+    if (entry.isEncodableByRiscv) {
+      const word = Riscv.encode(entry.name, baseExampleOperands(entry));
+      const decoded = Riscv.decode(word);
+      const fields = decoded.fields.map((item) => ({ name: item.name, high: item.high, low: item.low, kind: item.kind, fixedValue: null }));
+      fieldsHtml = bitfieldHtml(fields, word, 32);
+      let assembly = Riscv.disassemble(word);
+      if (entry.name === "fence") assembly = "fence iorw, iorw";
+      exampleHtml = '<div class="example">예: <code>' + escapeHtml(assembly) + "</code> → <b>" + book.toHex(word) + "</b> <span style=\"color:var(--text-faint)\">(riscv.js 인코더)</span></div>";
+    } else if (entry.bitWidth === 32) {
+      const word = exampleWordFromFields(entry);
+      fieldsHtml = bitfieldHtml(entry.fields, word, 32);
+      exampleHtml = '<div class="example">예: <code>' + escapeHtml(exampleAssembly(entry)) + "</code> → <b>" + book.toHex(word) + "</b></div>";
+    } else {
+      fieldsHtml = bitfieldHtml(entry.fields, null, 16);
+      exampleHtml = '<div class="example" style="color:var(--text-faint)">16비트 명령. 고정된 funct·op 비트만 값으로 표시했다. 확장 형태: <code>' + escapeHtml(entry.meaning) + "</code></div>";
+    }
+    const formulaHtml = entry.formula ? "<p><code>" + escapeHtml(entry.formula) + "</code></p>" : "";
+    detail.innerHTML = "<h4>" + entry.name + '</h4><div class="meta"><span class="pill accent">' + entry.extension + '</span><span class="pill">' + (entry.formatDetail || entry.format) +
+      ' 형식</span><span class="pill gold">' + escapeHtml(entry.syntax) + "</span></div><p>" + escapeHtml(entry.meaning) + "</p>" + formulaHtml + fieldsHtml + exampleHtml;
+  }
+
+  filterContainer.addEventListener("click", (event) => {
+    const chip = event.target.closest(".filter-chip");
+    if (!chip) return;
+    const key = chip.dataset.group;
+    if (key === "__all") GROUPS.forEach(([groupKey]) => enabledGroups.add(groupKey));
+    else if (key === "__none") enabledGroups.clear();
+    else if (enabledGroups.has(key)) enabledGroups.delete(key);
+    else enabledGroups.add(key);
+    filterContainer.querySelectorAll(".filter-chip[data-group]").forEach((element) => element.classList.toggle("on", enabledGroups.has(element.dataset.group)));
+    renderTable();
+  });
+  document.getElementById("card-search").addEventListener("input", (event) => { searchText = event.target.value.trim().toLowerCase(); renderTable(); });
+  document.getElementById("card-format").addEventListener("change", (event) => { formatFilter = event.target.value; renderTable(); });
+  body.addEventListener("click", (event) => {
+    const row = event.target.closest("tr[data-name]");
+    if (!row) return;
+    selectedName = row.dataset.name;
+    body.querySelectorAll("tr").forEach((element) => element.classList.toggle("selected", element === row));
+    renderDetail();
+  });
+  // opcode 지도에서 칸을 누르면 이 사건이 온다
+  document.addEventListener("reference-opcode-filter", (event) => {
+    opcodeFilter = event.detail;
+    GROUPS.forEach(([groupKey]) => enabledGroups.add(groupKey));
+    filterContainer.querySelectorAll(".filter-chip[data-group]").forEach((element) => element.classList.toggle("on", enabledGroups.has(element.dataset.group)));
+    formatFilter = "all";
+    document.getElementById("card-format").value = "all";
+    renderTable();
+    const firstRow = body.querySelector("tr[data-name]");
+    if (firstRow) { selectedName = firstRow.dataset.name; firstRow.classList.add("selected"); renderDetail(); }
+  });
+  renderTable();
+  renderDetail();
+})();
+
+/* ---------------------------------------------------------------------------
+   주 opcode 지도 (그림 24-2): 칸을 만들고, 금색 테두리가 칸을 돌며 설명한다.
+   좌표는 viewBox(860 × 300) 기준.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const svg = document.getElementById("opcode-map-svg");
+  const info = document.getElementById("opcode-info");
+  const namespace = "http://www.w3.org/2000/svg";
+  const LEFT = 120;
+  const TOP = 44;
+  const CELL_WIDTH = 90;
+  const CELL_HEIGHT = 56;
+  const SECONDS_PER_CELL = 1.8;
+  const PAUSE_AFTER_CLICK_SECONDS = 8;
+  // [이름, 종류, 설명]. 종류는 색을 고르는 데 쓴다.
+  const MAP = [
+    [["LOAD", "memory", "lb lh lw lbu lhu (+ RV64 ld lwu) — 정수 적재"], ["LOAD-FP", "float", "flw fld (flh flq), 벡터 적재 vle*"], ["custom-0", "custom", "사용자 정의 확장용"], ["MISC-MEM", "system", "fence, fence.i, fence.tso, pause, CMO(cbo.*)"],
+      ["OP-IMM", "integer", "addi slti xori … slli srli srai, Zbb clz/rori, Zbs bseti …"], ["AUIPC", "integer", "auipc — pc 기준 상위 주소"], ["OP-IMM-32", "integer", "addiw slliw … (RV64), slli.uw, clzw …"], ["reserved", "reserved", "32비트보다 긴 명령 길이 인코딩 열"]],
+    [["STORE", "memory", "sb sh sw (+ RV64 sd) — 정수 저장"], ["STORE-FP", "float", "fsw fsd (fsh fsq), 벡터 저장 vse*"], ["custom-1", "custom", "사용자 정의 확장용"], ["AMO", "memory", "lr/sc, amo* — 원자적 연산"],
+      ["OP", "integer", "add sub … and, M 곱셈·나눗셈, Zba/Zbb/Zbs, Zicond"], ["LUI", "integer", "lui — 상위 20비트 즉시값"], ["OP-32", "integer", "addw subw … (RV64), mulw divw …, add.uw"], ["reserved", "reserved", "32비트보다 긴 명령 길이 인코딩 열"]],
+    [["MADD", "float", "fmadd.* — 융합 곱셈-덧셈 (R4)"], ["MSUB", "float", "fmsub.*"], ["NMSUB", "float", "fnmsub.*"], ["NMADD", "float", "fnmadd.*"],
+      ["OP-FP", "float", "fadd fsub fmul fdiv fsqrt fsgnj fmin feq fcvt fmv fclass …"], ["OP-V", "float", "벡터 연산과 vsetvli·vsetivli·vsetvl"], ["custom-2", "custom", "사용자 정의 확장용"], ["reserved", "reserved", "32비트보다 긴 명령 길이 인코딩 열"]],
+    [["BRANCH", "control", "beq bne blt bge bltu bgeu"], ["JALR", "control", "jalr — 레지스터 간접 점프"], ["reserved", "reserved", "미래 표준 확장용으로 예약"], ["JAL", "control", "jal — pc 기준 점프"],
+      ["SYSTEM", "system", "ecall ebreak, csr*, mret sret wfi, sfence.vma, hfence.*, hlv/hsv"], ["OP-VE", "float", "벡터 확장용 추가 opcode (벡터 암호 명령 일부)"], ["custom-3", "custom", "사용자 정의 확장용"], ["reserved", "reserved", "32비트보다 긴 명령 길이 인코딩 열"]],
+  ];
+  const KIND_STYLE = { memory: "f-teal-soft", float: "f-violet-soft", custom: "f-ok-soft", system: "f-gold-soft", integer: "f-accent-soft", control: "f-gold-soft", reserved: "f-surface" };
+
+  function create(tag, attributes, text) {
+    const element = document.createElementNS(namespace, tag);
+    Object.entries(attributes).forEach(([name, value]) => element.setAttribute(name, value));
+    if (text !== undefined) element.textContent = text;
+    return element;
+  }
+  svg.appendChild(create("text", { x: 60, y: 26, "text-anchor": "middle", class: "t-faint" }, "inst[6:5]"));
+  svg.appendChild(create("text", { x: LEFT + CELL_WIDTH * 4, y: 18, "text-anchor": "middle", class: "t-faint" }, "inst[4:2]"));
+  for (let column = 0; column < 8; column += 1) {
+    const label = column.toString(2).padStart(3, "0") + (column === 7 ? " (>32b)" : "");
+    svg.appendChild(create("text", { x: LEFT + CELL_WIDTH * column + CELL_WIDTH / 2, y: 36, "text-anchor": "middle", class: "t-mono", style: "font-size:12px" }, label));
+  }
+  const cells = [];
+  MAP.forEach((rowItems, row) => {
+    svg.appendChild(create("text", { x: 60, y: TOP + CELL_HEIGHT * row + CELL_HEIGHT / 2 + 5, "text-anchor": "middle", class: "t-mono" }, row.toString(2).padStart(2, "0")));
+    rowItems.forEach(([name, kind, description], column) => {
+      const opcodeValue = (row << 5) | (column << 2) | 0b11;
+      const group = create("g", { class: "opcode-cell", tabindex: "0", role: "button" });
+      const x = LEFT + CELL_WIDTH * column;
+      const y = TOP + CELL_HEIGHT * row;
+      group.appendChild(create("rect", { x: x + 2, y: y + 2, width: CELL_WIDTH - 4, height: CELL_HEIGHT - 4, rx: 7, class: KIND_STYLE[kind] }));
+      const isItalic = kind === "custom" || kind === "reserved";
+      group.appendChild(create("text", { x: x + CELL_WIDTH / 2, y: y + 26, "text-anchor": "middle", class: kind === "reserved" ? "t-faint" : "t-mono", style: "font-size:12.5px;font-weight:700" + (isItalic ? ";font-style:italic" : "") }, name));
+      group.appendChild(create("text", { x: x + CELL_WIDTH / 2, y: y + 44, "text-anchor": "middle", class: "t-faint", style: "font-size:11px;font-family:var(--mono)" }, opcodeValue.toString(2).padStart(7, "0")));
+      const select = () => { pausedSeconds = PAUSE_AFTER_CLICK_SECONDS; showCell(cells.length > 0 ? cellIndexOf(row, column) : 0, true); };
+      group.addEventListener("click", select);
+      group.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); select(); } });
+      svg.appendChild(group);
+      cells.push({ row, column, name, description, opcodeValue, kind });
+    });
+  });
+  const cellIndexOf = (row, column) => row * 8 + column;
+  const cursor = create("rect", { id: "opcode-cursor", x: LEFT, y: TOP, width: CELL_WIDTH, height: CELL_HEIGHT, rx: 9, fill: "none", stroke: "var(--accent-2)", "stroke-width": 3.5, "pointer-events": "none" });
+  svg.appendChild(cursor);
+
+  let currentIndex = 0;
+  let elapsedSeconds = 0;
+  let pausedSeconds = 0;
+  function showCell(index, shouldFilterCard) {
+    currentIndex = index;
+    const cell = cells[index];
+    cursor.setAttribute("transform", "translate(" + (cell.column * CELL_WIDTH) + "," + (cell.row * CELL_HEIGHT) + ")");
+    // 예약·사용자 정의 칸에는 카드에 올릴 표준 명령이 없으므로 거르지 않는다
+    const canFilterCard = shouldFilterCard && cell.kind !== "reserved" && cell.kind !== "custom";
+    info.innerHTML = "<b>" + cell.name + "</b> <code>" + cell.opcodeValue.toString(2).padStart(7, "0") + "</code> — " + cell.description +
+      (canFilterCard ? ' <span class="pill gold">명령어 카드를 걸렀다 ↑</span>' : "");
+    if (canFilterCard) {
+      document.dispatchEvent(new CustomEvent("reference-opcode-filter", { detail: { value: cell.opcodeValue, label: cell.name } }));
+    }
+  }
+  book.animationLoop(svg, (deltaSeconds) => {
+    if (pausedSeconds > 0) { pausedSeconds -= deltaSeconds; return; }
+    elapsedSeconds += deltaSeconds;
+    if (elapsedSeconds < SECONDS_PER_CELL) return;
+    elapsedSeconds = 0;
+    showCell((currentIndex + 1) % cells.length, false);
+  });
+  showCell(0, false);
+})();
+
+/* ---------------------------------------------------------------------------
+   레지스터 카드 (그림 24-4): psABI 의 이름과 역할로 칸을 칠한다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const Riscv = window.Riscv;
+  const svg = document.getElementById("register-card-svg");
+  const namespace = "http://www.w3.org/2000/svg";
+  const PANEL_WIDTH = 410;
+  const COLUMNS = 4;
+  const ROWS = 8;
+  const CELL_WIDTH = 100;
+  const CELL_HEIGHT = 40;
+  const TOP = 46;
+  const FLOAT_NAMES = ["ft0", "ft1", "ft2", "ft3", "ft4", "ft5", "ft6", "ft7", "fs0", "fs1", "fa0", "fa1", "fa2", "fa3", "fa4", "fa5", "fa6", "fa7",
+    "fs2", "fs3", "fs4", "fs5", "fs6", "fs7", "fs8", "fs9", "fs10", "fs11", "ft8", "ft9", "ft10", "ft11"];
+  function create(tag, attributes, text) {
+    const element = document.createElementNS(namespace, tag);
+    Object.entries(attributes).forEach(([name, value]) => element.setAttribute(name, value));
+    if (text !== undefined) element.textContent = text;
+    return element;
+  }
+  function integerStyle(abiName) {
+    if (abiName === "zero") return "f-surface-2";
+    if (abiName === "ra") return "f-gold-soft";
+    if (abiName === "sp" || abiName === "gp" || abiName === "tp") return "f-violet-soft";
+    if (abiName.startsWith("a")) return "f-accent-soft";
+    if (abiName.startsWith("s")) return "f-teal-soft";
+    return "f-surface";
+  }
+  function floatStyle(abiName) {
+    if (abiName.startsWith("fa")) return "f-accent-soft";
+    if (abiName.startsWith("fs")) return "f-teal-soft";
+    return "f-surface";
+  }
+  function drawPanel(offsetX, title, names, prefix, styleOf, isCalleeSaved) {
+    svg.appendChild(create("text", { x: offsetX + PANEL_WIDTH / 2, y: 26, "text-anchor": "middle", class: "t t-bold", style: "font-size:16px" }, title));
+    names.forEach((abiName, number) => {
+      const column = Math.floor(number / ROWS);
+      const row = number % ROWS;
+      const x = offsetX + column * (CELL_WIDTH + 3);
+      const y = TOP + row * (CELL_HEIGHT + 3);
+      svg.appendChild(create("rect", { x, y, width: CELL_WIDTH, height: CELL_HEIGHT, rx: 7, class: styleOf(abiName) }));
+      svg.appendChild(create("text", { x: x + 8, y: y + 25, class: "t-faint", style: "font-family:var(--mono);font-size:11.5px" }, prefix + number));
+      svg.appendChild(create("text", { x: x + CELL_WIDTH - 8, y: y + 26, "text-anchor": "end", class: "t-mono", style: "font-size:14px;font-weight:700" }, abiName + (isCalleeSaved(number) ? "★" : "")));
+    });
+  }
+  drawPanel(10, "정수 레지스터 x0–x31", Riscv.ABI_NAMES, "x", integerStyle, (number) => Riscv.CALLEE_SAVED.has(number));
+  drawPanel(440, "부동소수점 레지스터 f0–f31", FLOAT_NAMES, "f", floatStyle, (number) => FLOAT_NAMES[number].startsWith("fs"));
+  // 범례
+  const LEGEND = [["f-surface-2", "항상 0"], ["f-gold-soft", "복귀 주소"], ["f-violet-soft", "sp·gp·tp"], ["f-accent-soft", "인자·반환값 (a/fa)"], ["f-teal-soft", "저장 (s/fs) ★"], ["f-surface", "임시 (t/ft)"]];
+  const legendTop = TOP + ROWS * (CELL_HEIGHT + 3) + 12;
+  LEGEND.forEach(([style, label], index) => {
+    const x = 14 + index * 142;
+    svg.appendChild(create("rect", { x, y: legendTop, width: 18, height: 14, rx: 3, class: style }));
+    svg.appendChild(create("text", { x: x + 24, y: legendTop + 12, class: "t-dim", style: "font-size:12.5px" }, label));
+  });
+})();
+
+/* ---------------------------------------------------------------------------
+   확장 지도 (그림 24-6): 무리마다 상자를 만들고 확장 이름을 장 링크로 단다.
+   글자 폭은 고정폭 글꼴 기준으로 어림해 줄을 바꾼다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const svg = document.getElementById("extension-map-svg");
+  const namespace = "http://www.w3.org/2000/svg";
+  const VIEW_WIDTH = 900;
+  const COLUMN_COUNT = 3;
+  const GAP = 12;
+  const BOX_WIDTH = (VIEW_WIDTH - 20 - GAP * (COLUMN_COUNT - 1)) / COLUMN_COUNT;
+  const CHIP_HEIGHT = 22;
+  const CHIP_GAP = 5;
+  const CHARACTER_WIDTH = 7.6;
+  const CHIP_PADDING = 14;
+  const BOX_HEADER = 36;
+  const UNPRIVILEGED = [
+    { title: "베이스 정수", chapter: "rv32i", number: "5·6", style: "f-accent-soft", items: [["RV32I", "rv32i"], ["RV64I", "rv64"], ["RV32E", "rv64"], ["RV64E", "rv64"]] },
+    { title: "범용 Zi* · MOP", chapter: "small-extensions", number: "16", style: "f-surface", items: ["Zifencei", "Zicsr", "Zicntr", "Zihpm", "Zihintntl", "Zihintpause", "Zimop", "Zcmop", "Zicond"] },
+    { title: "곱셈·나눗셈", chapter: "multiply", number: "9", style: "f-surface", items: ["M", "Zmmul"] },
+    { title: "원자적 연산", chapter: "atomic", number: "10", style: "f-surface", items: ["A", "Zalrsc", "Zaamo", "Zawrs", "Zacas", "Zabha", "Zalasr"] },
+    { title: "메모리 모델", chapter: "memory-model", number: "11", style: "f-surface", items: ["RVWMO", "Ztso"] },
+    { title: "캐시 블록 연산 (CMO)", chapter: "small-extensions", number: "16", style: "f-surface", items: ["Zicbom", "Zicbop", "Zicboz"] },
+    { title: "부동소수점", chapter: "floating-point", number: "12", style: "f-violet-soft", items: ["F", "D", "Q", "Zfh", "Zfhmin", "Zfbfmin", "Zfa", "Zfinx", "Zdinx", "Zhinx", "Zhinxmin"] },
+    { title: "압축 명령", chapter: "compressed", number: "13", style: "f-teal-soft", items: ["C", "Zca", "Zcf", "Zcd", "Zcb", "Zcmp", "Zcmt", "Zce"] },
+    { title: "비트 조작 · 스칼라 암호", chapter: "bit-manipulation", number: "14", style: "f-gold-soft", items: ["B", "Zba", "Zbb", "Zbs", "Zbc", "Zbkb", "Zbkc", "Zbkx", "Zkn", "Zks", "Zkr", "Zkt", "Zk"] },
+    { title: "벡터 · 벡터 암호", chapter: "vector", number: "15", style: "f-violet-soft", items: ["V", "Zve*", "Zvl*", "Zvfh", "Zvfhmin", "Zvfbfmin", "Zvfbfwma", "Zvbb", "Zvbc", "Zvkg", "Zvkn*", "Zvks*", "Zvkt"] },
+    { title: "제어 흐름 무결성 · 기타", chapter: "small-extensions", number: "16", style: "f-surface", items: ["Zicfilp", "Zicfiss", "Zilsd", "Zclsd"] },
+  ];
+  const PRIVILEGED = [
+    { title: "특권 기본 · CSR", chapter: "privilege", number: "17", style: "f-accent-soft", items: ["Sm1p13", "Ss1p13", "Smstateen", "Ssstateen", "Smcsrind", "Sscsrind", "Smcntrpmf", "Smcdeleg", "Sscofpmf", "Smctr", "Ssqosid"] },
+    { title: "트랩 · 타이머", chapter: "trap", number: "18", style: "f-surface", items: ["Smrnmi", "Smdbltrp", "Ssdbltrp", "Sstc"] },
+    { title: "가상 메모리", chapter: "virtual-memory", number: "19", style: "f-teal-soft", items: ["Sv32", "Sv39", "Sv48", "Sv57", "Svnapot", "Svpbmt", "Svinval", "Svadu", "Svvptc", "Svrsw60t59b"] },
+    { title: "메모리 보호 · 포인터 마스킹", chapter: "memory-protection", number: "20", style: "f-gold-soft", items: ["PMP", "Smepmp", "Smmpm", "Smnpm", "Ssnpm", "Sspm", "Supm"] },
+    { title: "하이퍼바이저", chapter: "hypervisor", number: "21", style: "f-violet-soft", items: ["H"] },
+  ];
+
+  function create(tag, attributes, text) {
+    const element = document.createElementNS(namespace, tag);
+    Object.entries(attributes).forEach(([name, value]) => element.setAttribute(name, value));
+    if (text !== undefined) element.textContent = text;
+    return element;
+  }
+  // 상자 하나를 그리고 높이를 돌려준다
+  function drawBox(group, x, y, parent) {
+    const items = group.items.map((item) => (Array.isArray(item) ? item : [item, group.chapter]));
+    // 칩 줄 바꿈 계산
+    const positions = [];
+    let cursorX = 10;
+    let cursorY = BOX_HEADER;
+    items.forEach(([name]) => {
+      const chipWidth = name.length * CHARACTER_WIDTH + CHIP_PADDING;
+      if (cursorX + chipWidth > BOX_WIDTH - 10) { cursorX = 10; cursorY += CHIP_HEIGHT + CHIP_GAP; }
+      positions.push({ x: cursorX, y: cursorY, width: chipWidth });
+      cursorX += chipWidth + CHIP_GAP;
+    });
+    const height = cursorY + CHIP_HEIGHT + 10;
+    const box = create("g", { transform: "translate(" + x + "," + y + ")" });
+    box.appendChild(create("rect", { width: BOX_WIDTH, height, rx: 12, class: group.style }));
+    const titleLink = create("a", { href: group.chapter + ".html" });
+    titleLink.appendChild(create("text", { x: 12, y: 23, class: "t t-bold", style: "font-size:14px" }, group.title));
+    box.appendChild(titleLink);
+    box.appendChild(create("text", { x: BOX_WIDTH - 12, y: 23, "text-anchor": "end", class: "t-accent", style: "font-size:12.5px" }, group.number + "장"));
+    items.forEach(([name, chapter], index) => {
+      const position = positions[index];
+      const link = create("a", { href: chapter + ".html" });
+      link.appendChild(create("rect", { x: position.x, y: position.y, width: position.width, height: CHIP_HEIGHT, rx: 11, class: "f-elev map-chip" }));
+      link.appendChild(create("text", { x: position.x + position.width / 2, y: position.y + 15.5, "text-anchor": "middle", class: "t-mono", style: "font-size:12.5px" }, name));
+      box.appendChild(link);
+    });
+    parent.appendChild(box);
+    return height;
+  }
+  // 열마다 아래로 쌓는다: 가장 낮은 열에 다음 상자를 넣는 방식
+  function drawSection(groups, title, startY) {
+    svg.appendChild(create("text", { x: 10, y: startY + 18, class: "t-gold", style: "font-size:16px" }, title));
+    const columnHeights = new Array(COLUMN_COUNT).fill(startY + 30);
+    groups.forEach((group) => {
+      let column = 0;
+      for (let index = 1; index < COLUMN_COUNT; index += 1) if (columnHeights[index] < columnHeights[column]) column = index;
+      const x = 10 + column * (BOX_WIDTH + GAP);
+      const height = drawBox(group, x, columnHeights[column], svg);
+      columnHeights[column] += height + GAP;
+    });
+    return Math.max(...columnHeights);
+  }
+  const middle = drawSection(UNPRIVILEGED, "ISA 매뉴얼 1권 · 비특권 (Unprivileged)", 0);
+  const bottom = drawSection(PRIVILEGED, "ISA 매뉴얼 2권 · 특권 (Privileged)", middle + 8);
+  svg.setAttribute("viewBox", "0 0 " + VIEW_WIDTH + " " + Math.ceil(bottom + 4));
+})();
+
+/* ---------------------------------------------------------------------------
+   용어집 자료와 화면: 검색 목록 + 오늘의 용어 카드(뒤집히는 애니메이션)
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  // [용어, 영어, 정의, 장 슬러그]
+  const TERMS = [
+    ["하트", "hart", "자기만의 pc와 레지스터를 갖고 명령을 독립적으로 가져와 실행하는 흐름(hardware thread). 코어 하나에 여럿 있을 수 있다.", "intro"],
+    ["실행 환경 인터페이스", "EEI", "프로그램이 시작하는 상태, 하트 수, ecall 처리 방식, 쓸 수 있는 메모리 등 하트 바깥 세계를 정한 약속(Execution Environment Interface).", "intro"],
+    ["ISA", "Instruction Set Architecture", "기계어 숫자의 뜻을 정한 하드웨어와 소프트웨어 사이의 계약. 그 아래 구현은 마이크로아키텍처라 한다.", "intro"],
+    ["비준", "ratification", "공개 검토와 투표를 거쳐 규격을 확정하는 절차. 비준된 확장의 인코딩과 의미는 이후 바뀌지 않는다.", "intro"],
+    ["트랩", "trap", "예외나 인터럽트 때문에 제어가 트랩 처리기로 넘어가는 일. contained·requested·invisible·fatal 네 종류로도 나눈다.", "trap"],
+    ["ISA 문자열", "ISA string", "rv64imafdc_zicsr처럼 베이스와 확장 이름을 이어 쓴 이름. 대소문자를 구별하지 않고, 여러 글자 확장은 밑줄로 나눈다.", "modular"],
+    ["G", "general-purpose", "IMAFD_Zicsr_Zifencei 묶음의 약자. RV64GC는 여기에 C를 더한 것이다.", "modular"],
+    ["Z 확장", "Z extensions", "Z로 시작하는 여러 글자 표준 비특권 확장. 두 번째 글자가 관련 범주(I·M·A·F·D·Q·L·C·B·K·J·T·P·V·H)를 나타낸다.", "modular"],
+    ["x0", "zero register", "읽으면 늘 0이고 쓰기는 무시되는 정수 레지스터. 결과를 버리거나 상수 0이 필요할 때 쓴다.", "registers"],
+    ["XLEN", "XLEN", "정수 레지스터의 비트 폭. RV32는 32, RV64는 64다.", "rv64"],
+    ["W 명령", "word instructions", "RV64에서 하위 32비트로 계산하고 결과를 64비트로 부호 확장하는 addw·subw·sllw 같은 명령.", "rv64"],
+    ["RV32E", "RV32E / RV64E", "정수 레지스터를 16개(x0–x15)로 줄인 임베디드용 베이스.", "rv64"],
+    ["IALIGN", "IALIGN", "명령어 주소 정렬 단위. 기본 32비트이고, 압축 명령(C·Zca)이 있으면 16비트다.", "compressed"],
+    ["ILEN", "ILEN", "구현이 지원하는 가장 긴 명령어의 비트 수.", "encoding"],
+    ["즉시값", "immediate", "명령어 안에 들어 있는 상수. 형식마다 비트가 흩어져 있고, 최상위 비트(inst[31])가 늘 부호 비트다.", "encoding"],
+    ["부호 확장", "sign extension", "좁은 값을 넓힐 때 최상위(부호) 비트를 위쪽 비트에 복사하는 것. 음수가 그대로 음수로 남는다.", "encoding"],
+    ["HINT", "HINT", "rd=x0처럼 아키텍처 상태를 바꾸지 않는 인코딩 중 성능 힌트용으로 지정한 것. 모르는 구현은 nop처럼 실행하면 된다.", "rv32i"],
+    ["의사 명령", "pseudoinstruction", "li·mv·ret처럼 어셈블러가 실제 명령 하나 이상으로 바꿔 주는 편의용 명령.", "rv32i"],
+    ["호출 규약", "calling convention", "인자·반환값을 어느 레지스터에 두고, 어느 레지스터를 누가 보존할지 정한 약속. psABI가 정한다.", "abi"],
+    ["피호출자 저장 레지스터", "callee-saved", "불린 함수가 값을 보존해야 하는 레지스터(s0–s11, sp, fs0–fs11). 쓰려면 스택에 저장했다가 복원한다.", "abi"],
+    ["해저드", "hazard", "파이프라인에서 앞 명령의 결과나 자원이 아직 준비되지 않아 다음 명령이 그대로 진행할 수 없는 상황.", "pipeline"],
+    ["포워딩", "forwarding", "결과를 레지스터 파일에 쓰기 전에 뒤 명령으로 바로 건네 지연을 줄이는 기법.", "pipeline"],
+    ["Zmmul", "Zmmul", "M 확장에서 곱셈 명령만 떼어 낸 확장. 나눗셈 하드웨어가 부담스러운 작은 코어용.", "multiply"],
+    ["LR/SC", "load-reserved / store-conditional", "주소를 예약하며 읽고(lr), 그 사이 다른 쓰기가 없었을 때만 저장하는(sc) 원자적 연산 쌍.", "atomic"],
+    ["예약 집합", "reservation set", "lr이 예약한 바이트들의 집합. 그 안에 다른 하트의 저장이 있으면 짝이 되는 sc는 실패한다.", "atomic"],
+    ["AMO", "atomic memory operation", "읽기-수정-쓰기를 한 명령으로 원자적으로 하는 amoadd·amoswap 같은 명령.", "atomic"],
+    ["aq / rl", "acquire / release", "원자적 명령에 붙는 순서 비트. aq는 뒤 접근이 앞질러 가지 못하게, rl은 앞 접근이 뒤로 밀리지 않게 한다.", "atomic"],
+    ["RVWMO", "RISC-V Weak Memory Ordering", "RISC-V의 기본 메모리 일관성 모델. 서로 다른 주소 접근의 순서를 많이 풀어 두고 필요한 곳만 fence로 묶는다.", "memory-model"],
+    ["보존 프로그램 순서", "PPO, preserved program order", "프로그램 순서 가운데 전역 메모리 순서에서도 반드시 지켜져야 하는 부분. RVWMO는 이것을 규칙 13개로 정의한다.", "memory-model"],
+    ["FENCE", "fence", "앞뒤 메모리·I/O 접근 사이의 순서를 강제하는 명령. pred·succ 비트로 어떤 접근끼리 묶을지 고른다.", "memory-model"],
+    ["Ztso", "Ztso", "총 저장 순서(TSO) 메모리 모델을 보장하는 확장. x86용 코드를 옮길 때 유리하다.", "memory-model"],
+    ["리트머스 테스트", "litmus test", "두세 하트의 짧은 프로그램과 허용·금지 결과로 메모리 모델의 성질을 확인하는 시험.", "memory-model"],
+    ["fcsr", "floating-point control and status register", "부동소수점 제어·상태 CSR. 하위 5비트가 누적 예외 플래그 fflags(NV·DZ·OF·UF·NX), 그 위 3비트가 반올림 모드 frm이다.", "floating-point"],
+    ["NaN 박싱", "NaN-boxing", "좁은 부동소수점 값을 넓은 f 레지스터에 둘 때 남는 상위 비트를 모두 1로 채우는 규칙. 그러면 넓게 보면 NaN이 된다.", "floating-point"],
+    ["정규 NaN", "canonical NaN", "연산이 NaN을 만들 때 내놓는 정해진 비트 패턴. 단정밀도는 0x7fc00000이다.", "floating-point"],
+    ["반올림 모드", "rounding mode", "RNE·RTZ·RDN·RUP·RMM 다섯 가지. 명령의 rm 칸에 직접 적거나 dyn(111)으로 frm을 따르게 한다.", "floating-point"],
+    ["RVC", "compressed instructions", "자주 쓰는 명령을 16비트로 줄인 압축 명령 집합. 코드 크기를 크게 줄인다.", "compressed"],
+    ["Zcmp", "Zcmp", "함수 앞뒤의 레지스터 저장·복원을 cm.push·cm.pop 한 명령으로 줄이는 압축 확장.", "compressed"],
+    ["Zba · Zbb · Zbs", "address generation / basic / single-bit", "주소 계산(shNadd), 기본 비트 조작(clz·cpop·min·max·rev8), 단일 비트 연산(bset·bclr) 확장. 셋을 합쳐 B라 한다.", "bit-manipulation"],
+    ["Zkt", "data-independent execution latency", "정해진 명령들의 실행 시간이 데이터 값에 따라 달라지지 않음을 보장하는 확장. 타이밍 부채널 방지에 쓴다.", "bit-manipulation"],
+    ["VLEN", "VLEN", "벡터 레지스터 하나의 비트 수. 구현마다 다르며 소프트웨어는 vlenb CSR로 알 수 있다.", "vector"],
+    ["SEW", "selected element width", "vtype으로 고른 벡터 원소 하나의 비트 폭(8·16·32·64).", "vector"],
+    ["LMUL", "vector register group multiplier", "벡터 레지스터 몇 개를 묶어 하나처럼 쓸지 정하는 배수. 1/8부터 8까지.", "vector"],
+    ["VLMAX", "VLMAX", "한 번에 처리할 수 있는 최대 원소 수. VLMAX = LMUL × VLEN / SEW.", "vector"],
+    ["vl", "vector length", "이번 벡터 명령이 처리할 원소 수를 담은 CSR. vsetvli가 정한다.", "vector"],
+    ["스트립 마이닝", "strip mining", "긴 배열을 VLMAX 이하 조각으로 나눠 루프마다 vsetvli로 남은 길이를 맞추며 처리하는 방법.", "vector"],
+    ["꼬리·마스크 무관", "tail / mask agnostic", "vl 뒤쪽(꼬리)이나 마스크로 꺼진 원소를 보존하지 않아도 된다고 허락하는 vtype의 vta·vma 비트.", "vector"],
+    ["CMO", "cache-block management operations", "캐시 블록 단위의 clean·flush·inval(Zicbom), prefetch(Zicbop), zero(Zicboz) 명령.", "small-extensions"],
+    ["Zicond", "integer conditional operations", "조건이 참·거짓일 때 값을 0으로 만드는 czero.eqz·czero.nez. 분기 없는 선택을 만든다.", "small-extensions"],
+    ["MOP", "may-be-operation", "다른 확장이 다시 정의하기 전까지는 rd에 0을 쓰기만 하는 Zimop 명령. 새 기능을 옛 하드웨어에서도 안전하게 돌리려는 장치다.", "small-extensions"],
+    ["CFI", "control-flow integrity", "간접 점프 목적지를 lpad로 표시하는 Zicfilp와, 복귀 주소를 따로 보관하는 그림자 스택 Zicfiss로 제어 흐름 탈취를 막는다.", "small-extensions"],
+    ["특권 모드", "privilege mode", "M(머신)·S(슈퍼바이저)·U(사용자) 모드. H 확장이 있으면 VS·VU 모드가 더해진다.", "privilege"],
+    ["CSR", "control and status register", "12비트 주소로 고르는 제어·상태 레지스터. csrrw·csrrs·csrrc 등으로 읽고 쓴다.", "privilege"],
+    ["WARL", "Write Any values, Reads Legal values", "아무 값이나 써도 되지만 읽으면 언제나 합법적인 값이 나오는 CSR 필드.", "privilege"],
+    ["WLRL", "Write/Read Only Legal values", "소프트웨어가 합법적인 값만 써야 하는 CSR 필드. 불법 값을 쓴 뒤 읽은 값은 보장되지 않는다.", "privilege"],
+    ["WPRI", "Reserved Writes Preserve values, Reads Ignore values", "미래를 위해 예약된 필드. 쓸 때는 기존 값을 보존하고, 읽은 값은 무시해야 한다.", "privilege"],
+    ["misa", "machine ISA register", "XLEN과 A–Z 한 글자 확장 지원 여부를 비트로 보여 주는 M 모드 CSR(0x301).", "privilege"],
+    ["mstatus", "machine status register", "MIE·MPIE·MPP·SIE·SPP·SUM·MXR·FS 등 하트의 전역 상태를 담은 CSR(0x300).", "privilege"],
+    ["mtvec", "machine trap-vector base address", "M 모드 트랩 처리기 주소(BASE)와 방식(MODE: Direct 또는 Vectored)을 담는 CSR.", "trap"],
+    ["mcause", "machine cause register", "트랩 원인. 최상위 비트가 1이면 인터럽트, 나머지 비트가 원인 코드다.", "trap"],
+    ["mepc", "machine exception program counter", "트랩이 난 명령(또는 인터럽트로 중단된 지점)의 주소. mret이 여기로 돌아간다.", "trap"],
+    ["위임", "delegation", "medeleg·mideleg로 일부 예외·인터럽트를 M 모드를 거치지 않고 S 모드가 바로 처리하게 넘기는 것.", "trap"],
+    ["satp", "supervisor address translation and protection", "주소 변환 방식(MODE: Bare·Sv39·Sv48·Sv57 등), ASID, 루트 페이지 테이블의 물리 페이지 번호를 담는 CSR.", "virtual-memory"],
+    ["PTE", "page table entry", "페이지 테이블 한 칸. 물리 페이지 번호와 V·R·W·X·U·G·A·D 비트를 담는다. R·W·X가 모두 0이면 다음 단계를 가리킨다.", "virtual-memory"],
+    ["슈퍼페이지", "superpage", "중간 단계의 PTE가 잎이 되어 한 번에 큰 영역(Sv39에서 2 MiB·1 GiB)을 매핑하는 페이지.", "virtual-memory"],
+    ["ASID", "address space identifier", "프로세스(주소 공간)마다 붙이는 번호. TLB 항목을 구별해 문맥 교환 때 TLB 전체를 비우지 않아도 되게 한다.", "virtual-memory"],
+    ["TLB", "translation lookaside buffer", "최근 주소 변환 결과를 담아 두는 캐시. 페이지 테이블을 바꾸면 sfence.vma로 맞춘다.", "virtual-memory"],
+    ["sfence.vma", "supervisor memory-management fence", "페이지 테이블 갱신과 이후 주소 변환 사이 순서를 맞추고 해당 TLB 항목을 무효화하는 명령.", "virtual-memory"],
+    ["PMA", "physical memory attributes", "물리 주소 영역마다 고정된 성질(메인 메모리인지 I/O인지, 캐시 가능 여부, 원자 연산 지원 등).", "memory-protection"],
+    ["PMP", "physical memory protection", "M 모드가 pmpcfg·pmpaddr로 물리 주소 영역마다 S·U 모드의 읽기·쓰기·실행 권한을 정하는 장치.", "memory-protection"],
+    ["TOR", "top of range", "앞 항목의 pmpaddr부터 이번 항목의 pmpaddr 직전까지를 영역으로 잡는 PMP 주소 방식.", "memory-protection"],
+    ["NAPOT", "naturally aligned power-of-two", "크기가 2의 거듭제곱이고 그 크기로 정렬된 영역. pmpaddr 하위의 연속된 1 개수로 크기를 나타낸다. Svnapot은 같은 생각을 페이지 매핑에 쓴다.", "memory-protection"],
+    ["Smepmp", "PMP enhancements", "M 모드 자신도 PMP 규칙에 묶어, M 모드가 사용자 메모리를 실수로 실행·접근하지 못하게 하는 확장.", "memory-protection"],
+    ["포인터 마스킹", "pointer masking", "주소 상위 PMLEN 비트를 무시하게 해서 태그를 담을 수 있게 하는 기능(Supm·Ssnpm·Smnpm 등).", "memory-protection"],
+    ["HS 모드", "hypervisor-extended supervisor mode", "H 확장이 있을 때의 S 모드. 하이퍼바이저나 일반 OS가 여기서 돈다.", "hypervisor"],
+    ["VS / VU 모드", "virtual supervisor / virtual user", "게스트 커널(VS)과 게스트 응용(VU)이 도는 가상화된 모드. 게스트는 자신이 S·U 모드에 있다고 느낀다.", "hypervisor"],
+    ["G-stage", "guest-physical translation", "게스트 물리 주소를 실제(슈퍼바이저) 물리 주소로 바꾸는 2단계 변환. hgatp가 루트 테이블을 가리킨다.", "hypervisor"],
+    ["SBI", "Supervisor Binary Interface", "S 모드 OS가 ecall로 M 모드 펌웨어에 타이머·IPI·하트 시작 등을 요청하는 약속. a7에 확장 ID, a6에 함수 ID를 넣는다.", "platform"],
+    ["OpenSBI", "OpenSBI", "SBI를 구현한 대표적인 오픈 소스 M 모드 펌웨어.", "platform"],
+    ["PLIC", "Platform-Level Interrupt Controller", "여러 외부 인터럽트를 우선순위·임계값으로 걸러 하트에 전달하고 claim/complete로 처리하는 인터럽트 컨트롤러.", "platform"],
+    ["AIA", "Advanced Interrupt Architecture", "메시지 신호 인터럽트(MSI)와 가상화를 지원하는 RISC-V의 새 인터럽트 구조. IMSIC와 APLIC로 이루어진다.", "platform"],
+    ["IMSIC", "Incoming MSI Controller", "하트마다 붙어 메모리 쓰기 형태로 온 MSI를 받아 인터럽트 파일에 기록하는 AIA 장치.", "platform"],
+    ["APLIC", "Advanced Platform-Level Interrupt Controller", "선으로 들어오는 인터럽트를 받아 하트에 직접 전달하거나 MSI로 바꿔 IMSIC에 보내는 AIA 장치.", "platform"],
+    ["mtime / mtimecmp", "machine timer registers", "메모리 매핑된 실시간 카운터와 비교 레지스터. mtime ≥ mtimecmp가 되면 M 모드 타이머 인터럽트가 걸린다.", "platform"],
+    ["장치 트리", "device tree", "하드웨어 구성(하트, 메모리, 장치, ISA 확장 목록)을 OS에 알려 주는 자료 구조. riscv,isa-extensions 속성을 쓴다.", "platform"],
+    ["프로파일", "profile", "비준된 확장 가운데 필수와 선택을 정해 이름 하나로 묶은 것. RVA23U64처럼 계열·연도·특권·XLEN으로 이름 짓는다.", "profiles"],
+    ["RVA23", "RVA23", "2024년 비준된 64비트 응용 프로세서 프로파일. U64는 V를, S64는 하이퍼바이저(H)까지 필수로 한다.", "profiles"],
+    ["hwprobe", "riscv_hwprobe", "리눅스 사용자 프로그램이 하트의 확장 지원 여부를 키-값 쌍으로 묻는 시스템 호출.", "profiles"],
+    ["주 opcode", "major opcode", "32비트 명령의 inst[6:2]가 고르는 32가지 큰 분류. LOAD·OP·SYSTEM 등.", "reference"],
+  ];
+  const CHAPTERS = book.CHAPTERS;
+  const chapterBySlug = Object.fromEntries(CHAPTERS.map((chapter) => [chapter.slug, chapter]));
+  const AUTO_FLIP_SECONDS = 3.2;
+  const AUTO_NEXT_SECONDS = 6.4;
+
+  // 목록
+  const list = document.getElementById("glossary-list");
+  const searchInput = document.getElementById("glossary-search");
+  const chapterSelect = document.getElementById("glossary-chapter");
+  const usedSlugs = CHAPTERS.filter((chapter) => TERMS.some((term) => term[3] === chapter.slug));
+  chapterSelect.innerHTML += usedSlugs.map((chapter) => '<option value="' + chapter.slug + '">' + chapter.number + " " + chapter.title + "</option>").join("");
+  const sortedTerms = TERMS.slice().sort((first, second) => first[0].localeCompare(second[0], "ko"));
+  function chapterLink(slug) {
+    const chapter = chapterBySlug[slug];
+    return '<a href="' + slug + '.html">→ ' + Number(chapter.number) + "장 " + chapter.title + "</a>";
+  }
+  function renderList() {
+    const query = searchInput.value.trim().toLowerCase();
+    const chapterFilter = chapterSelect.value;
+    const shown = sortedTerms.filter(([term, english, definition, slug]) => {
+      if (chapterFilter !== "all" && slug !== chapterFilter) return false;
+      if (!query) return true;
+      return (term + " " + english + " " + definition).toLowerCase().includes(query);
+    });
+    list.innerHTML = shown.map(([term, english, definition, slug]) =>
+      '<div class="glossary-entry"><div class="entry-head"><b>' + term + '</b><span class="entry-english">' + english + "</span></div><p>" + definition + "</p>" + chapterLink(slug) + "</div>").join("") ||
+      '<p style="color:var(--text-faint)">찾는 용어가 없다.</p>';
+    document.getElementById("glossary-count").textContent = TERMS.length + "개 중 " + shown.length + "개";
+  }
+  searchInput.addEventListener("input", renderList);
+  chapterSelect.addEventListener("change", renderList);
+  renderList();
+
+  // 오늘의 용어 카드: 날짜로 첫 용어를 고르고, 앞면 → 뒷면 → 다음 용어 순으로 돈다
+  const card = document.getElementById("term-card");
+  const MILLISECONDS_PER_DAY = 86400000;
+  let termIndex = Math.floor(Date.now() / MILLISECONDS_PER_DAY) % TERMS.length;
+  let isAutomatic = true;
+  let elapsedSeconds = 0;
+  function showTerm(index) {
+    const [term, english, definition, slug] = TERMS[index];
+    card.classList.remove("flipped");
+    document.getElementById("term-card-name").textContent = term;
+    document.getElementById("term-card-english").textContent = english;
+    document.getElementById("term-card-definition").textContent = definition;
+    const link = document.getElementById("term-card-link");
+    const chapter = chapterBySlug[slug];
+    link.href = slug + ".html";
+    link.textContent = "→ " + Number(chapter.number) + "장에서 자세히";
+  }
+  function flip() { card.classList.toggle("flipped"); }
+  function next() { termIndex = (termIndex + 1) % TERMS.length; elapsedSeconds = 0; showTerm(termIndex); }
+  card.addEventListener("click", (event) => { if (event.target.closest("a")) return; flip(); elapsedSeconds = 0; });
+  card.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); flip(); } });
+  document.getElementById("term-card-next").addEventListener("click", next);
+  document.getElementById("term-card-flip").addEventListener("click", () => { flip(); elapsedSeconds = 0; });
+  const autoButton = document.getElementById("term-card-auto");
+  autoButton.addEventListener("click", () => {
+    isAutomatic = !isAutomatic;
+    autoButton.textContent = isAutomatic ? "자동 넘김 끄기" : "자동 넘김 켜기";
+  });
+  book.animationLoop(card, (deltaSeconds) => {
+    if (!isAutomatic) return;
+    const before = elapsedSeconds;
+    elapsedSeconds += deltaSeconds;
+    if (before < AUTO_FLIP_SECONDS && elapsedSeconds >= AUTO_FLIP_SECONDS && !card.classList.contains("flipped")) flip();
+    if (elapsedSeconds >= AUTO_NEXT_SECONDS) next();
+  });
+  showTerm(termIndex);
+})();
+</script>
+</body>
+</html>

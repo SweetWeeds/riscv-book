@@ -1,0 +1,1500 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>09 M 확장: 곱셈과 나눗셈 · RISC-V Book</title>
+<meta name="description" content="RISC-V M 확장(v2.0)의 MUL·MULH·MULHSU·MULHU·DIV·DIVU·REM·REMU 명령과 인코딩, 2×XLEN 곱 만들기, 0으로 나누기와 오버플로 규칙, Zmmul, 그리고 곱셈기·나눗셈기 하드웨어를 그림과 시뮬레이터로 익힌다.">
+<link rel="icon" href="../assets/img/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/style.css">
+<script src="../assets/js/book.js"></script>
+<script src="../assets/js/riscv.js"></script>
+<style>
+  .operand-input { width: 190px; max-width: 100%; }
+  .preset-row { display: flex; flex-wrap: wrap; gap: 6px; }
+  .preset-row .button { font-size: 13px; padding: 5px 10px; }
+  .result-grid { display: grid; gap: 8px; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); }
+  .result-cell .cell-value { font-size: 15px; }
+  .result-cell .detail { font-size: 11.5px; color: var(--text-dim); line-height: 1.5; overflow-wrap: anywhere; }
+  .result-cell .tag { display: inline-block; margin-top: 4px; font-family: var(--font); font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 999px; background: var(--bad-soft); color: var(--bad); }
+  .result-cell.is-multiply { border-left: 3px solid var(--teal); }
+  .result-cell.is-divide { border-left: 3px solid var(--violet); }
+  .result-cell.is-special { background: var(--accent-2-soft); border-color: var(--accent-2); }
+  .operand-summary { font-family: var(--mono); font-size: 13px; color: var(--text-dim); margin-bottom: 12px; line-height: 1.7; overflow-wrap: anywhere; }
+  .operand-summary b { color: var(--text); }
+  .instruction-pair { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); margin-bottom: 14px; }
+  .instruction-card { border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px; background: var(--canvas-bg); font-family: var(--mono); font-size: 13.5px; min-width: 0; }
+  .instruction-card .order { font-family: var(--font); font-size: 11.5px; font-weight: 700; color: var(--text-faint); }
+  .instruction-card .result { font-size: 17px; font-weight: 700; overflow-wrap: anywhere; }
+  .instruction-card.high { border-left: 4px solid var(--violet); }
+  .instruction-card.low { border-left: 4px solid var(--teal); }
+  .product-label { font-size: 12.5px; font-weight: 700; color: var(--text-faint); margin: 4px 0 6px; }
+  .product-bar { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); border-radius: 10px; overflow: hidden; border: 1px solid var(--border); font-family: var(--mono); }
+  .product-half { padding: 10px 10px 12px; text-align: center; min-width: 0; transition: background 0.3s; }
+  .product-half.high { background: var(--violet-soft); border-right: 1px dashed var(--border); }
+  .product-half.low { background: var(--teal-soft); }
+  .product-half.is-wrong { background: var(--bad-soft); }
+  .product-half .half-name { font-family: var(--font); font-size: 11.5px; color: var(--text-dim); font-weight: 700; }
+  .product-half .half-value { font-size: 16px; font-weight: 700; overflow-wrap: anywhere; }
+  .product-half .bits { font-size: 10.5px; color: var(--text-dim); word-break: break-all; line-height: 1.5; margin-top: 4px; }
+  .product-total { margin-top: 10px; font-family: var(--mono); font-size: 14px; overflow-wrap: anywhere; }
+  .verdict-ok { color: var(--ok); font-weight: 700; }
+  .verdict-bad { color: var(--bad); font-weight: 700; }
+</style>
+</head>
+<body data-chapter="multiply">
+<main class="chapter">
+  <header class="chapter-hero">
+    <div class="eyebrow">Chapter 09</div>
+    <h1>M 확장: 곱셈과 나눗셈</h1>
+    <p class="lead">RV32I에는 곱셈 명령이 없다. 덧셈과 시프트만으로도 곱셈을 흉내 낼 수 있기 때문이다. 하지만 실제 프로그램에서 곱셈과 나눗셈은 배열 주소 계산, 해시, 고정소수점 연산 등 곳곳에 나온다. <strong>M 확장은 정수 곱셈 4개와 나눗셈·나머지 4개, 단 8개 명령으로 이 빈자리를 채운다.</strong> 명령 수는 적지만 “곱의 위쪽 절반은 어떻게 얻나”, “0으로 나누면 어떻게 되나”처럼 따져 볼 규칙이 많다. 이 장에서는 그 규칙과 이유를, 그리고 그 명령을 실제로 계산하는 회로를 직접 돌려 보며 익힌다.</p>
+    <ul class="objectives">
+      <li>M 확장 8개 명령(+ RV64의 W 명령 5개)의 인코딩과 뜻을 안다.</li>
+      <li>MULH·MULHU·MULHSU와 MUL을 짝지어 2×XLEN 비트 곱을 만들고, 권장 순서가 왜 있는지 설명한다.</li>
+      <li>나눗셈이 0 쪽으로 버림하고, 나머지의 부호가 피제수를 따른다는 규칙을 적용한다.</li>
+      <li>0으로 나누기와 부호 있는 오버플로의 결과값을 외우고, 트랩을 두지 않은 이유를 설명한다.</li>
+      <li>Zmmul이 무엇이고 어떤 코어에 쓰이는지 안다.</li>
+      <li>shift-add 곱셈기와 복원 나눗셈기를 한 단계씩 따라가며 지연과 면적의 맞바꿈을 이해한다.</li>
+    </ul>
+    <div class="spec-meta">
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/unpriv/m-st-ext.html" target="_blank" rel="noopener">Unprivileged ISA · "M" Extension v2.0</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/unpriv/m-st-ext.html#11-1-3-zmmul-extension-version-1-0" target="_blank" rel="noopener">Zmmul v1.0</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/unpriv/zc.html#28-1-8-zcb" target="_blank" rel="noopener">Zcb · c.mul</a>
+    </div>
+  </header>
+
+  <!-- ============================================================ -->
+  <section id="why-extension">
+    <h2>곱셈은 왜 베이스가 아니라 확장인가</h2>
+    <p>2장에서 본 것처럼 RISC-V는 꼭 필요한 것만 베이스에 넣고 나머지는 확장으로 뺀다. 곱셈과 나눗셈이 그 첫 번째 대상이다. 덧셈기는 수백 게이트면 되지만, 한 사이클에 32×32비트를 곱하는 곱셈기는 그보다 수십 배 크고, 나눗셈기는 속도까지 느리다. 센서 값을 읽어 넘기기만 하는 작은 마이크로컨트롤러에 이 회로를 억지로 넣으면 칩 면적과 전력이 낭비된다.</p>
+    <p>그래서 RISC-V는 곱셈·나눗셈을 <span class="term">M 확장</span><span class="english">(Integer Multiplication and Division, v2.0)</span>으로 분리했다. M이 없는 코어에서 컴파일러는 곱셈을 덧셈·시프트로 이루어진 라이브러리 함수 호출로 바꾼다. 예를 들어 GCC는 <code>-march=rv32i</code>에서 곱셈을 libgcc의 <code>__mulsi3</code> 호출로, 나눗셈을 <code>__divsi3</code> 호출로 만든다. 같은 프로그램이 M이 있는 코어에서는 명령 하나로 끝난다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 820 310" role="img" aria-label="M 확장의 구성: 곱셈 부분(Zmmul)과 나눗셈 부분이 베이스 정수 ISA 위에 얹힌다">
+        <rect x="20" y="16" width="780" height="206" rx="14" class="f-gold-soft"/>
+        <text x="40" y="44" class="t-gold">M 확장 v2.0 — 명령 8개 (RV64는 W 명령 5개를 더한다)</text>
+        <g transform="translate(40,62)">
+          <rect width="360" height="142" rx="12" class="f-teal-soft"/>
+          <text x="180" y="30" text-anchor="middle" class="t t-bold">곱셈 = Zmmul v1.0 과 같은 부분</text>
+          <text x="180" y="66" text-anchor="middle" class="t-mono">mul · mulh · mulhsu · mulhu</text>
+          <text x="180" y="94" text-anchor="middle" class="t-dim">RV64 추가: mulw</text>
+          <text x="180" y="124" text-anchor="middle" class="t-faint">작은 코어도 감당할 만한 회로</text>
+        </g>
+        <g transform="translate(420,62)">
+          <rect width="360" height="142" rx="12" class="f-violet-soft"/>
+          <text x="180" y="30" text-anchor="middle" class="t t-bold">나눗셈 · 나머지</text>
+          <text x="180" y="66" text-anchor="middle" class="t-mono">div · divu · rem · remu</text>
+          <text x="180" y="94" text-anchor="middle" class="t-dim">RV64 추가: divw · divuw · remw · remuw</text>
+          <text x="180" y="124" text-anchor="middle" class="t-faint">반복형 회로 · 수십 사이클이 흔하다</text>
+        </g>
+        <rect x="20" y="240" width="780" height="58" rx="12" class="f-accent-soft"/>
+        <text x="410" y="264" text-anchor="middle" class="t t-bold">베이스 정수 ISA (RV32I · RV64I)</text>
+        <text x="410" y="286" text-anchor="middle" class="t-dim">덧셈 · 시프트 · 분기만으로도 곱셈과 나눗셈을 소프트웨어로 흉내 낼 수 있다</text>
+        <rect x="236" y="225" width="18" height="10" rx="2" class="f-gold pulse"/>
+        <rect x="400" y="225" width="18" height="10" rx="2" class="f-gold pulse" style="animation-delay:.4s"/>
+        <rect x="566" y="225" width="18" height="10" rx="2" class="f-gold pulse" style="animation-delay:.8s"/>
+      </svg></div>
+      <figcaption><b>그림 9-1.</b> M 확장의 구성. 왼쪽 곱셈 부분만 따로 떼어 낸 것이 <b>Zmmul</b>이다. M을 구현하면 Zmmul은 저절로 포함된다(“M implies Zmmul”). 두 부분 모두 베이스 ISA의 정수 레지스터를 그대로 쓰므로 새 레지스터나 새 상태가 없다.</figcaption>
+    </figure>
+
+    <div class="callout spec"><strong>규격 원문에서</strong>
+      <blockquote>“We separate integer multiply and divide out from the base to simplify low-end implementations, or for applications where integer multiply and divide operations are either infrequent or better handled in attached accelerators.”</blockquote>
+      <p><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/m-st-ext.html" target="_blank" rel="noopener">Volume I, “M” Extension v2.0</a> — 저가형 구현을 단순하게 하고, 곱셈·나눗셈이 드물거나 별도 가속기에 맡기는 편이 나은 응용을 위해 베이스에서 뺐다는 설명이다.</p>
+    </div>
+
+    <div class="callout history"><strong>다른 ISA는 어떻게 했나</strong><p>예전 MIPS는 곱셈·나눗셈 결과를 일반 레지스터가 아닌 <code>HI</code>/<code>LO</code>라는 특수 레지스터에 남기고 <code>mfhi</code>/<code>mflo</code>로 꺼내 쓰게 했다. 숨은 상태가 하나 더 생기는 셈이다. RISC-V는 모든 결과를 일반 정수 레지스터 <code>rd</code>에 바로 쓴다. 대신 상위·하위 절반을 따로 얻는 두 명령을 두었다. 이 선택이 아래에서 볼 “명령 융합” 권고로 이어진다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="encoding">
+    <h2>인코딩: OP 옵코드와 funct7 = 0000001</h2>
+    <p>M 확장 명령은 모두 4장의 <b>R 형식</b>이다. 옵코드는 <code>add</code>·<code>sub</code>와 같은 <code>OP</code>(<code>0110011</code>)를 쓰고, <code>funct7</code> 칸에 <code>0000001</code>을 넣어 “이건 곱셈·나눗셈 무리”라고 표시한다. 베이스 정수 명령은 <code>funct7</code>로 <code>0000000</code>(대부분)과 <code>0100000</code>(<code>sub</code>, <code>sra</code>)만 쓰므로 빈 자리에 깔끔하게 들어간다. 그다음 <code>funct3</code> 3비트가 8개 명령 중 하나를 고른다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 820 300" role="img" aria-label="M 확장 명령의 R 형식 비트 배치와 funct3 값">
+        <!-- 32비트 필드: 비트 하나 = 24px, 왼쪽 끝 x=26 -->
+        <text x="30" y="32" class="t-faint">31</text><text x="190" y="32" text-anchor="end" class="t-faint">25</text>
+        <text x="198" y="32" class="t-faint">24</text><text x="310" y="32" text-anchor="end" class="t-faint">20</text>
+        <text x="318" y="32" class="t-faint">19</text><text x="430" y="32" text-anchor="end" class="t-faint">15</text>
+        <text x="438" y="32" class="t-faint">14</text><text x="502" y="32" text-anchor="end" class="t-faint">12</text>
+        <text x="510" y="32" class="t-faint">11</text><text x="622" y="32" text-anchor="end" class="t-faint">7</text>
+        <text x="630" y="32" class="t-faint">6</text><text x="790" y="32" text-anchor="end" class="t-faint">0</text>
+        <rect x="26" y="40" width="168" height="60" rx="6" class="f-violet-soft"/>
+        <text x="110" y="66" text-anchor="middle" class="t-mono t-bold">0000001</text>
+        <text x="110" y="88" text-anchor="middle" class="t-faint">funct7 = MULDIV</text>
+        <rect x="194" y="40" width="120" height="60" rx="6" class="f-teal-soft"/>
+        <text x="254" y="66" text-anchor="middle" class="t-mono">rs2</text>
+        <text x="254" y="88" text-anchor="middle" class="t-faint">둘째 피연산자</text>
+        <rect x="314" y="40" width="120" height="60" rx="6" class="f-teal-soft"/>
+        <text x="374" y="66" text-anchor="middle" class="t-mono">rs1</text>
+        <text x="374" y="88" text-anchor="middle" class="t-faint">첫째 피연산자</text>
+        <rect x="434" y="40" width="72" height="60" rx="6" class="f-gold-soft"/>
+        <text x="470" y="66" text-anchor="middle" class="t-mono t-bold">funct3</text>
+        <text x="470" y="88" text-anchor="middle" class="t-faint">연산</text>
+        <rect x="506" y="40" width="120" height="60" rx="6" class="f-teal-soft"/>
+        <text x="566" y="66" text-anchor="middle" class="t-mono">rd</text>
+        <text x="566" y="88" text-anchor="middle" class="t-faint">결과</text>
+        <rect x="626" y="40" width="168" height="60" rx="6" class="f-accent-soft"/>
+        <text x="710" y="66" text-anchor="middle" class="t-mono t-bold">0110011</text>
+        <text x="710" y="88" text-anchor="middle" class="t-faint">OP (W 명령은 0111011)</text>
+        <!-- funct3 표 -->
+        <text x="26" y="132" class="t-dim">funct3 (비트 14–12) 가 고르는 명령</text>
+        <g class="t-mono">
+          <rect x="26" y="142" width="90" height="62" rx="8" class="f-teal-soft"/><text x="71" y="164" text-anchor="middle" class="t-faint">000</text><text x="71" y="190" text-anchor="middle" class="t-mono t-bold">mul</text>
+          <rect x="122" y="142" width="90" height="62" rx="8" class="f-teal-soft"/><text x="167" y="164" text-anchor="middle" class="t-faint">001</text><text x="167" y="190" text-anchor="middle" class="t-mono t-bold">mulh</text>
+          <rect x="218" y="142" width="90" height="62" rx="8" class="f-teal-soft"/><text x="263" y="164" text-anchor="middle" class="t-faint">010</text><text x="263" y="190" text-anchor="middle" class="t-mono t-bold">mulhsu</text>
+          <rect x="314" y="142" width="90" height="62" rx="8" class="f-teal-soft"/><text x="359" y="164" text-anchor="middle" class="t-faint">011</text><text x="359" y="190" text-anchor="middle" class="t-mono t-bold">mulhu</text>
+          <rect x="410" y="142" width="90" height="62" rx="8" class="f-violet-soft"/><text x="455" y="164" text-anchor="middle" class="t-faint">100</text><text x="455" y="190" text-anchor="middle" class="t-mono t-bold">div</text>
+          <rect x="506" y="142" width="90" height="62" rx="8" class="f-violet-soft"/><text x="551" y="164" text-anchor="middle" class="t-faint">101</text><text x="551" y="190" text-anchor="middle" class="t-mono t-bold">divu</text>
+          <rect x="602" y="142" width="90" height="62" rx="8" class="f-violet-soft"/><text x="647" y="164" text-anchor="middle" class="t-faint">110</text><text x="647" y="190" text-anchor="middle" class="t-mono t-bold">rem</text>
+          <rect x="698" y="142" width="90" height="62" rx="8" class="f-violet-soft"/><text x="743" y="164" text-anchor="middle" class="t-faint">111</text><text x="743" y="190" text-anchor="middle" class="t-mono t-bold">remu</text>
+        </g>
+        <path d="M30 214 V222 H400 V214" class="s-line"/>
+        <path d="M414 214 V222 H784 V214" class="s-line"/>
+        <text x="215" y="242" text-anchor="middle" class="t-teal">funct3[2] = 0 → 곱셈</text>
+        <text x="599" y="242" text-anchor="middle" class="t-violet">funct3[2] = 1 → 나눗셈 · 나머지</text>
+        <text x="410" y="282" text-anchor="middle" class="t-mono">mul a0, a1, a2 = 0000001 01100 01011 000 01010 0110011 = 0x02c58533</text>
+      </svg></div>
+      <figcaption><b>그림 9-2.</b> M 확장 명령의 비트 배치. 레지스터 칸 위치는 다른 R 형식 명령과 똑같고, funct7과 funct3만 다르다. 나눗셈 쪽에서는 funct3[0]이 1이면 부호 없음, funct3[1]이 1이면 나머지라는 규칙도 보인다. 맨 아래 예시 인코딩은 LLVM 어셈블러 출력으로 확인한 값이다.</figcaption>
+    </figure>
+
+    <div class="table-wrap"><table class="instruction-table">
+      <thead><tr><th>명령</th><th>옵코드</th><th>funct3</th><th>동작</th><th>비고</th></tr></thead>
+      <tbody>
+        <tr><td>mul</td><td><code>OP</code></td><td><code>000</code></td><td>rd ← (rs1 × rs2)의 하위 XLEN비트</td><td>부호 여부와 무관</td></tr>
+        <tr><td>mulh</td><td><code>OP</code></td><td><code>001</code></td><td>rd ← (rs1 ×<sub>s</sub> rs2)의 상위 XLEN비트</td><td>부호 × 부호</td></tr>
+        <tr><td>mulhsu</td><td><code>OP</code></td><td><code>010</code></td><td>rd ← (rs1 ×<sub>s</sub> rs2 <sub>u</sub>)의 상위 XLEN비트</td><td>rs1 부호 있음, rs2 부호 없음</td></tr>
+        <tr><td>mulhu</td><td><code>OP</code></td><td><code>011</code></td><td>rd ← (rs1 ×<sub>u</sub> rs2)의 상위 XLEN비트</td><td>무부호 × 무부호</td></tr>
+        <tr><td>div</td><td><code>OP</code></td><td><code>100</code></td><td>rd ← rs1 ÷ rs2 (부호 있음, 0 쪽으로 버림)</td><td></td></tr>
+        <tr><td>divu</td><td><code>OP</code></td><td><code>101</code></td><td>rd ← rs1 ÷ rs2 (부호 없음)</td><td></td></tr>
+        <tr><td>rem</td><td><code>OP</code></td><td><code>110</code></td><td>rd ← div의 나머지</td><td>부호는 피제수를 따름</td></tr>
+        <tr><td>remu</td><td><code>OP</code></td><td><code>111</code></td><td>rd ← divu의 나머지</td><td></td></tr>
+        <tr><td>mulw</td><td><code>OP-32</code></td><td><code>000</code></td><td>하위 32비트끼리 곱한 결과의 하위 32비트를 부호 확장</td><td>RV64 전용</td></tr>
+        <tr><td>divw · divuw</td><td><code>OP-32</code></td><td><code>100</code> · <code>101</code></td><td>하위 32비트끼리 나눈 32비트 몫을 부호 확장</td><td>RV64 전용</td></tr>
+        <tr><td>remw · remuw</td><td><code>OP-32</code></td><td><code>110</code> · <code>111</code></td><td>32비트 나머지를 부호 확장</td><td>RV64 전용</td></tr>
+      </tbody>
+    </table></div>
+    <p>RV64의 W 명령은 <code>OP-32</code>(<code>0111011</code>) 옵코드에서 같은 funct7·funct3 값을 쓴다. 32비트 곱의 상위 절반을 돌려주는 <code>mulhw</code> 같은 명령은 없다. RV64에서는 64비트 <code>mul</code> 하나로 32×32비트 곱 전체(64비트)를 얻을 수 있기 때문이다.</p>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="multiplication">
+    <h2>곱셈: 2×XLEN 비트 곱의 위와 아래</h2>
+    <p>32비트 두 수를 곱하면 결과는 최대 64비트가 된다. 레지스터는 32비트이므로 결과를 한 번에 담을 수 없다. RISC-V는 곱을 둘로 잘라 <b>하위 절반은 <code>mul</code></b>, <b>상위 절반은 <code>mulh</code>·<code>mulhu</code>·<code>mulhsu</code></b>로 따로 얻게 했다. C의 <code>int</code> 곱셈처럼 결과가 원래 폭에 들어간다고 가정하는 대부분의 코드는 <code>mul</code> 하나로 충분하다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 820 350" role="img" aria-label="두 XLEN비트 수를 곱해 2×XLEN비트 곱을 만들고 상위·하위 절반을 서로 다른 명령으로 얻는 모습">
+        <defs>
+          <marker id="product-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker>
+          <path id="product-path-left-in" d="M230 78 C230 110 330 104 360 128"/>
+          <path id="product-path-right-in" d="M590 78 C590 110 490 104 460 128"/>
+          <path id="product-path-high" d="M370 182 C370 214 235 212 235 240"/>
+          <path id="product-path-low" d="M450 182 C450 214 585 212 585 240"/>
+        </defs>
+        <rect x="110" y="20" width="240" height="58" rx="10" class="f-elev"/>
+        <text x="230" y="44" text-anchor="middle" class="t t-bold">rs1</text>
+        <text x="230" y="66" text-anchor="middle" class="t-faint">XLEN비트</text>
+        <text x="410" y="58" text-anchor="middle" class="t-gold" style="font-size:26px">×</text>
+        <rect x="470" y="20" width="240" height="58" rx="10" class="f-elev"/>
+        <text x="590" y="44" text-anchor="middle" class="t t-bold">rs2</text>
+        <text x="590" y="66" text-anchor="middle" class="t-faint">XLEN비트</text>
+        <use href="#product-path-left-in" class="s-accent flow-dash"/>
+        <use href="#product-path-right-in" class="s-accent flow-dash"/>
+        <rect x="280" y="128" width="260" height="54" rx="12" class="f-gold-soft"/>
+        <text x="410" y="152" text-anchor="middle" class="t t-bold">곱셈기</text>
+        <text x="410" y="172" text-anchor="middle" class="t-faint">결과는 2×XLEN비트</text>
+        <use href="#product-path-high" class="s-gold flow-dash"/>
+        <use href="#product-path-low" class="s-gold flow-dash"/>
+        <circle r="5" fill="var(--accent-2)"><animateMotion dur="2.2s" begin="-0.4s" repeatCount="indefinite"><mpath href="#product-path-high"/></animateMotion></circle>
+        <circle r="5" fill="var(--accent-2)"><animateMotion dur="2.2s" begin="-1.5s" repeatCount="indefinite"><mpath href="#product-path-low"/></animateMotion></circle>
+        <circle r="4" fill="var(--accent)"><animateMotion dur="2.2s" begin="-1.1s" repeatCount="indefinite"><mpath href="#product-path-left-in"/></animateMotion></circle>
+        <circle r="4" fill="var(--accent)"><animateMotion dur="2.2s" begin="-0.2s" repeatCount="indefinite"><mpath href="#product-path-right-in"/></animateMotion></circle>
+        <rect x="60" y="240" width="350" height="52" rx="8" class="f-violet-soft"/>
+        <text x="235" y="262" text-anchor="middle" class="t t-bold">상위 XLEN비트</text>
+        <text x="235" y="282" text-anchor="middle" class="t-faint">곱의 [2·XLEN−1 : XLEN]</text>
+        <rect x="410" y="240" width="350" height="52" rx="8" class="f-teal-soft"/>
+        <text x="585" y="262" text-anchor="middle" class="t t-bold">하위 XLEN비트</text>
+        <text x="585" y="282" text-anchor="middle" class="t-faint">곱의 [XLEN−1 : 0]</text>
+        <text x="235" y="316" text-anchor="middle" class="t-violet" style="font-size:13px">mulh (부호×부호) · mulhu (무부호×무부호)</text>
+        <text x="235" y="336" text-anchor="middle" class="t-violet" style="font-size:13px">mulhsu (rs1 부호 × rs2 무부호)</text>
+        <text x="585" y="316" text-anchor="middle" class="t-teal" style="font-size:13px">mul</text>
+        <text x="585" y="336" text-anchor="middle" class="t-dim">부호 해석과 상관없이 같은 값</text>
+      </svg></div>
+      <figcaption><b>그림 9-3.</b> 곱의 두 절반. 하위 절반은 피연산자를 부호 있는 수로 보든 없는 수로 보든 비트가 똑같다. 그래서 <code>mul</code>은 하나뿐이고, 해석이 달라지는 상위 절반만 세 가지 명령으로 나뉜다.</figcaption>
+    </figure>
+
+    <div class="callout tip"><strong>왜 하위 절반은 부호와 상관없을까</strong><p>2의 보수에서 부호 있는 수 <i>a</i>와 부호 없는 수 <i>a</i>′는 2<sup>32</sup>의 배수만큼 차이 난다. 곱하면 그 차이는 2<sup>32</sup>의 배수로만 남으므로 하위 32비트에 아무 영향을 주지 못하고, 상위 32비트만 달라진다. 덧셈·뺄셈에 부호 있는 판과 없는 판이 따로 없는 것과 같은 이유다.</p></div>
+
+    <h3>MULHSU는 어디에 쓰나</h3>
+    <p>부호 있는 수 × 부호 없는 수라는 조합은 어색해 보이지만, 여러 워드로 된 큰 부호 있는 수(예: 128비트 정수)를 곱할 때 꼭 필요하다. 가장 높은 워드에는 부호 비트가 들어 있고, 아래 워드들은 부호 없는 숫자 조각이다. 규격도 “다중 워드 부호 있는 곱셈에서 부호 비트가 있는 최상위 워드와 부호 없는 아래 워드를 곱하는 데 쓴다”고 설명한다.</p>
+
+    <h3>상위·하위를 함께 구할 때의 권장 순서</h3>
+    <p>64비트 곱 전체가 필요하면 두 명령을 연달아 쓴다. 규격은 순서까지 권한다. <b>상위 절반 명령을 먼저, 같은 소스 레지스터를 같은 순서로, 그리고 상위 결과 레지스터(rdh)는 rs1·rs2와 달라야 한다.</b></p>
+    <div class="codebox assembly" data-title="64비트 곱 — 부호 없는 a0 × a1 → t1:t0">mulhu t1, a0, a1    # 상위 32비트 (rdh = t1 은 a0, a1 과 다르다)
+mul   t0, a0, a1    # 하위 32비트 (소스 순서 a0, a1 그대로)</div>
+    <p>이 모양을 지키면 마이크로아키텍처가 두 명령을 알아보고 <span class="term">명령 융합</span><span class="english">(macro-op fusion)</span>으로 <b>곱셈을 한 번만</b> 할 수 있다. rdh가 rs1과 같으면 첫 명령이 a0을 덮어써서 둘째 <code>mul</code>이 엉뚱한 값을 곱하게 되므로, 이 조건은 융합 이전에 정확성의 문제이기도 하다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 820 250" role="img" aria-label="mulhu와 mul 두 명령을 디코더가 하나의 곱셈으로 융합하는 모습">
+        <defs>
+          <marker id="fusion-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker>
+          <path id="fusion-path" d="M262 90 H568"/>
+        </defs>
+        <rect x="20" y="30" width="240" height="120" rx="12" class="f-elev"/>
+        <text x="140" y="54" text-anchor="middle" class="t-dim">명령어 흐름</text>
+        <rect x="34" y="66" width="212" height="62" rx="8" class="f-gold-soft"/>
+        <text x="50" y="92" class="t-mono">mulhu t1, a0, a1</text>
+        <text x="50" y="116" class="t-mono">mul   t0, a0, a1</text>
+        <path d="M262 90 H314" class="s-accent flow-dash" marker-end="url(#fusion-arrow)"/>
+        <rect x="318" y="50" width="200" height="80" rx="12" class="f-accent-soft"/>
+        <text x="418" y="84" text-anchor="middle" class="t t-bold">디코더</text>
+        <text x="418" y="108" text-anchor="middle" class="t-faint">두 명령을 하나로 묶음</text>
+        <path d="M520 90 H566" class="s-accent flow-dash" marker-end="url(#fusion-arrow)"/>
+        <rect x="570" y="30" width="230" height="120" rx="12" class="f-teal-soft"/>
+        <text x="685" y="60" text-anchor="middle" class="t t-bold">곱셈 1회</text>
+        <text x="685" y="90" text-anchor="middle" class="t-mono">상위 → t1</text>
+        <text x="685" y="116" text-anchor="middle" class="t-mono">하위 → t0</text>
+        <circle r="5" fill="var(--accent-2)"><animateMotion dur="1.8s" begin="-0.3s" repeatCount="indefinite"><mpath href="#fusion-path"/></animateMotion></circle>
+        <circle r="5" fill="var(--accent-2)"><animateMotion dur="1.8s" begin="-1.2s" repeatCount="indefinite"><mpath href="#fusion-path"/></animateMotion></circle>
+        <text x="410" y="186" text-anchor="middle" class="t-dim">융합 조건: ① 두 명령의 rs1 · rs2 가 같은 순서 ② rdh(t1) ≠ rs1 · rs2 ③ 바로 붙여 쓴다</text>
+        <text x="410" y="212" text-anchor="middle" class="t-faint">소스 순서만 다르면 결과는 맞지만 융합되지 않는다.</text>
+        <text x="410" y="234" text-anchor="middle" class="t-faint">rdh 가 rs1 · rs2 와 같으면 둘째 mul 이 덮어쓴 값을 읽어 결과가 틀린다.</text>
+      </svg></div>
+      <figcaption><b>그림 9-4.</b> 명령 융합. 단순한 코어는 두 명령을 따로 실행해도 되고, 성능을 원하는 코어는 둘을 한 번의 곱셈으로 처리한다. ISA는 그대로 두고 소프트웨어 관례만으로 구현에게 기회를 준 예다. 나눗셈도 같은 방식으로 <code>div[u] rdq, rs1, rs2</code> 다음에 <code>rem[u] rdr, rs1, rs2</code>(rdq ≠ rs1·rs2)를 쓰도록 권한다.</figcaption>
+    </figure>
+
+    <div class="sim" id="product-sim">
+      <div class="sim-head"><span class="sim-tag">SIMULATOR</span><h3>두 명령으로 64비트 곱 조립하기</h3></div>
+      <div class="sim-pad">
+        <div class="instruction-pair">
+          <div class="instruction-card high"><div class="order">① 상위 절반</div><div id="product-high-instruction">mulhu t1, a0, a1</div><div class="result" id="product-high-result">—</div></div>
+          <div class="instruction-card low"><div class="order">② 하위 절반</div><div id="product-low-instruction">mul t0, a0, a1</div><div class="result" id="product-low-result">—</div></div>
+        </div>
+        <div class="product-label">합친 64비트 곱 (상위 레지스터 : 하위 레지스터)</div>
+        <div class="product-bar">
+          <div class="product-half high" id="product-high-half"><div class="half-name" id="product-high-name">t1 · [63:32]</div><div class="half-value" id="product-high-value">—</div><div class="bits" id="product-high-bits"></div></div>
+          <div class="product-half low" id="product-low-half"><div class="half-name">t0 · [31:0]</div><div class="half-value" id="product-low-value">—</div><div class="bits" id="product-low-bits"></div></div>
+        </div>
+        <div class="product-total" id="product-total"></div>
+      </div>
+      <div class="step-description" id="product-description"></div>
+      <div class="sim-controls">
+        <label class="control"><span>a0 (rs1)</span><input type="text" class="operand-input" id="product-first" value="0x89abcdef" spellcheck="false"></label>
+        <label class="control"><span>a1 (rs2)</span><input type="text" class="operand-input" id="product-second" value="-3" spellcheck="false"></label>
+        <div class="control"><span>해석</span><div class="segmented" id="product-mode"><button data-value="mulhu" class="on">무부호 (mulhu)</button><button data-value="mulh">부호 (mulh)</button><button data-value="mulhsu">부호×무부호 (mulhsu)</button></div></div>
+        <div class="control"><span>상위 결과 레지스터 rdh</span><div class="segmented" id="product-destination"><button data-value="t1" class="on">t1 (권장)</button><button data-value="a0">a0 (= rs1)</button></div></div>
+        <div class="control"><span>보기</span><div class="button-row"><button class="button primary" id="product-assemble">조립 애니메이션</button></div></div>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">기대한 곱 (10진)</span><span class="value" id="product-expected">—</span></div>
+        <div class="stat"><span class="key">에뮬레이터 결과</span><span class="value" id="product-verdict">—</span></div>
+      </div>
+      <div class="sim-note">해석을 바꾸면 <b>하위 절반은 그대로이고 상위 절반만</b> 바뀌는 것을 확인하자. 그다음 rdh를 <code>a0</code>로 바꿔 보자. 첫 명령이 rs1을 덮어쓰는 바람에 둘째 <code>mul</code>이 엉뚱한 수를 곱해 하위 절반이 빨갛게 틀어진다. 이 결과는 riscv.js 에뮬레이터로 두 명령을 실제로 실행해서 얻은 것이다.</div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="division">
+    <h2>나눗셈: 0 쪽으로 버리고, 나머지는 피제수의 부호</h2>
+    <p><code>div</code>와 <code>divu</code>는 XLEN비트를 XLEN비트로 나누며 <b>0 쪽으로 버림</b><span class="english">(round towards zero)</span>한다. <code>rem</code>·<code>remu</code>는 그 나눗셈의 나머지다. 0으로 나누기와 오버플로만 빼면 언제나 다음 식이 성립한다.</p>
+    <p style="text-align:center;font-family:var(--mono);font-size:16px"><b>피제수 = 제수 × 몫 + 나머지</b>,&nbsp; 그리고 0이 아닌 <code>rem</code>의 부호 = 피제수의 부호</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 820 262" role="img" aria-label="−7 나누기 2의 몫을 수직선 위에서 0 쪽으로 버리는 경우와 내림하는 경우로 비교">
+        <defs>
+          <marker id="number-line-arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--ok)"/></marker>
+          <marker id="number-line-arrow-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--bad)"/></marker>
+        </defs>
+        <line x1="60" y1="100" x2="760" y2="100" class="s-line"/>
+        <g class="t-faint">
+          <line x1="80" y1="94" x2="80" y2="106" class="s-line"/><text x="80" y="124" text-anchor="middle" class="t-faint">−5</text>
+          <line x1="146" y1="94" x2="146" y2="106" class="s-line"/><text x="146" y="124" text-anchor="middle" class="t-faint">−4</text>
+          <line x1="212" y1="94" x2="212" y2="106" class="s-line"/><text x="212" y="124" text-anchor="middle" class="t-faint">−3</text>
+          <line x1="278" y1="94" x2="278" y2="106" class="s-line"/><text x="278" y="124" text-anchor="middle" class="t-faint">−2</text>
+          <line x1="344" y1="94" x2="344" y2="106" class="s-line"/><text x="344" y="124" text-anchor="middle" class="t-faint">−1</text>
+          <line x1="410" y1="88" x2="410" y2="112" class="s-accent"/><text x="410" y="124" text-anchor="middle" class="t-accent">0</text>
+          <line x1="476" y1="94" x2="476" y2="106" class="s-line"/><text x="476" y="124" text-anchor="middle" class="t-faint">1</text>
+          <line x1="542" y1="94" x2="542" y2="106" class="s-line"/><text x="542" y="124" text-anchor="middle" class="t-faint">2</text>
+          <line x1="608" y1="94" x2="608" y2="106" class="s-line"/><text x="608" y="124" text-anchor="middle" class="t-faint">3</text>
+          <line x1="674" y1="94" x2="674" y2="106" class="s-line"/><text x="674" y="124" text-anchor="middle" class="t-faint">4</text>
+          <line x1="740" y1="94" x2="740" y2="106" class="s-line"/><text x="740" y="124" text-anchor="middle" class="t-faint">5</text>
+        </g>
+        <circle cx="179" cy="100" r="7" class="f-gold pulse"/>
+        <text x="179" y="150" text-anchor="middle" class="t-gold">−7 ÷ 2 = −3.5</text>
+        <path d="M179 108 V132" class="s-gold s-dashed"/>
+        <path d="M188 90 Q200 58 210 88" class="s-ok" marker-end="url(#number-line-arrow-ok)"/>
+        <path d="M170 90 Q158 58 148 88" class="s-bad s-dashed" marker-end="url(#number-line-arrow-bad)"/>
+        <text x="420" y="40" class="t-ok">RISC-V div: −3 (0 쪽으로 버림, C와 같다)</text>
+        <path d="M416 36 H250 L214 62" class="s-line s-dashed"/>
+        <text x="40" y="30" class="t-bad">내림(floor): −4</text>
+        <path d="M100 36 L142 62" class="s-line s-dashed"/>
+        <rect x="60" y="182" width="340" height="62" rx="10" class="f-ok-soft"/>
+        <text x="230" y="208" text-anchor="middle" class="t t-bold">rem: −7 − 2 × (−3) = −1</text>
+        <text x="230" y="230" text-anchor="middle" class="t-dim">나머지 부호 = 피제수(−7)의 부호</text>
+        <rect x="420" y="182" width="340" height="62" rx="10" class="f-surface"/>
+        <text x="590" y="208" text-anchor="middle" class="t">내림 방식: −7 − 2 × (−4) = 1</text>
+        <text x="590" y="230" text-anchor="middle" class="t-dim">Python 의 // 와 % 가 이 방식</text>
+      </svg></div>
+      <figcaption><b>그림 9-5.</b> 같은 −7 ÷ 2라도 몫을 어느 쪽으로 버리느냐에 따라 몫과 나머지가 달라진다. RISC-V의 <code>div</code>/<code>rem</code>은 C99 이후 C·C++의 <code>/</code>·<code>%</code>와 같은 규칙이므로 컴파일러가 명령 하나로 옮길 수 있다.</figcaption>
+    </figure>
+
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>식</th><th class="number">div 몫</th><th class="number">rem 나머지</th><th>확인: 제수 × 몫 + 나머지</th></tr></thead>
+      <tbody>
+        <tr><td><code>7 ÷ 2</code></td><td class="number">3</td><td class="number">1</td><td>2 × 3 + 1 = 7</td></tr>
+        <tr><td><code>−7 ÷ 2</code></td><td class="number">−3</td><td class="number">−1</td><td>2 × (−3) + (−1) = −7</td></tr>
+        <tr><td><code>7 ÷ −2</code></td><td class="number">−3</td><td class="number">1</td><td>(−2) × (−3) + 1 = 7</td></tr>
+        <tr><td><code>−7 ÷ −2</code></td><td class="number">3</td><td class="number">−1</td><td>(−2) × 3 + (−1) = −7</td></tr>
+      </tbody>
+    </table></div>
+    <div class="callout warn"><strong>Python으로 검산할 때 주의</strong><p>Python의 <code>-7 // 2</code>는 −4, <code>-7 % 2</code>는 1이다. RISC-V(그리고 C)의 결과 −3, −1과 다르다. 언어마다 나눗셈 규칙이 다르므로, 내림 규칙을 쓰는 언어를 RISC-V로 옮기는 컴파일러는 몫과 나머지를 한 번 보정하는 코드를 더 넣는다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="special-cases">
+    <h2>0으로 나누기와 오버플로: 트랩 없이 정해진 값</h2>
+    <p>나눗셈에는 수학적으로 답이 없거나 답이 레지스터에 들어가지 않는 경우가 두 가지 있다. 많은 ISA는 이때 예외를 일으키지만(x86의 <code>DIV</code>는 0으로 나누면 #DE 예외), RISC-V는 <b>트랩을 일으키지 않고 정해진 값을 돌려준다.</b></p>
+    <ul>
+      <li><b>0으로 나누기</b>: 몫은 <b>모든 비트가 1</b>(부호 없는 최댓값 2<sup>L</sup>−1, 부호 있는 해석으로 −1), 나머지는 <b>피제수 그대로</b>.</li>
+      <li><b>부호 있는 오버플로</b>: 가장 작은 음수 −2<sup>L−1</sup>을 −1로 나누면 참값 2<sup>L−1</sup>이 L비트 부호 있는 범위를 넘는다. 이때 몫은 <b>피제수 그대로</b>, 나머지는 <b>0</b>. 부호 없는 나눗셈에서는 오버플로가 생기지 않는다.</li>
+    </ul>
+
+    <div class="table-wrap"><table>
+      <thead><tr><th>조건</th><th>피제수</th><th>제수</th><th>DIVU[W]</th><th>REMU[W]</th><th>DIV[W]</th><th>REM[W]</th></tr></thead>
+      <tbody>
+        <tr><td><b>0으로 나누기</b></td><td><i>x</i></td><td>0</td><td>2<sup>L</sup>−1</td><td><i>x</i></td><td>−1</td><td><i>x</i></td></tr>
+        <tr><td><b>오버플로</b> (부호 있음만)</td><td>−2<sup>L−1</sup></td><td>−1</td><td>–</td><td>–</td><td>−2<sup>L−1</sup></td><td>0</td></tr>
+      </tbody>
+    </table></div>
+    <p>L은 연산 폭이다. <code>div[u]</code>·<code>rem[u]</code>는 XLEN, RV64의 W 명령은 32다. RV32에서 구체적인 값으로 보면 <code>divu x, 0</code> = <code>0xffffffff</code>, <code>div 0x80000000, -1</code> = <code>0x80000000</code>이다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 820 300" role="img" aria-label="나눗셈 명령이 결과를 정하는 순서도">
+        <defs>
+          <marker id="special-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--text-faint)"/></marker>
+        </defs>
+        <rect x="290" y="14" width="240" height="40" rx="10" class="f-elev"/>
+        <text x="410" y="39" text-anchor="middle" class="t t-bold">div · divu · rem · remu</text>
+        <path d="M410 56 V78" class="s-line flow-dash" marker-end="url(#special-arrow)"/>
+        <rect x="290" y="80" width="240" height="50" rx="10" class="f-gold-soft"/>
+        <text x="410" y="110" text-anchor="middle" class="t t-bold">제수 = 0 ?</text>
+        <path d="M532 105 H606" class="s-bad flow-dash" marker-end="url(#special-arrow)"/>
+        <text x="568" y="98" text-anchor="middle" class="t-ok">예</text>
+        <rect x="610" y="72" width="190" height="66" rx="10" class="f-bad-soft"/>
+        <text x="705" y="98" text-anchor="middle" class="t">몫 = 모든 비트 1</text>
+        <text x="705" y="122" text-anchor="middle" class="t">나머지 = 피제수</text>
+        <path d="M410 132 V158" class="s-line flow-dash" marker-end="url(#special-arrow)"/>
+        <text x="428" y="150" class="t-faint">아니오</text>
+        <rect x="220" y="160" width="380" height="54" rx="10" class="f-gold-soft"/>
+        <text x="410" y="184" text-anchor="middle" class="t t-bold">부호 있음, 피제수 = −2<tspan dy="-6" style="font-size:10px">L−1</tspan><tspan dy="6">, 제수 = −1 ?</tspan></text>
+        <text x="410" y="204" text-anchor="middle" class="t-faint">div · rem 에서만 확인</text>
+        <path d="M602 187 H646" class="s-bad flow-dash" marker-end="url(#special-arrow)"/>
+        <text x="624" y="180" text-anchor="middle" class="t-ok">예</text>
+        <rect x="650" y="160" width="150" height="66" rx="10" class="f-violet-soft"/>
+        <text x="725" y="186" text-anchor="middle" class="t">몫 = 피제수</text>
+        <text x="725" y="210" text-anchor="middle" class="t">나머지 = 0</text>
+        <path d="M410 216 V240" class="s-ok flow-dash" marker-end="url(#special-arrow)"/>
+        <rect x="270" y="242" width="280" height="46" rx="10" class="f-ok-soft"/>
+        <text x="410" y="270" text-anchor="middle" class="t t-bold">보통 나눗셈 (0 쪽으로 버림)</text>
+        <text x="30" y="110" class="t-dim">어느 길로 가도</text>
+        <text x="30" y="132" class="t-dim">트랩은 일어나지 않고</text>
+        <text x="30" y="154" class="t-dim">rd 에 값이 써진다</text>
+        <text x="30" y="270" class="t-faint">L = XLEN (W 명령은 32)</text>
+      </svg></div>
+      <figcaption><b>그림 9-6.</b> 나눗셈 결과를 정하는 순서. 모든 경우에 rd에 값이 써지고 다음 명령으로 넘어간다. 파이프라인 입장에서는 “예외를 낼 수 있는 산술 명령”이 하나도 없다는 뜻이기도 하다(<a href="pipeline.html">8장</a>의 정밀 예외 참고).</figcaption>
+    </figure>
+
+    <div class="callout spec"><strong>규격 원문에서</strong>
+      <blockquote>“We considered raising exceptions on integer divide by zero, with these exceptions causing a trap in most execution environments. However, this would be the only arithmetic trap in the standard ISA … The value of all bits set is returned for both unsigned and signed divide by zero to simplify the divider circuitry.”</blockquote>
+      <p><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/m-st-ext.html#divby0" target="_blank" rel="noopener">Volume I, “M” Extension · Division Operations</a> — 표준 ISA에 산술 트랩이 이것 하나만 생기는 것을 피했고, “모든 비트 1”은 단순한 부호 없는 나눗셈 회로가 자연스럽게 내놓는 값이라 회로가 쉬워진다고 설명한다.</p>
+    </div>
+
+    <p>언어가 “0으로 나누면 즉시 예외”를 요구한다면 어떻게 할까? 규격의 답은 간단하다. 나눗셈 뒤에 분기 하나만 넣으면 된다. 이 분기는 거의 언제나 성립하지 않으므로 분기 예측기가 쉽게 맞히고, 비용은 매우 작다.</p>
+    <div class="codebox assembly" data-title="0으로 나누기를 소프트웨어로 검사하기">div   a0, a1, a2          # 먼저 나눈다 (a2 = 0 이어도 트랩 없음)
+beqz  a2, divide_by_zero  # 거의 항상 성립하지 않는 분기</div>
+
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>ISA</th><th>정수 0으로 나누기</th><th>최소 음수 ÷ −1</th></tr></thead>
+      <tbody>
+        <tr><td>x86-64 (<code>DIV</code>/<code>IDIV</code>)</td><td>#DE 예외 (트랩)</td><td>#DE 예외 (트랩)</td></tr>
+        <tr><td>Arm A64 (<code>SDIV</code>/<code>UDIV</code>)</td><td>결과 0, 트랩 없음</td><td>결과 = 피제수</td></tr>
+        <tr><td>RISC-V (<code>DIV</code>/<code>DIVU</code>)</td><td>몫 모든 비트 1, 나머지 = 피제수, 트랩 없음</td><td>몫 = 피제수, 나머지 0</td></tr>
+      </tbody>
+    </table></div>
+
+    <div class="sim" id="calculator-sim">
+      <div class="sim-head"><span class="sim-tag">SIMULATOR</span><h3>RV32 M 명령 계산기</h3></div>
+      <div class="sim-pad">
+        <div class="operand-summary" id="calculator-operands"></div>
+        <div class="result-grid" id="calculator-results"></div>
+      </div>
+      <div class="step-description" id="calculator-description"></div>
+      <div class="sim-controls">
+        <label class="control"><span>rs1 (10진 · 0x 16진 · 0b 2진)</span><input type="text" class="operand-input" id="calculator-first" value="-7" spellcheck="false"></label>
+        <label class="control"><span>rs2</span><input type="text" class="operand-input" id="calculator-second" value="2" spellcheck="false"></label>
+        <div class="control wide"><span>예제</span><div class="preset-row" id="calculator-presets">
+          <button class="button" data-first="7" data-second="2">7, 2</button>
+          <button class="button" data-first="-7" data-second="2">−7, 2</button>
+          <button class="button" data-first="7" data-second="-2">7, −2</button>
+          <button class="button" data-first="1234" data-second="0">0으로 나누기</button>
+          <button class="button" data-first="0x80000000" data-second="-1">오버플로</button>
+          <button class="button" data-first="0xffffffff" data-second="0xffffffff">−1 × −1</button>
+          <button class="button" data-first="100000" data-second="100000">큰 곱</button>
+        </div></div>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">특수 경우</span><span class="value" id="calculator-special">—</span></div>
+        <div class="stat"><span class="key">riscv.js 에뮬레이터와 비교</span><span class="value" id="calculator-verdict">—</span></div>
+      </div>
+      <div class="sim-note">“0으로 나누기”를 누르면 <code>div</code>는 −1, <code>divu</code>는 <code>0xffffffff</code>로 비트가 똑같고 두 나머지는 피제수 그대로임을 확인하자. “오버플로”에서는 <code>divu</code>는 평범한 결과를 내지만 <code>div</code>만 특수 경우가 된다. “−1 × −1”에서는 <code>mul</code>이 같아도 <code>mulh</code>(0)와 <code>mulhu</code>(<code>0xfffffffe</code>)가 갈린다. 각 결과는 같은 입력을 riscv.js 에뮬레이터로 실행한 값과도 대조한다.</div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="rv64-zmmul">
+    <h2>RV64의 W 명령과 Zmmul</h2>
+    <h3>W 명령: 32비트 결과를 부호 확장</h3>
+    <p><a href="rv64.html">6장</a>에서 본 <code>addw</code>와 같은 원리로, RV64의 <code>mulw</code>·<code>divw</code>·<code>divuw</code>·<code>remw</code>·<code>remuw</code>는 64비트 레지스터의 <b>하위 32비트만</b> 읽어 계산하고, 32비트 결과를 64비트로 <b>부호 확장</b>해 쓴다. C의 <code>int</code>가 32비트인 LP64 환경에서 <code>int</code> 연산을 명령 하나로 처리하기 위해서다. <code>divuw</code>처럼 부호 없는 연산도 결과는 부호 확장한다는 점, 그리고 <code>remw</code>·<code>remuw</code>는 0으로 나눌 때(나머지 = 피제수의 하위 32비트)도 부호 확장한다는 점을 기억하자.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 820 280" role="img" aria-label="RV64 mulw가 하위 32비트만 곱하고 결과를 부호 확장하는 모습">
+        <defs>
+          <marker id="word-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker>
+          <marker id="word-arrow-gold" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent-2)"/></marker>
+        </defs>
+        <text x="40" y="24" class="t-dim">rs1 (64비트)</text>
+        <rect x="40" y="32" width="370" height="40" rx="6" class="f-surface"/>
+        <text x="225" y="57" text-anchor="middle" class="t-faint">rs1[63:32] — 읽지 않음</text>
+        <rect x="410" y="32" width="370" height="40" rx="6" class="f-teal-soft"/>
+        <text x="595" y="57" text-anchor="middle" class="t-mono">rs1[31:0]</text>
+        <text x="40" y="94" class="t-dim">rs2 (64비트)</text>
+        <rect x="40" y="102" width="370" height="40" rx="6" class="f-surface"/>
+        <text x="225" y="127" text-anchor="middle" class="t-faint">rs2[63:32] — 읽지 않음</text>
+        <rect x="410" y="102" width="370" height="40" rx="6" class="f-teal-soft"/>
+        <text x="595" y="127" text-anchor="middle" class="t-mono">rs2[31:0]</text>
+        <path d="M782 52 H800 V170 H736" class="s-accent flow-dash" marker-end="url(#word-arrow)"/>
+        <path d="M782 122 H800" class="s-accent flow-dash"/>
+        <rect x="480" y="154" width="252" height="36" rx="8" class="f-gold-soft"/>
+        <text x="606" y="177" text-anchor="middle" class="t">32 × 32 곱의 하위 32비트</text>
+        <path d="M606 192 V212" class="s-accent" marker-end="url(#word-arrow)"/>
+        <text x="40" y="208" class="t-dim">rd (64비트)</text>
+        <rect x="40" y="216" width="370" height="44" rx="6" class="f-gold-soft"/>
+        <text x="225" y="243" text-anchor="middle" class="t">곱[31] 을 32번 복사 (부호 확장)</text>
+        <rect x="410" y="216" width="370" height="44" rx="6" class="f-ok-soft"/>
+        <text x="595" y="243" text-anchor="middle" class="t-mono">곱[31:0]</text>
+        <path d="M420 214 Q330 168 236 212" class="s-gold flow-dash" marker-end="url(#word-arrow-gold)"/>
+        <text x="330" y="176" text-anchor="middle" class="t-gold">비트 31 복사</text>
+      </svg></div>
+      <figcaption><b>그림 9-7.</b> RV64 <code>mulw</code>. 상위 32비트에 무엇이 들어 있든 결과에 영향이 없다. 결과는 항상 “32비트 값을 부호 확장한 64비트” 꼴이므로, 다음 W 명령이 그대로 받아 쓸 수 있다.</figcaption>
+    </figure>
+
+    <h3>Zmmul: 곱셈만 있는 M</h3>
+    <p><span class="term">Zmmul</span><span class="english">(v1.0)</span>은 M에서 곱셈 명령(<code>mul</code>, <code>mulh</code>, <code>mulhu</code>, <code>mulhsu</code>, RV64의 <code>mulw</code>)만 떼어 낸 확장이다. 인코딩은 M과 완전히 같다. 마이크로컨트롤러 프로그램에서 곱셈은 흔하지만 나눗셈은 드물어서, 나눗셈기 면적을 아끼고 싶은 코어에 알맞다. 특히 FPGA는 칩 안에 곱셈 전용 블록(DSP 슬라이스)이 박혀 있어 곱셈기는 사실상 공짜지만, 나눗셈기는 일반 논리 소자로 지어야 해서 비싸다.</p>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>구성</th><th>곱셈 명령</th><th>나눗셈 명령</th><th>나눗셈은 어떻게?</th></tr></thead>
+      <tbody>
+        <tr><td>M 없음 (RV32I)</td><td>없음 → <code>__mulsi3</code> 호출</td><td>없음 → <code>__divsi3</code> 등 호출</td><td>소프트웨어</td></tr>
+        <tr><td>Zmmul</td><td>있음</td><td>없음 (명령을 쓰면 잘못된 명령)</td><td>소프트웨어</td></tr>
+        <tr><td>M</td><td>있음</td><td>있음</td><td>하드웨어</td></tr>
+      </tbody>
+    </table></div>
+    <p>코드 크기를 아끼는 <a href="compressed.html">13장</a>의 Zcb 확장에는 16비트 <code>c.mul</code>도 있다. <code>c.mul</code>은 M 또는 Zmmul이 있어야 쓸 수 있다.</p>
+
+    <div class="callout deep"><strong>상수 나눗셈은 곱셈으로 바뀐다</strong><p>나눗셈은 곱셈보다 몇 배 느리다. 그래서 컴파일러는 제수가 상수이면 나눗셈 대신 “역수의 근삿값을 곱하고 시프트”하는 코드를 만든다(Granlund·Montgomery 1994). 예를 들어 32비트 부호 없는 <code>x / 10</code>은 <code>mulhu</code>로 <code>0xCCCCCCCD</code>를 곱한 상위 절반을 3비트 오른쪽으로 시프트한 값과 모든 x에서 같다. <code>mulhu</code>가 존재하는 큰 이유 중 하나다.</p></div>
+    <div class="codebox assembly" data-title="부호 없는 a0 / 10 — 나눗셈 명령 없이">lui   t0, 0xccccd
+addi  t0, t0, -819    # t0 = 0xcccccccd
+mulhu a0, a0, t0      # (a0 × 0xcccccccd) 의 상위 32비트
+srli  a0, a0, 3       # 2^35 / 0xcccccccd ≈ 10 이므로 결과는 a0 / 10</div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="multiplier-hardware">
+    <h2>곱셈기 하드웨어: shift-add에서 월리스 트리까지</h2>
+    <p>손으로 하는 곱셈을 2진수로 하면 아주 간단하다. 승수의 각 비트가 1이면 피승수를 그 자리만큼 왼쪽으로 민 값을 더하고, 0이면 건너뛴다. 이것을 한 사이클에 한 비트씩 하면 덧셈기 하나와 레지스터 몇 개로 끝나는 <span class="term">반복형 shift-add 곱셈기</span>가 된다. 대신 XLEN비트 곱에 XLEN 사이클 정도가 걸린다.</p>
+
+    <div class="sim" id="shift-add-sim">
+      <div class="sim-head"><span class="sim-tag animation">ANIMATION</span><h3>8비트 shift-add 곱셈기</h3></div>
+      <div class="sim-view"><canvas id="shift-add-canvas"></canvas></div>
+      <div class="step-description" id="shift-add-description"></div>
+      <div class="sim-controls">
+        <label class="control"><span>피승수 M <output id="shift-add-multiplicand-output"></output></span><input type="range" id="shift-add-multiplicand" min="0" max="255" value="13"></label>
+        <label class="control"><span>승수 Q <output id="shift-add-multiplier-output"></output></span><input type="range" id="shift-add-multiplier" min="0" max="255" value="11"></label>
+        <div class="control"><span>실행</span><div class="button-row"><button class="button primary" id="shift-add-step">한 단계</button><button class="button" id="shift-add-play">자동 재생</button><button class="button" id="shift-add-reset">처음으로</button></div></div>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">반복</span><span class="value" id="shift-add-iteration">0 / 8</span></div>
+        <div class="stat"><span class="key">곱 P</span><span class="value" id="shift-add-product">0</span></div>
+        <div class="stat"><span class="key">덧셈 횟수</span><span class="value" id="shift-add-additions">0</span></div>
+      </div>
+      <div class="sim-note">승수 Q의 최하위 비트(금색 테두리)가 1일 때만 피승수 M이 P에 더해진다. M은 매번 왼쪽으로, Q는 오른쪽으로 한 칸씩 밀린다. 승수를 255(비트 8개가 모두 1)로 두면 덧셈이 8번, 128로 두면 1번만 일어난다. 반복 횟수는 언제나 8번이다.</div>
+    </div>
+
+    <p>같은 알고리즘을 RV32I 명령으로 쓰면 아래와 같다. M 확장이 없을 때 라이브러리 함수가 하는 일이 바로 이것이다. 루프 한 바퀴에 명령 6~7개가 실행되니, 하드웨어 곱셈기가 왜 반가운지 알 수 있다.</p>
+    <div class="codebox assembly" data-title="M 없이 곱하기 — a0 = a0 × a1 (하위 32비트)">        li   t0, 0          # 곱을 모을 곳
+loop:   andi t1, a1, 1      # 승수의 최하위 비트
+        beqz t1, skip
+        add  t0, t0, a0     # 비트가 1이면 피승수를 더한다
+skip:   slli a0, a0, 1      # 피승수는 왼쪽으로
+        srli a1, a1, 1      # 승수는 오른쪽으로
+        bnez a1, loop       # 남은 1 비트가 없으면 끝
+        mv   a0, t0</div>
+
+    <h3>더 빠르게: 배열, Booth, 월리스 트리</h3>
+    <p>고성능 코어는 한 비트씩 기다리지 않는다. 부분곱 XLEN개를 한꺼번에 만들어 더하는데, 그 더하는 방법이 속도와 면적을 가른다.</p>
+    <ul>
+      <li><b>배열 곱셈기</b>: 덧셈기를 계단처럼 XLEN줄 쌓아 부분곱을 차례로 더한다. 규칙적이라 만들기 쉽지만 지연이 XLEN에 비례한다.</li>
+      <li><b>Booth 인코딩</b>: 승수를 2비트씩 묶어(기수 4) 부분곱을 −2M, −M, 0, M, 2M 중 하나로 만든다. 부분곱 수가 절반으로 준다. 부호 있는 곱셈도 자연스럽게 처리한다.</li>
+      <li><b>월리스(Wallace) 트리</b>: 자리올림을 바로 전파하지 않는 <b>캐리 세이브 덧셈기</b>(3개 입력 → 2개 출력)를 나무처럼 엮어 부분곱 더미를 log 단계 만에 두 줄로 줄이고, 마지막에만 빠른 덧셈기를 한 번 쓴다.</li>
+    </ul>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 840 300" role="img" aria-label="반복형, 배열, 월리스 트리 곱셈기 구조 비교">
+        <defs>
+          <marker id="structure-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--text-faint)"/></marker>
+        </defs>
+        <!-- (a) 반복형 -->
+        <g transform="translate(10,10)">
+          <rect width="260" height="280" rx="12" class="f-elev"/>
+          <text x="130" y="28" text-anchor="middle" class="t t-bold">(a) 반복형 shift-add</text>
+          <rect x="30" y="50" width="90" height="34" rx="6" class="f-teal-soft"/><text x="75" y="72" text-anchor="middle" class="t-mono">M ≪</text>
+          <rect x="140" y="50" width="90" height="34" rx="6" class="f-teal-soft"/><text x="185" y="72" text-anchor="middle" class="t-mono">Q ≫</text>
+          <circle cx="75" cy="130" r="20" class="f-gold-soft"/><text x="75" y="136" text-anchor="middle" class="t t-bold">+</text>
+          <path d="M75 86 V108" class="s-line" marker-end="url(#structure-arrow)"/>
+          <path d="M185 86 V130 H98" class="s-line s-dashed" marker-end="url(#structure-arrow)"/>
+          <path d="M30 187 H16 V130 H52" class="s-accent flow-dash" marker-end="url(#structure-arrow)"/>
+          <text x="150" y="122" class="t-faint">LSB</text>
+          <rect x="30" y="170" width="200" height="34" rx="6" class="f-accent-soft"/><text x="130" y="192" text-anchor="middle" class="t-mono">P (곱 누적)</text>
+          <path d="M75 152 V168" class="s-line" marker-end="url(#structure-arrow)"/>
+          <text x="130" y="234" text-anchor="middle" class="t-dim">덧셈기 1개</text>
+          <text x="130" y="256" text-anchor="middle" class="t-dim">XLEN 사이클 정도</text>
+        </g>
+        <!-- (b) 배열 -->
+        <g transform="translate(290,10)">
+          <rect width="260" height="280" rx="12" class="f-elev"/>
+          <text x="130" y="28" text-anchor="middle" class="t t-bold">(b) 배열 곱셈기</text>
+          <g>
+            <rect x="40" y="48" width="36" height="22" rx="4" class="f-violet-soft"/><rect x="80" y="48" width="36" height="22" rx="4" class="f-violet-soft"/><rect x="120" y="48" width="36" height="22" rx="4" class="f-violet-soft"/><rect x="160" y="48" width="36" height="22" rx="4" class="f-violet-soft"/>
+            <rect x="56" y="82" width="36" height="22" rx="4" class="f-gold-soft"/><rect x="96" y="82" width="36" height="22" rx="4" class="f-gold-soft"/><rect x="136" y="82" width="36" height="22" rx="4" class="f-gold-soft"/><rect x="176" y="82" width="36" height="22" rx="4" class="f-gold-soft"/>
+            <rect x="72" y="116" width="36" height="22" rx="4" class="f-gold-soft"/><rect x="112" y="116" width="36" height="22" rx="4" class="f-gold-soft"/><rect x="152" y="116" width="36" height="22" rx="4" class="f-gold-soft"/><rect x="192" y="116" width="36" height="22" rx="4" class="f-gold-soft"/>
+            <rect x="88" y="150" width="36" height="22" rx="4" class="f-gold-soft"/><rect x="128" y="150" width="36" height="22" rx="4" class="f-gold-soft"/><rect x="168" y="150" width="36" height="22" rx="4" class="f-gold-soft"/><rect x="208" y="150" width="36" height="22" rx="4" class="f-gold-soft"/>
+          </g>
+          <path d="M58 60 L226 172" class="s-gold flow-dash"/>
+          <text x="130" y="200" text-anchor="middle" class="t-faint">부분곱 한 줄마다 덧셈기 한 줄</text>
+          <text x="130" y="234" text-anchor="middle" class="t-dim">가산 셀 XLEN² 개 수준</text>
+          <text x="130" y="256" text-anchor="middle" class="t-dim">지연 ∝ XLEN</text>
+        </g>
+        <!-- (c) 월리스 트리 -->
+        <g transform="translate(570,10)">
+          <rect width="260" height="280" rx="12" class="f-elev"/>
+          <text x="130" y="28" text-anchor="middle" class="t t-bold">(c) Booth + 월리스 트리</text>
+          <g>
+            <rect x="24" y="46" width="32" height="18" rx="3" class="f-violet-soft"/><rect x="60" y="46" width="32" height="18" rx="3" class="f-violet-soft"/><rect x="96" y="46" width="32" height="18" rx="3" class="f-violet-soft"/><rect x="132" y="46" width="32" height="18" rx="3" class="f-violet-soft"/><rect x="168" y="46" width="32" height="18" rx="3" class="f-violet-soft"/><rect x="204" y="46" width="32" height="18" rx="3" class="f-violet-soft"/>
+            <rect x="40" y="88" width="76" height="22" rx="4" class="f-gold-soft"/><text x="78" y="104" text-anchor="middle" class="t-faint">CSA</text>
+            <rect x="144" y="88" width="76" height="22" rx="4" class="f-gold-soft"/><text x="182" y="104" text-anchor="middle" class="t-faint">CSA</text>
+            <rect x="92" y="134" width="76" height="22" rx="4" class="f-gold-soft"/><text x="130" y="150" text-anchor="middle" class="t-faint">CSA</text>
+            <rect x="70" y="178" width="120" height="24" rx="4" class="f-accent-soft"/><text x="130" y="195" text-anchor="middle" class="t-faint">빠른 덧셈기</text>
+          </g>
+          <path d="M40 66 L78 86 M76 66 L78 86 M112 66 L78 86 M148 66 L182 86 M184 66 L182 86 M220 66 L182 86" class="s-line"/>
+          <path d="M78 112 L130 132 M182 112 L130 132 M130 158 V176" class="s-line"/>
+          <text x="130" y="234" text-anchor="middle" class="t-dim">부분곱 절반 (기수 4 Booth)</text>
+          <text x="130" y="256" text-anchor="middle" class="t-dim">지연 ∝ log XLEN · 면적 큼</text>
+        </g>
+      </svg></div>
+      <figcaption><b>그림 9-8.</b> 곱셈기 구조 세 가지. (a)는 시간을, (c)는 면적을 많이 쓴다. 응용 프로세서는 보통 (c) 계열을 파이프라인으로 나눠 몇 사이클의 지연으로 매 사이클 새 곱셈을 시작하고, 아주 작은 마이크로컨트롤러는 (a)를 쓰거나 아예 Zmmul조차 빼기도 한다.</figcaption>
+    </figure>
+
+    <div class="table-wrap"><table>
+      <thead><tr><th>구현 방식</th><th>면적</th><th>지연 (XLEN비트)</th><th>어울리는 곳</th></tr></thead>
+      <tbody>
+        <tr><td>반복형 shift-add (1비트/사이클)</td><td>덧셈기 1개 + 레지스터</td><td>XLEN 사이클 정도</td><td>초소형 마이크로컨트롤러</td></tr>
+        <tr><td>반복형 기수-4 Booth (2비트/사이클)</td><td>조금 더 큼</td><td>XLEN/2 사이클 정도</td><td>작은 코어</td></tr>
+        <tr><td>배열 곱셈기</td><td>가산 셀 XLEN² 개 수준</td><td>한 사이클(긴 경로) 또는 나눠서 파이프라인</td><td>중간 성능</td></tr>
+        <tr><td>Booth + 월리스 트리, 파이프라인</td><td>큼</td><td>몇 사이클 지연, 매 사이클 새 곱셈 시작</td><td>응용·서버 프로세서</td></tr>
+        <tr><td>FPGA DSP 블록</td><td>칩에 이미 있음</td><td>1–몇 사이클</td><td>FPGA 소프트 코어 (Zmmul이 잘 맞음)</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="divider-hardware">
+    <h2>나눗셈기 하드웨어: 복원 나눗셈</h2>
+    <p>나눗셈은 곱셈처럼 병렬로 펼치기 어렵다. 몫의 다음 비트를 정하려면 앞 단계의 나머지가 있어야 하기 때문이다. 그래서 대부분의 코어는 반복형 나눗셈기를 쓰고, 나눗셈은 곱셈보다 훨씬 오래 걸린다. 가장 기본이 되는 방법이 손으로 하는 긴 나눗셈과 똑같은 <span class="term">복원 나눗셈</span><span class="english">(restoring division)</span>이다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 820 230" role="img" aria-label="복원 나눗셈 한 단계의 순서도">
+        <defs>
+          <marker id="restoring-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--text-faint)"/></marker>
+          <path id="restoring-loop-path" d="M722 142 V200 H120 V124"/>
+        </defs>
+        <rect x="20" y="40" width="200" height="80" rx="12" class="f-teal-soft"/>
+        <text x="120" y="72" text-anchor="middle" class="t t-bold">① R:Q 를</text>
+        <text x="120" y="96" text-anchor="middle" class="t">왼쪽으로 1비트</text>
+        <path d="M222 80 H262" class="s-line" marker-end="url(#restoring-arrow)"/>
+        <rect x="266" y="40" width="160" height="80" rx="12" class="f-gold-soft"/>
+        <text x="346" y="72" text-anchor="middle" class="t t-bold">② 빼 본다</text>
+        <text x="346" y="96" text-anchor="middle" class="t-mono">R ← R − D</text>
+        <path d="M428 80 H468" class="s-line" marker-end="url(#restoring-arrow)"/>
+        <rect x="472" y="54" width="110" height="52" rx="12" class="f-elev"/>
+        <text x="527" y="86" text-anchor="middle" class="t t-bold">R &lt; 0 ?</text>
+        <path d="M584 70 H618 V42 H630" class="s-line" marker-end="url(#restoring-arrow)"/>
+        <text x="600" y="60" text-anchor="middle" class="t-bad">예</text>
+        <rect x="634" y="18" width="176" height="52" rx="10" class="f-bad-soft"/>
+        <text x="722" y="40" text-anchor="middle" class="t">③ 복원: R ← R + D</text>
+        <text x="722" y="60" text-anchor="middle" class="t-mono">q = 0</text>
+        <path d="M584 92 H618 V118 H630" class="s-line" marker-end="url(#restoring-arrow)"/>
+        <text x="560" y="128" text-anchor="middle" class="t-ok">아니오</text>
+        <rect x="634" y="96" width="176" height="44" rx="10" class="f-ok-soft"/>
+        <text x="722" y="124" text-anchor="middle" class="t-mono">q = 1 (뺀 값 유지)</text>
+        <path d="M722 142 V200 H120 V126" class="s-accent flow-dash" marker-end="url(#restoring-arrow)"/>
+        <path d="M810 44 H816 V200 H722" class="s-accent flow-dash"/>
+        <text x="410" y="222" text-anchor="middle" class="t-accent">XLEN 번 반복 → Q = 몫, R = 나머지</text>
+        <circle r="5" fill="var(--accent-2)"><animateMotion dur="3.4s" begin="-1.2s" repeatCount="indefinite"><mpath href="#restoring-loop-path"/></animateMotion></circle>
+      </svg></div>
+      <figcaption><b>그림 9-9.</b> 복원 나눗셈 한 단계. 나머지 R과 피제수 Q를 한 덩어리로 왼쪽으로 밀고, 제수 D를 빼 본다. 음수가 되면 “빼면 안 됐다”는 뜻이므로 다시 더해 되돌리고(복원) 몫 비트를 0으로, 아니면 1로 정한다. 복원 단계를 없앤 비복원 나눗셈, 한 번에 여러 비트를 정하는 SRT 나눗셈은 이 방법을 다듬은 것이다.</figcaption>
+    </figure>
+
+    <div class="sim" id="restoring-sim">
+      <div class="sim-head"><span class="sim-tag animation">ANIMATION</span><h3>8비트 복원 나눗셈기</h3></div>
+      <div class="sim-view"><canvas id="restoring-canvas"></canvas></div>
+      <div class="step-description" id="restoring-description"></div>
+      <div class="sim-controls">
+        <label class="control"><span>피제수 <output id="restoring-dividend-output"></output></span><input type="range" id="restoring-dividend" min="0" max="255" value="100"></label>
+        <label class="control"><span>제수 D <output id="restoring-divisor-output"></output></span><input type="range" id="restoring-divisor" min="0" max="255" value="7"></label>
+        <div class="control"><span>실행</span><div class="button-row"><button class="button primary" id="restoring-step">한 단계</button><button class="button" id="restoring-play">자동 재생</button><button class="button" id="restoring-reset">처음으로</button></div></div>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">반복</span><span class="value" id="restoring-iteration">0 / 8</span></div>
+        <div class="stat"><span class="key">몫 Q</span><span class="value" id="restoring-quotient">—</span></div>
+        <div class="stat"><span class="key">나머지 R</span><span class="value" id="restoring-remainder">—</span></div>
+      </div>
+      <div class="sim-note">제수를 <b>0</b>으로 두고 끝까지 돌려 보자. 0을 빼면 절대 음수가 되지 않으니 몫 비트가 전부 1이 되어 <b>몫 = 255(모든 비트 1)</b>, 나머지 = 피제수가 된다. 규격이 0으로 나누기의 결과를 “모든 비트 1, 나머지는 피제수”로 정한 이유가 바로 이것이다. 단순한 나눗셈 회로가 아무 검사 없이 내놓는 값을 그대로 결과로 삼았다.</div>
+    </div>
+
+    <div class="callout tip"><strong>부호 있는 나눗셈은?</strong><p>부호 있는 나눗셈은 흔히 피연산자의 절댓값으로 부호 없는 나눗셈을 한 뒤 결과의 부호를 고친다. 0으로 나눌 때 부호 있는 몫도 “모든 비트 1(−1)”로 정해 두면 이 부호 없는 회로의 결과를 그대로 쓸 수 있다. 규격도 같은 결과를 정한 까닭이 하드웨어를 단순하게 하기 위해서라고 밝힌다. 나눗셈기는 보통 몇 사이클에서 수십 사이클까지 걸리며, 피연산자가 작으면 일찍 끝내는 구현도 많다.</p></div>
+  </section>
+
+  <section class="keypoints" id="summary">
+    <h2>핵심 정리</h2>
+    <ol>
+      <li>M 확장(v2.0)은 <code>OP</code> 옵코드에 <code>funct7 = 0000001</code>을 쓰는 R 형식 명령 8개다. funct3가 <code>mul</code>(000)부터 <code>remu</code>(111)까지 고른다. RV64는 <code>OP-32</code>에 W 명령 5개를 더한다.</li>
+      <li><code>mul</code>은 곱의 하위 XLEN비트(부호 무관), <code>mulh</code>·<code>mulhu</code>·<code>mulhsu</code>는 상위 XLEN비트를 준다. 전체 곱은 <code>mulh[[s]u] rdh, rs1, rs2</code> → <code>mul rdl, rs1, rs2</code> 순서(같은 소스 순서, rdh ≠ rs1·rs2)로 얻으며, 구현은 이를 한 번의 곱셈으로 융합할 수 있다.</li>
+      <li>나눗셈은 0 쪽으로 버림하고, 0이 아닌 나머지의 부호는 피제수를 따른다(C와 같다).</li>
+      <li>0으로 나누면 몫은 모든 비트 1, 나머지는 피제수. −2<sup>L−1</sup> ÷ −1은 몫 = 피제수, 나머지 0. <b>어느 경우에도 트랩은 없다.</b></li>
+      <li>트랩을 두지 않은 이유: 표준 ISA의 유일한 산술 트랩이 되는 것을 피하고, 필요하면 분기 하나로 검사할 수 있으며, “모든 비트 1”은 단순한 나눗셈 회로가 자연스럽게 내놓는 값이기 때문이다.</li>
+      <li>Zmmul(v1.0)은 곱셈만 있는 M의 부분집합으로, 나눗셈기가 부담스러운 작은 코어와 FPGA에 알맞다.</li>
+      <li>곱셈기는 shift-add 반복형부터 Booth·월리스 트리까지 지연과 면적을 맞바꾸고, 나눗셈은 본질적으로 순차적이라 반복형(복원·비복원·SRT)이 흔하다.</li>
+    </ol>
+  </section>
+
+  <section id="quiz">
+    <h2>확인 퀴즈</h2>
+    <div class="quiz">
+      <div class="quiz-question"><p>RV32에서 <code>mulhu a0, a1, a2</code>가 a0에 쓰는 값은?</p><div class="options">
+        <button class="option">a1 × a2의 하위 32비트</button>
+        <button class="option" data-correct>a1, a2를 부호 없는 수로 보고 곱한 64비트 곱의 상위 32비트</button>
+        <button class="option">a1, a2를 부호 있는 수로 보고 곱한 64비트 곱의 상위 32비트</button>
+        <button class="option">곱이 32비트를 넘으면 1, 아니면 0</button>
+      </div><div class="quiz-explanation">mulhu는 무부호 × 무부호 곱의 상위 절반이다. 부호 × 부호는 mulh, 부호 × 무부호는 mulhsu다.</div></div>
+      <div class="quiz-question"><p>M 확장 명령을 다른 R 형식 정수 명령과 구별해 주는 필드 값은?</p><div class="options">
+        <button class="option">opcode = 0010011</button>
+        <button class="option">funct3 = 111</button>
+        <button class="option" data-correct>funct7 = 0000001</button>
+        <button class="option">funct7 = 0100000</button>
+      </div><div class="quiz-explanation">옵코드는 add와 같은 OP(0110011)이고, funct7 = 0000001이 곱셈·나눗셈 무리를 뜻한다. 0100000은 sub·sra가 쓰는 값이다.</div></div>
+      <div class="quiz-question"><p>RV32에서 <code>rem</code>으로 −7을 2로 나눈 나머지는?</p><div class="options">
+        <button class="option" data-correct>−1</button>
+        <button class="option">1</button>
+        <button class="option">−3</button>
+        <button class="option">3</button>
+      </div><div class="quiz-explanation">몫은 0 쪽으로 버려 −3, 나머지는 −7 − 2 × (−3) = −1이다. 나머지의 부호는 피제수(−7)를 따른다.</div></div>
+      <div class="quiz-question"><p>RV32에서 a2 = 0일 때 <code>div a0, a1, a2</code>와 <code>rem a3, a1, a2</code>의 결과는?</p><div class="options">
+        <button class="option">잘못된 명령 예외가 난다</button>
+        <button class="option">a0 = 0, a3 = 0</button>
+        <button class="option" data-correct>a0 = −1 (0xffffffff), a3 = a1</button>
+        <button class="option">a0 = a1, a3 = 0</button>
+      </div><div class="quiz-explanation">0으로 나누면 트랩 없이 몫은 모든 비트 1, 나머지는 피제수가 된다. “a0 = a1, a3 = 0”은 부호 있는 오버플로의 결과다.</div></div>
+      <div class="quiz-question"><p>RV32에서 <code>div</code>로 0x80000000을 −1로 나누면 몫은?</p><div class="options">
+        <button class="option">0x7fffffff</button>
+        <button class="option" data-correct>0x80000000 (피제수 그대로)</button>
+        <button class="option">0xffffffff</button>
+        <button class="option">오버플로 예외</button>
+      </div><div class="quiz-explanation">참값 2<sup>31</sup>은 32비트 부호 있는 범위를 넘는다. 규격은 이때 몫 = 피제수, 나머지 = 0으로 정했고, 트랩은 없다.</div></div>
+      <div class="quiz-question"><p>상위·하위 절반을 함께 구할 때 규격이 권하는 순서와 어긋나는 것은?</p><div class="options">
+        <button class="option"><code>mulh t1, a0, a1</code> 다음 <code>mul t0, a0, a1</code></button>
+        <button class="option"><code>mulhu a2, a0, a1</code> 다음 <code>mul a3, a0, a1</code></button>
+        <button class="option" data-correct><code>mulh a0, a0, a1</code> 다음 <code>mul t0, a0, a1</code></button>
+        <button class="option"><code>mulhsu t2, a0, a1</code> 다음 <code>mul t3, a0, a1</code></button>
+      </div><div class="quiz-explanation">rdh(a0)가 rs1(a0)과 같다. 첫 명령이 a0을 덮어써서 둘째 mul이 틀린 값을 곱하고, 융합도 할 수 없다.</div></div>
+      <div class="quiz-question"><p>Zmmul만 구현한 코어에 대한 설명으로 옳은 것은?</p><div class="options">
+        <button class="option">mul만 있고 mulh 계열은 없다</button>
+        <button class="option" data-correct>mul·mulh·mulhsu·mulhu(RV64는 mulw까지)는 있고 나눗셈·나머지 명령은 없다</button>
+        <button class="option">M과 인코딩이 달라 별도 컴파일러 지원이 필요하다</button>
+        <button class="option">나눗셈은 있고 곱셈이 없다</button>
+      </div><div class="quiz-explanation">Zmmul은 M의 곱셈 부분이며 인코딩도 같다. M을 구현하면 Zmmul은 저절로 포함된다.</div></div>
+      <div class="quiz-question"><p>0으로 나누기의 몫을 “모든 비트 1”로 정한 이유로 규격이 드는 것은?</p><div class="options">
+        <button class="option">부동소수점의 무한대와 비트 모양을 맞추려고</button>
+        <button class="option">운영체제가 오류를 쉽게 찾게 하려고</button>
+        <button class="option" data-correct>단순한 부호 없는 나눗셈 회로가 자연스럽게 내놓는 값이라 회로가 단순해지기 때문</button>
+        <button class="option">C 표준이 그렇게 정해서</button>
+      </div><div class="quiz-explanation">복원 나눗셈기에서 0을 빼면 늘 성공하므로 몫 비트가 모두 1이 된다. 시뮬레이터에서 제수 0으로 직접 확인할 수 있다. C에서는 0으로 나누기가 정의되지 않은 동작이다.</div></div>
+    </div>
+  </section>
+
+  <section id="references">
+    <h2>더 읽을거리</h2>
+    <ul class="references">
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/m-st-ext.html" target="_blank" rel="noopener">The RISC-V Instruction Set Manual, Volume I — “M” Extension for Integer Multiplication and Division, Version 2.0 · Zmmul v1.0</a> (v20260120)</li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/zc.html" target="_blank" rel="noopener">Volume I — “Zc*” Extension for Code Size Reduction (Zcb의 c.mul)</a></li>
+      <li>David Patterson, John Hennessy, <i>Computer Organization and Design RISC-V Edition</i> — 3장 “Arithmetic for Computers”의 곱셈기·나눗셈기 설명</li>
+      <li>A. D. Booth, “A Signed Binary Multiplication Technique”, <i>Quarterly Journal of Mechanics and Applied Mathematics</i> (1951)</li>
+      <li>C. S. Wallace, “A Suggestion for a Fast Multiplier”, <i>IEEE Transactions on Electronic Computers</i> (1964)</li>
+      <li>Torbjörn Granlund, Peter L. Montgomery, “Division by Invariant Integers using Multiplication”, PLDI (1994)</li>
+      <li>Andrew Waterman, “Design of the RISC-V Instruction Set Architecture”, UC Berkeley 박사 논문 (2016)</li>
+    </ul>
+  </section>
+</main>
+
+<script>
+/* ---------------------------------------------------------------------------
+   코드 상자: 어셈블리 글자에 색을 입힌다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  document.querySelectorAll(".codebox.assembly").forEach((box) => {
+    box.innerHTML = window.Riscv.highlightAssembly(box.textContent);
+  });
+})();
+
+/* ---------------------------------------------------------------------------
+   RV32 M 명령 계산기
+   결과는 BigInt 로 규격의 정의를 그대로 계산하고, 같은 입력을 riscv.js 에뮬레이터로도
+   실행해 두 결과가 같은지 보여 준다. 정의를 두 번 확인하는 셈이다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const Riscv = window.Riscv;
+
+  // ---- 순수 계산 함수 시작 (node 시험에서 이 구간을 떼어 내 검증한다) ----
+  const WORD_BITS = 32n;
+  const WORD_MASK = (1n << 32n) - 1n;
+  const MOST_NEGATIVE_WORD = -2147483648;
+  const MAXIMUM_UNSIGNED_WORD = 4294967295;
+  const SPECIAL_DIVIDE_BY_ZERO = "divide-by-zero";
+  const SPECIAL_OVERFLOW = "overflow";
+
+  /** 32비트 값을 부호 없는 BigInt 로 */
+  function unsignedBig(value) { return BigInt(value >>> 0); }
+  /** 32비트 값을 부호 있는 BigInt 로 */
+  function signedBig(value) { return BigInt(value | 0); }
+  /** BigInt 결과의 하위 32비트를 부호 없는 Number 로 (음수는 2의 보수로 접힌다) */
+  function lowWord(bigValue) { return Number(bigValue & WORD_MASK); }
+
+  /**
+   * 8개 M 명령의 결과를 규격 정의대로 계산한다.
+   * 반환: [{ name, funct3, value(부호 없는 32비트), special }]
+   */
+  function computeMultiplyDivideResults(firstOperand, secondOperand) {
+    const signedFirst = signedBig(firstOperand);
+    const signedSecond = signedBig(secondOperand);
+    const unsignedFirst = unsignedBig(firstOperand);
+    const unsignedSecond = unsignedBig(secondOperand);
+    const isDivisorZero = (secondOperand | 0) === 0;
+    // 부호 있는 오버플로는 "가장 작은 음수 ÷ −1" 한 경우뿐이다
+    const isSignedOverflow = (firstOperand | 0) === MOST_NEGATIVE_WORD && (secondOperand | 0) === -1;
+
+    const results = [];
+    results.push({ name: "mul", funct3: "000", value: lowWord(signedFirst * signedSecond), special: null });
+    results.push({ name: "mulh", funct3: "001", value: lowWord((signedFirst * signedSecond) >> WORD_BITS), special: null });
+    results.push({ name: "mulhsu", funct3: "010", value: lowWord((signedFirst * unsignedSecond) >> WORD_BITS), special: null });
+    results.push({ name: "mulhu", funct3: "011", value: lowWord((unsignedFirst * unsignedSecond) >> WORD_BITS), special: null });
+
+    // BigInt 나눗셈은 0 쪽으로 버리고, % 의 부호는 피제수를 따른다. RISC-V 와 같은 규칙이다.
+    let signedQuotient;
+    let signedRemainder;
+    let signedSpecial = null;
+    if (isDivisorZero) {
+      signedQuotient = WORD_MASK;
+      signedRemainder = unsignedFirst;
+      signedSpecial = SPECIAL_DIVIDE_BY_ZERO;
+    } else if (isSignedOverflow) {
+      signedQuotient = unsignedFirst;
+      signedRemainder = 0n;
+      signedSpecial = SPECIAL_OVERFLOW;
+    } else {
+      signedQuotient = signedFirst / signedSecond;
+      signedRemainder = signedFirst % signedSecond;
+    }
+    let unsignedQuotient;
+    let unsignedRemainder;
+    let unsignedSpecial = null;
+    if (isDivisorZero) {
+      unsignedQuotient = WORD_MASK;
+      unsignedRemainder = unsignedFirst;
+      unsignedSpecial = SPECIAL_DIVIDE_BY_ZERO;
+    } else {
+      unsignedQuotient = unsignedFirst / unsignedSecond;
+      unsignedRemainder = unsignedFirst % unsignedSecond;
+    }
+    results.push({ name: "div", funct3: "100", value: lowWord(signedQuotient), special: signedSpecial });
+    results.push({ name: "divu", funct3: "101", value: lowWord(unsignedQuotient), special: unsignedSpecial });
+    results.push({ name: "rem", funct3: "110", value: lowWord(signedRemainder), special: signedSpecial });
+    results.push({ name: "remu", funct3: "111", value: lowWord(unsignedRemainder), special: unsignedSpecial });
+    return results;
+  }
+  // ---- 순수 계산 함수 끝 ----
+
+  const VERIFY_SOURCE = [
+    "mul    s2, a0, a1",
+    "mulh   s3, a0, a1",
+    "mulhsu s4, a0, a1",
+    "mulhu  s5, a0, a1",
+    "div    s6, a0, a1",
+    "divu   s7, a0, a1",
+    "rem    s8, a0, a1",
+    "remu   s9, a0, a1",
+    "ebreak",
+  ].join("\n");
+  const FIRST_RESULT_REGISTER = 18; // s2 부터 s9 까지 차례로 결과가 들어간다
+  const ARGUMENT_REGISTER_FIRST = 10;
+  const ARGUMENT_REGISTER_SECOND = 11;
+  const VERIFY_STEP_LIMIT = 20;
+  const RESULT_COUNT = 8;
+  const MULTIPLY_INSTRUCTION_COUNT = 4; // 앞의 넷이 곱셈, 뒤의 넷이 나눗셈·나머지
+  const SIGNED_QUOTIENT_INDEX = 4;
+  const SIGNED_REMAINDER_INDEX = 6;
+  const verifyProgram = Riscv.assemble(VERIFY_SOURCE);
+  const machine = new Riscv.Machine();
+
+  const SPECIAL_LABELS = { "divide-by-zero": "0으로 나누기", "overflow": "부호 있는 오버플로" };
+  const firstInput = document.getElementById("calculator-first");
+  const secondInput = document.getElementById("calculator-second");
+  const resultGrid = document.getElementById("calculator-results");
+  const operandSummary = document.getElementById("calculator-operands");
+  const description = document.getElementById("calculator-description");
+
+  /** 10진 · 16진 · 2진 글자를 32비트 값으로. 범위를 벗어나면 null */
+  function parseOperand(text) {
+    const parsed = Riscv.parseInteger(text);
+    if (parsed === null || parsed < MOST_NEGATIVE_WORD || parsed > MAXIMUM_UNSIGNED_WORD) return null;
+    return parsed | 0;
+  }
+  function describeValue(value) {
+    return book.toHex(value >>> 0, 32) + " · 부호 있음 " + (value | 0) + " · 부호 없음 " + (value >>> 0);
+  }
+  function runOnEmulator(firstOperand, secondOperand) {
+    machine.load(verifyProgram);
+    machine.registers[ARGUMENT_REGISTER_FIRST] = firstOperand;
+    machine.registers[ARGUMENT_REGISTER_SECOND] = secondOperand;
+    machine.run(VERIFY_STEP_LIMIT);
+    const values = [];
+    for (let offset = 0; offset < RESULT_COUNT; offset += 1) values.push(machine.registers[FIRST_RESULT_REGISTER + offset] >>> 0);
+    return values;
+  }
+
+  function update() {
+    const firstOperand = parseOperand(firstInput.value);
+    const secondOperand = parseOperand(secondInput.value);
+    if (firstOperand === null || secondOperand === null) {
+      description.innerHTML = "⚠️ 입력은 −2147483648 ~ 4294967295 사이의 정수여야 한다 (예: <code>-7</code>, <code>0x80000000</code>, <code>0b1010</code>).";
+      document.getElementById("calculator-verdict").textContent = "—";
+      return;
+    }
+    operandSummary.innerHTML = "rs1 = <b>" + describeValue(firstOperand) + "</b><br>rs2 = <b>" + describeValue(secondOperand) + "</b>";
+    const results = computeMultiplyDivideResults(firstOperand, secondOperand);
+    const emulatorValues = runOnEmulator(firstOperand, secondOperand);
+    const isEverythingMatching = results.every((result, index) => emulatorValues[index] === result.value);
+    resultGrid.innerHTML = results.map((result, index) => {
+      const isMultiply = index < MULTIPLY_INSTRUCTION_COUNT;
+      const classNames = ["cell", "result-cell", isMultiply ? "is-multiply" : "is-divide"];
+      if (result.special) classNames.push("is-special");
+      const tag = result.special ? '<div class="tag">' + SPECIAL_LABELS[result.special] + "</div>" : "";
+      return '<div class="' + classNames.join(" ") + '"><div class="cell-name"><span>' + result.name + "</span><span>funct3 " + result.funct3 + "</span></div>" +
+        '<div class="cell-value">' + book.toHex(result.value, 32) + "</div>" +
+        '<div class="detail">부호 있음 ' + (result.value | 0) + "<br>부호 없음 " + result.value + "</div>" + tag + "</div>";
+    }).join("");
+
+    const specialNames = [...new Set(results.filter((result) => result.special).map((result) => SPECIAL_LABELS[result.special]))];
+    document.getElementById("calculator-special").textContent = specialNames.length ? specialNames.join(" · ") : "없음";
+    const verdict = document.getElementById("calculator-verdict");
+    verdict.textContent = isEverythingMatching ? "8개 모두 일치 ✓" : "불일치!";
+    verdict.className = "value " + (isEverythingMatching ? "verdict-ok" : "verdict-bad");
+
+    if ((secondOperand | 0) === 0) {
+      description.innerHTML = "제수가 0이다. 트랩 없이 <code>div</code>·<code>divu</code>는 모든 비트가 1인 값을, <code>rem</code>·<code>remu</code>는 피제수를 그대로 돌려준다.";
+    } else if ((firstOperand | 0) === MOST_NEGATIVE_WORD && (secondOperand | 0) === -1) {
+      description.innerHTML = "−2<sup>31</sup> ÷ −1 = 2<sup>31</sup>은 부호 있는 32비트에 들어가지 않는다. <code>div</code>는 피제수를, <code>rem</code>은 0을 돌려준다. 같은 비트를 부호 없이 본 <code>divu</code>(2147483648 ÷ 4294967295)는 평범하게 0이다.";
+    } else {
+      const quotient = results[SIGNED_QUOTIENT_INDEX].value | 0;
+      const remainder = results[SIGNED_REMAINDER_INDEX].value | 0;
+      description.innerHTML = "부호 있는 해석: " + (firstOperand | 0) + " = " + (secondOperand | 0) + " × (" + quotient + ") + (" + remainder + "). 몫은 0 쪽으로 버리고 나머지의 부호는 피제수를 따른다.";
+    }
+  }
+
+  firstInput.addEventListener("input", update);
+  secondInput.addEventListener("input", update);
+  document.querySelectorAll("#calculator-presets button").forEach((button) => {
+    button.addEventListener("click", () => {
+      firstInput.value = button.dataset.first;
+      secondInput.value = button.dataset.second;
+      update();
+    });
+  });
+  update();
+})();
+
+/* ---------------------------------------------------------------------------
+   두 명령으로 64비트 곱 조립하기
+   상위 절반 명령과 mul 을 riscv.js 에뮬레이터로 실제 실행한다.
+   rdh 를 rs1 과 같게 고르면 첫 명령이 rs1 을 덮어써 둘째 mul 이 틀리는 모습까지 그대로 보인다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const Riscv = window.Riscv;
+  const MOST_NEGATIVE_WORD = -2147483648;
+  const MAXIMUM_UNSIGNED_WORD = 4294967295;
+  const WORD_BITS = 32n;
+  const WORD_MASK = (1n << 32n) - 1n;
+  const DOUBLE_WORD_BITS = 64;
+  const ARGUMENT_REGISTER_FIRST = 10;
+  const ARGUMENT_REGISTER_SECOND = 11;
+  const LOW_RESULT_REGISTER = 5; // t0
+  const STEP_LIMIT = 10;
+  const ANIMATION_MILLISECONDS = 650;
+  const ANIMATION_DELAY_MILLISECONDS = 350;
+  const BINARY_GROUP_SIZE = 4;
+
+  const firstInput = document.getElementById("product-first");
+  const secondInput = document.getElementById("product-second");
+  const description = document.getElementById("product-description");
+  const machine = new Riscv.Machine();
+  let highInstructionName = "mulhu";
+  let highDestinationName = "t1";
+
+  function parseOperand(text) {
+    const parsed = Riscv.parseInteger(text);
+    if (parsed === null || parsed < MOST_NEGATIVE_WORD || parsed > MAXIMUM_UNSIGNED_WORD) return null;
+    return parsed | 0;
+  }
+  /** 해석 방식에 맞춰 두 피연산자를 BigInt 로 바꾼 뒤 곱한 참값 */
+  function exactProduct(firstOperand, secondOperand) {
+    const signedFirst = BigInt(firstOperand | 0);
+    const unsignedFirst = BigInt(firstOperand >>> 0);
+    const signedSecond = BigInt(secondOperand | 0);
+    const unsignedSecond = BigInt(secondOperand >>> 0);
+    if (highInstructionName === "mulh") return signedFirst * signedSecond;
+    if (highInstructionName === "mulhsu") return signedFirst * unsignedSecond;
+    return unsignedFirst * unsignedSecond;
+  }
+
+  function update() {
+    const firstOperand = parseOperand(firstInput.value);
+    const secondOperand = parseOperand(secondInput.value);
+    if (firstOperand === null || secondOperand === null) {
+      description.innerHTML = "⚠️ 입력은 −2147483648 ~ 4294967295 사이의 정수여야 한다.";
+      return;
+    }
+    const highText = highInstructionName + " " + highDestinationName + ", a0, a1";
+    const lowText = "mul t0, a0, a1";
+    const program = Riscv.assemble(highText + "\n" + lowText + "\nebreak");
+    machine.load(program);
+    machine.registers[ARGUMENT_REGISTER_FIRST] = firstOperand;
+    machine.registers[ARGUMENT_REGISTER_SECOND] = secondOperand;
+    machine.run(STEP_LIMIT);
+    const highRegister = Riscv.registerNumber(highDestinationName);
+    const highValue = machine.registers[highRegister] >>> 0;
+    const lowValue = machine.registers[LOW_RESULT_REGISTER] >>> 0;
+
+    const product = exactProduct(firstOperand, secondOperand);
+    const expectedHigh = Number((product >> WORD_BITS) & WORD_MASK);
+    const expectedLow = Number(product & WORD_MASK);
+    const isHighCorrect = expectedHigh === highValue;
+    const isLowCorrect = expectedLow === lowValue;
+
+    document.getElementById("product-high-instruction").textContent = highText;
+    document.getElementById("product-low-instruction").textContent = lowText;
+    document.getElementById("product-high-result").textContent = highDestinationName + " = " + book.toHex(highValue, 32);
+    document.getElementById("product-low-result").textContent = "t0 = " + book.toHex(lowValue, 32);
+    document.getElementById("product-high-name").textContent = highDestinationName + " · [63:32]";
+    document.getElementById("product-high-value").textContent = book.toHex(highValue, 32);
+    document.getElementById("product-low-value").textContent = book.toHex(lowValue, 32);
+    document.getElementById("product-high-bits").textContent = book.toBinary(highValue, 32, BINARY_GROUP_SIZE);
+    document.getElementById("product-low-bits").textContent = book.toBinary(lowValue, 32, BINARY_GROUP_SIZE);
+    document.getElementById("product-high-half").classList.toggle("is-wrong", !isHighCorrect);
+    document.getElementById("product-low-half").classList.toggle("is-wrong", !isLowCorrect);
+
+    // 합친 64비트 값을 해석 방식대로 10진수로 보여 준다
+    const combined = (BigInt(highValue) << WORD_BITS) | BigInt(lowValue);
+    const isSignedView = highInstructionName !== "mulhu";
+    const combinedValue = isSignedView ? BigInt.asIntN(DOUBLE_WORD_BITS, combined) : combined;
+    document.getElementById("product-total").innerHTML = highDestinationName + ":t0 = 0x" + highValue.toString(16).padStart(8, "0") + "_" + lowValue.toString(16).padStart(8, "0") + " = <b>" + combinedValue.toString() + "</b>";
+    document.getElementById("product-expected").textContent = product.toString();
+    const verdict = document.getElementById("product-verdict");
+    const isCorrect = isHighCorrect && isLowCorrect;
+    verdict.textContent = isCorrect ? "참값과 일치 ✓" : "하위 절반이 틀림 ✗";
+    verdict.className = "value " + (isCorrect ? "verdict-ok" : "verdict-bad");
+
+    if (isCorrect) {
+      const kind = { mulhu: "무부호 × 무부호", mulh: "부호 × 부호", mulhsu: "부호(a0) × 무부호(a1)" }[highInstructionName];
+      description.innerHTML = "<b>" + kind + "</b>로 해석했다. 첫 명령이 상위 32비트를, 둘째 명령이 하위 32비트를 만들고, 둘을 이어 붙이면 64비트 참값 " + product.toString() + "이 된다.";
+    } else {
+      description.innerHTML = "첫 명령이 결과를 <b>a0</b>(= rs1)에 써 버렸다. 그래서 둘째 <code>mul t0, a0, a1</code>은 원래 피연산자가 아니라 상위 절반 값과 a1을 곱했고, 하위 절반이 틀렸다. 규격이 “rdh ≠ rs1, rs2”를 요구하는 이유다.";
+    }
+  }
+
+  function playAssembly() {
+    const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (prefersReducedMotion) return;
+    const highHalf = document.getElementById("product-high-half");
+    const lowHalf = document.getElementById("product-low-half");
+    const keyframes = [{ transform: "translateY(-46px)", opacity: 0 }, { transform: "translateY(0)", opacity: 1 }];
+    highHalf.animate(keyframes, { duration: ANIMATION_MILLISECONDS, easing: "ease-out" });
+    lowHalf.animate(keyframes, { duration: ANIMATION_MILLISECONDS, delay: ANIMATION_DELAY_MILLISECONDS, easing: "ease-out", fill: "backwards" });
+  }
+
+  firstInput.addEventListener("input", update);
+  secondInput.addEventListener("input", update);
+  book.segmented("product-mode", (value) => { highInstructionName = value; update(); });
+  book.segmented("product-destination", (value) => { highDestinationName = value; update(); });
+  document.getElementById("product-assemble").addEventListener("click", () => { update(); playAssembly(); });
+  update();
+})();
+
+/* ---------------------------------------------------------------------------
+   단계형 캔버스 애니메이션의 공통 틀.
+   steps 배열(스냅숏)을 만들어 두고, displayIndex 를 targetIndex 쪽으로 조금씩 움직이며
+   두 스냅숏 사이를 보간해 그린다. 그래서 "한 단계"와 "자동 재생"이 같은 그림 코드를 쓴다.
+--------------------------------------------------------------------------- */
+window.MultiplyChapterStepper = (function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const STEPS_PER_SECOND = 1.5;
+
+  function createStepper(options) {
+    const state = { steps: [], displayIndex: 0, targetIndex: 0, isPlaying: false, lastShownIndex: -1 };
+    const canvasHandle = book.createCanvas(options.canvas, (context, width, height, colors) => {
+      if (!state.steps.length) return;
+      const baseIndex = Math.floor(state.displayIndex);
+      const fraction = state.displayIndex - baseIndex;
+      const current = state.steps[baseIndex];
+      const next = state.steps[Math.min(baseIndex + 1, state.steps.length - 1)];
+      options.draw(context, width, height, colors, current, next, book.easeInOut(fraction));
+    }, options.canvasOptions);
+
+    function refreshText() {
+      // 그림이 다음 상태로 완전히 넘어간 뒤에 글도 바꿔야 그림과 설명이 어긋나지 않는다
+      const shownIndex = Math.floor(state.displayIndex);
+      if (shownIndex === state.lastShownIndex) return;
+      state.lastShownIndex = shownIndex;
+      options.describe(state.steps[shownIndex]);
+    }
+    function setPlayLabel() {
+      options.playButton.textContent = state.isPlaying ? "멈춤" : "자동 재생";
+    }
+    book.animationLoop(options.canvas, (deltaSeconds) => {
+      let hasChanged = false;
+      if (state.displayIndex < state.targetIndex) {
+        state.displayIndex = Math.min(state.targetIndex, state.displayIndex + deltaSeconds * STEPS_PER_SECOND);
+        hasChanged = true;
+      } else if (state.isPlaying) {
+        if (state.targetIndex < state.steps.length - 1) {
+          state.targetIndex += 1;
+        } else {
+          state.isPlaying = false;
+          setPlayLabel();
+        }
+      }
+      if (hasChanged) {
+        canvasHandle.redraw();
+        refreshText();
+      }
+    });
+
+    function reset() {
+      state.steps = options.buildSteps();
+      state.displayIndex = 0;
+      state.targetIndex = 0;
+      state.isPlaying = false;
+      state.lastShownIndex = -1;
+      setPlayLabel();
+      canvasHandle.redraw();
+      refreshText();
+    }
+    options.stepButton.addEventListener("click", () => {
+      state.isPlaying = false;
+      setPlayLabel();
+      // 움직이는 중에 누르면 그 단계를 바로 끝내고, 다음 단계로 넘어가는 움직임을 시작한다
+      if (state.displayIndex < state.targetIndex) {
+        state.displayIndex = state.targetIndex;
+        canvasHandle.redraw();
+        refreshText();
+      }
+      state.targetIndex = Math.min(state.targetIndex + 1, state.steps.length - 1);
+    });
+    options.playButton.addEventListener("click", () => {
+      if (!state.isPlaying && state.targetIndex >= state.steps.length - 1) reset();
+      state.isPlaying = !state.isPlaying;
+      setPlayLabel();
+    });
+    options.resetButton.addEventListener("click", reset);
+    return { reset };
+  }
+
+  /** 비트 칸 하나를 그린다. 강조 종류에 따라 채움과 테두리를 바꾼다. */
+  function drawBitCell(context, x, y, size, bit, colors, emphasis) {
+    book.roundedRectangle(context, x + 1, y + 1, size - 2, size - 2, 4);
+    let fillColor = colors.surface;
+    if (bit) {
+      fillColor = colors.accent;
+      if (emphasis === "bad") fillColor = colors.bad;
+      if (emphasis === "ok") fillColor = colors.ok;
+    }
+    context.fillStyle = fillColor;
+    context.fill();
+    context.lineWidth = emphasis === "ring" ? 3 : 1;
+    context.strokeStyle = emphasis === "ring" ? colors.gold : colors.border;
+    context.stroke();
+    book.drawText(context, String(bit), x + size / 2, y + size / 2 + 1, { size: Math.round(size * 0.55), bold: true, mono: true, align: "center", color: bit ? colors.onAccent : colors.dim });
+  }
+
+  return { createStepper, drawBitCell };
+})();
+
+/* ---------------------------------------------------------------------------
+   8비트 shift-add 곱셈기 애니메이션
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const stepper = window.MultiplyChapterStepper;
+
+  // ---- 순수 계산 함수 시작 (node 시험에서 이 구간을 떼어 내 검증한다) ----
+  const OPERAND_BITS = 8;
+  const PRODUCT_MASK = 0xffff;
+
+  /** 반복형 shift-add 곱셈의 모든 중간 상태를 차례로 만든다 */
+  function buildShiftAddSteps(multiplicand, multiplier) {
+    const steps = [];
+    let shiftedMultiplicand = multiplicand;
+    let remainingMultiplier = multiplier;
+    let product = 0;
+    let additionCount = 0;
+    const snapshot = (kind, iteration, extra) => Object.assign({
+      kind, iteration, multiplicandRegister: shiftedMultiplicand, multiplierRegister: remainingMultiplier, product, additionCount,
+    }, extra || {});
+    steps.push(snapshot("start", 0));
+    for (let iteration = 1; iteration <= OPERAND_BITS; iteration += 1) {
+      const lowestBit = remainingMultiplier & 1;
+      steps.push(snapshot("check", iteration, { lowestBit }));
+      if (lowestBit) {
+        product = (product + shiftedMultiplicand) & PRODUCT_MASK;
+        additionCount += 1;
+        steps.push(snapshot("add", iteration, { lowestBit }));
+      } else {
+        steps.push(snapshot("skip", iteration, { lowestBit }));
+      }
+      shiftedMultiplicand = (shiftedMultiplicand << 1) & PRODUCT_MASK;
+      remainingMultiplier >>= 1;
+      steps.push(snapshot("shift", iteration));
+    }
+    steps.push(snapshot("done", OPERAND_BITS));
+    return steps;
+  }
+  // ---- 순수 계산 함수 끝 ----
+
+  const PRODUCT_BITS = 16;
+  const MARGIN = 16;
+  const MINIMUM_CELL = 14;
+  const MAXIMUM_CELL = 30;
+  const multiplicandRange = document.getElementById("shift-add-multiplicand");
+  const multiplierRange = document.getElementById("shift-add-multiplier");
+  const description = document.getElementById("shift-add-description");
+  let controller = null;
+
+  function layout(width) {
+    const cell = book.clamp(Math.floor((width - 2 * MARGIN) / PRODUCT_BITS), MINIMUM_CELL, MAXIMUM_CELL);
+    const rowWidth = cell * PRODUCT_BITS;
+    const left = Math.round((width - rowWidth) / 2);
+    // bitIndex 0 이 가장 오른쪽 칸이다
+    const columnX = (bitIndex) => left + (PRODUCT_BITS - 1 - bitIndex) * cell;
+    return { cell, rowWidth, left, columnX };
+  }
+
+  function drawRow(context, geometry, y, value, bitCount, colors, options) {
+    const settings = Object.assign({ offsetCells: 0, highlightBit: -1, emphasis: null }, options || {});
+    context.save();
+    context.beginPath();
+    context.rect(geometry.columnX(bitCount - 1) - 1, y - 2, bitCount * geometry.cell + 2, geometry.cell + 4);
+    context.clip();
+    // 시프트 중에는 칸 전체를 offsetCells 만큼 옆으로 미끄러뜨린다 (음수 = 왼쪽).
+    // 이때만 양 끝 바깥 칸을 하나씩 더 그려, 새로 들어오는 0 이 미끄러져 들어오게 한다.
+    const isSliding = settings.offsetCells !== 0;
+    const firstBit = isSliding ? -1 : 0;
+    const lastBit = isSliding ? bitCount : bitCount - 1;
+    for (let bitIndex = firstBit; bitIndex <= lastBit; bitIndex += 1) {
+      const bit = bitIndex >= 0 && bitIndex < bitCount ? (value >> bitIndex) & 1 : 0;
+      const x = geometry.columnX(bitIndex) + settings.offsetCells * geometry.cell;
+      let emphasis = settings.emphasis;
+      if (bitIndex === settings.highlightBit) emphasis = "ring";
+      stepper.drawBitCell(context, x, y, geometry.cell, bit, colors, emphasis);
+    }
+    context.restore();
+  }
+
+  function draw(context, width, height, colors, current, next, fraction) {
+    const geometry = layout(width);
+    const labelSize = width < 520 ? 12 : 13;
+    const rowGap = geometry.cell + 34;
+    const multiplicandY = 30;
+    const multiplierY = multiplicandY + rowGap;
+    const productY = multiplierY + rowGap;
+    const rightEdge = geometry.left + geometry.rowWidth;
+    const isShifting = next.kind === "shift" && current !== next;
+    const isAdding = next.kind === "add" && current !== next;
+
+    book.drawText(context, "M 피승수 (매번 왼쪽으로)", geometry.left, multiplicandY - 10, { size: labelSize, bold: true, color: colors.teal });
+    book.drawText(context, "= " + current.multiplicandRegister, rightEdge, multiplicandY - 10, { size: labelSize, mono: true, align: "right", color: colors.dim });
+    drawRow(context, geometry, multiplicandY, current.multiplicandRegister, PRODUCT_BITS, colors, { offsetCells: isShifting ? -fraction : 0 });
+
+    book.drawText(context, "Q 승수 (매번 오른쪽으로)", geometry.left, multiplierY - 10, { size: labelSize, bold: true, color: colors.violet });
+    book.drawText(context, "= " + current.multiplierRegister, rightEdge, multiplierY - 10, { size: labelSize, mono: true, align: "right", color: colors.dim });
+    const shouldRingLowest = current.kind === "check" || current.kind === "add" || current.kind === "skip" || next.kind === "check";
+    drawRow(context, geometry, multiplierY, current.multiplierRegister, OPERAND_BITS, colors, { offsetCells: isShifting ? fraction : 0, highlightBit: shouldRingLowest && !isShifting ? 0 : -1 });
+
+    book.drawText(context, "P 곱 누적", geometry.left, productY - 10, { size: labelSize, bold: true, color: colors.accent });
+    book.drawText(context, "= " + current.product, rightEdge, productY - 10, { size: labelSize, mono: true, align: "right", color: colors.dim });
+    const productEmphasis = current.kind === "add" ? "ok" : null;
+    drawRow(context, geometry, productY, current.product, PRODUCT_BITS, colors, { emphasis: productEmphasis });
+
+    // 더하는 중: M 의 복사본이 P 쪽으로 내려온다
+    if (isAdding) {
+      context.save();
+      context.globalAlpha = 0.75 * (1 - fraction * 0.4);
+      const travelY = book.linearInterpolate(multiplicandY, productY, fraction);
+      drawRow(context, geometry, travelY, current.multiplicandRegister, PRODUCT_BITS, colors, { emphasis: "ok" });
+      context.restore();
+      book.drawText(context, "+", geometry.left - 4, travelY + geometry.cell / 2, { size: 18, bold: true, align: "right", color: colors.ok });
+    }
+    const footerY = productY + geometry.cell + 22;
+    if (current.kind === "done") {
+      book.drawText(context, "완료: P = " + current.product + " (덧셈 " + current.additionCount + "번)", width / 2, footerY, { size: 14, bold: true, align: "center", color: colors.ok });
+    } else if (current.iteration > 0) {
+      book.drawText(context, "반복 " + current.iteration + " / " + OPERAND_BITS, width / 2, footerY, { size: 13, align: "center", color: colors.dim });
+    }
+  }
+
+  function describe(step) {
+    document.getElementById("shift-add-iteration").textContent = step.iteration + " / " + OPERAND_BITS;
+    document.getElementById("shift-add-product").textContent = step.product;
+    document.getElementById("shift-add-additions").textContent = step.additionCount;
+    const texts = {
+      start: "시작. P = 0, M = 피승수, Q = 승수. 8번 반복한다.",
+      check: "반복 " + step.iteration + ": Q의 최하위 비트를 본다 → <b>" + step.lowestBit + "</b>",
+      add: "비트가 1이므로 <b>P ← P + M</b>. 지금 M에는 피승수를 " + (step.iteration - 1) + "칸 민 값(" + step.multiplicandRegister + ")이 들어 있다. P = " + step.product,
+      skip: "비트가 0이므로 이번에는 더하지 않는다.",
+      shift: "M은 왼쪽으로 한 칸(×2), Q는 오른쪽으로 한 칸 민다. 다음 비트가 Q의 맨 오른쪽으로 온다.",
+      done: "끝. P = " + step.product + " 이 곧 피승수 × 승수다. 덧셈은 승수의 1 비트 수만큼, " + step.additionCount + "번 일어났다.",
+    };
+    description.innerHTML = texts[step.kind];
+  }
+
+  controller = stepper.createStepper({
+    canvas: document.getElementById("shift-add-canvas"),
+    canvasOptions: { aspectRatio: 0.3, minimumHeight: 236, maximumHeight: 240 },
+    draw,
+    describe,
+    buildSteps: () => buildShiftAddSteps(Number(multiplicandRange.value), Number(multiplierRange.value)),
+    stepButton: document.getElementById("shift-add-step"),
+    playButton: document.getElementById("shift-add-play"),
+    resetButton: document.getElementById("shift-add-reset"),
+  });
+  book.range("shift-add-multiplicand", () => { if (controller) controller.reset(); }, (value) => value + " (" + book.toBinary(value, OPERAND_BITS) + ")");
+  book.range("shift-add-multiplier", () => { if (controller) controller.reset(); }, (value) => value + " (" + book.toBinary(value, OPERAND_BITS) + ")");
+  controller.reset();
+})();
+
+/* ---------------------------------------------------------------------------
+   8비트 복원 나눗셈 애니메이션
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const stepper = window.MultiplyChapterStepper;
+
+  // ---- 순수 계산 함수 시작 (node 시험에서 이 구간을 떼어 내 검증한다) ----
+  const DIVISION_BITS = 8;
+  const QUOTIENT_MASK = 0xff;
+  const QUOTIENT_TOP_BIT = 7;
+
+  /** 복원 나눗셈의 모든 중간 상태. remainder 는 뺄셈 직후 음수일 수 있다. */
+  function buildRestoringSteps(dividend, divisor) {
+    const steps = [];
+    let remainder = 0;
+    let quotientRegister = dividend;
+    const snapshot = (kind, iteration, extra) => Object.assign({ kind, iteration, remainder, quotientRegister, divisor, dividend }, extra || {});
+    steps.push(snapshot("start", 0));
+    for (let iteration = 1; iteration <= DIVISION_BITS; iteration += 1) {
+      // R:Q 를 한 덩어리로 왼쪽으로 민다. Q 의 맨 윗비트가 R 로 넘어간다.
+      remainder = (remainder << 1) | ((quotientRegister >> QUOTIENT_TOP_BIT) & 1);
+      quotientRegister = (quotientRegister << 1) & QUOTIENT_MASK;
+      steps.push(snapshot("shift", iteration));
+      remainder -= divisor;
+      steps.push(snapshot("subtract", iteration, { isNegative: remainder < 0 }));
+      if (remainder < 0) {
+        remainder += divisor;
+        steps.push(snapshot("restore", iteration, { quotientBit: 0 }));
+      } else {
+        quotientRegister |= 1;
+        steps.push(snapshot("keep", iteration, { quotientBit: 1 }));
+      }
+    }
+    steps.push(snapshot("done", DIVISION_BITS));
+    return steps;
+  }
+  // ---- 순수 계산 함수 끝 ----
+
+  const REMAINDER_BITS = 9; // 시프트 직후 R 은 최대 2 × 254 + 1 이라 9비트가 필요하다
+  const REMAINDER_MASK = 0x1ff;
+  const TOTAL_BITS = REMAINDER_BITS + DIVISION_BITS;
+  const MARGIN = 16;
+  const MINIMUM_CELL = 14;
+  const MAXIMUM_CELL = 30;
+  const dividendRange = document.getElementById("restoring-dividend");
+  const divisorRange = document.getElementById("restoring-divisor");
+  const description = document.getElementById("restoring-description");
+  let controller = null;
+
+  function layout(width) {
+    const cell = book.clamp(Math.floor((width - 2 * MARGIN) / TOTAL_BITS), MINIMUM_CELL, MAXIMUM_CELL);
+    const rowWidth = cell * TOTAL_BITS;
+    const left = Math.round((width - rowWidth) / 2);
+    // 합친 R:Q 행에서 bitIndex 0 이 Q 의 맨 오른쪽, 16 이 R 의 맨 왼쪽이다
+    const columnX = (bitIndex) => left + (TOTAL_BITS - 1 - bitIndex) * cell;
+    return { cell, rowWidth, left, columnX };
+  }
+
+  function drawCombinedRow(context, geometry, y, remainder, quotientRegister, colors, offsetCells, emphasis) {
+    const combined = ((remainder & REMAINDER_MASK) << DIVISION_BITS) | quotientRegister;
+    context.save();
+    context.beginPath();
+    context.rect(geometry.left - 1, y - 2, geometry.rowWidth + 2, geometry.cell + 4);
+    context.clip();
+    const isSliding = offsetCells !== 0;
+    const firstBit = isSliding ? -1 : 0;
+    const lastBit = isSliding ? TOTAL_BITS : TOTAL_BITS - 1;
+    for (let bitIndex = firstBit; bitIndex <= lastBit; bitIndex += 1) {
+      const bit = bitIndex >= 0 && bitIndex < TOTAL_BITS ? (combined >> bitIndex) & 1 : 0;
+      const x = geometry.columnX(bitIndex) + offsetCells * geometry.cell;
+      // 뺄셈 직후에는 R 칸만 색으로 판정을 보이고, 몫 비트를 정할 때는 Q 의 맨 오른쪽 칸만 테두리로 강조한다
+      const isRemainderCell = bitIndex >= DIVISION_BITS;
+      let cellEmphasis = null;
+      if (emphasis === "quotient-bit") {
+        if (bitIndex === 0) cellEmphasis = "ring";
+      } else if (isRemainderCell) {
+        cellEmphasis = emphasis;
+      }
+      stepper.drawBitCell(context, x, y, geometry.cell, bit, colors, cellEmphasis);
+    }
+    context.restore();
+    // R 과 Q 의 경계선
+    const boundaryX = geometry.columnX(DIVISION_BITS - 1);
+    context.strokeStyle = colors.gold;
+    context.lineWidth = 3;
+    context.beginPath();
+    context.moveTo(boundaryX, y - 6);
+    context.lineTo(boundaryX, y + geometry.cell + 6);
+    context.stroke();
+  }
+
+  function drawDivisorRow(context, geometry, y, divisor, colors, alpha) {
+    context.save();
+    context.globalAlpha = alpha;
+    for (let bitIndex = 0; bitIndex < REMAINDER_BITS; bitIndex += 1) {
+      const bit = (divisor >> bitIndex) & 1;
+      stepper.drawBitCell(context, geometry.columnX(bitIndex + DIVISION_BITS), y, geometry.cell, bit, colors, null);
+    }
+    context.restore();
+  }
+
+  function draw(context, width, height, colors, current, next, fraction) {
+    const geometry = layout(width);
+    const labelSize = width < 520 ? 12 : 13;
+    const combinedY = 32;
+    const divisorY = combinedY + geometry.cell + 44;
+    const remainderLeft = geometry.left;
+    const quotientLeft = geometry.columnX(DIVISION_BITS - 1);
+    const isShifting = next.kind === "shift" && current !== next;
+    const isSubtracting = next.kind === "subtract" && current !== next;
+
+    book.drawText(context, "R 나머지", remainderLeft, combinedY - 12, { size: labelSize, bold: true, color: colors.teal });
+    book.drawText(context, "Q 피제수 → 몫", quotientLeft + 6, combinedY - 12, { size: labelSize, bold: true, color: colors.violet });
+
+    let emphasis = null;
+    if (current.kind === "subtract") emphasis = current.isNegative ? "bad" : "ok";
+    if (current.kind === "restore" || current.kind === "keep") emphasis = "quotient-bit";
+    drawCombinedRow(context, geometry, combinedY, current.remainder, current.quotientRegister, colors, isShifting ? -fraction : 0, emphasis);
+
+    const divisorTravelY = isSubtracting ? book.linearInterpolate(divisorY, combinedY, fraction) : divisorY;
+    book.drawText(context, "D 제수 = " + current.divisor, remainderLeft, divisorY - 12, { size: labelSize, bold: true, color: colors.gold });
+    drawDivisorRow(context, geometry, divisorTravelY, current.divisor, colors, isSubtracting ? 1 - fraction * 0.5 : 1);
+    if (isSubtracting) book.drawText(context, "−", remainderLeft - 4, divisorTravelY + geometry.cell / 2, { size: 20, bold: true, align: "right", color: colors.bad });
+
+    const statusY = divisorY + geometry.cell + 34;
+    const statusSize = width < 520 ? 13 : 15;
+    let statusText = "R = " + current.remainder + ",  Q = " + current.quotientRegister;
+    let statusColor = colors.dim;
+    if (current.kind === "subtract") {
+      statusText = current.isNegative ? "R − D = " + current.remainder + " < 0 → 빼면 안 됐다" : "R − D = " + current.remainder + " ≥ 0 → 뺄 수 있다";
+      statusColor = current.isNegative ? colors.bad : colors.ok;
+    } else if (current.kind === "restore") {
+      statusText = "복원: R = " + current.remainder + ", 몫 비트 q = 0";
+      statusColor = colors.bad;
+    } else if (current.kind === "keep") {
+      statusText = "유지: R = " + current.remainder + ", 몫 비트 q = 1";
+      statusColor = colors.ok;
+    } else if (current.kind === "done") {
+      statusText = "몫 = " + current.quotientRegister + ",  나머지 = " + current.remainder;
+      statusColor = colors.accent;
+    }
+    book.drawText(context, statusText, width / 2, statusY, { size: statusSize, bold: true, align: "center", color: statusColor });
+    if (current.iteration > 0 && current.kind !== "done") {
+      book.drawText(context, "반복 " + current.iteration + " / " + DIVISION_BITS, width / 2, statusY + 24, { size: 12, align: "center", color: colors.faint });
+    }
+  }
+
+  function describe(step) {
+    document.getElementById("restoring-iteration").textContent = step.iteration + " / " + DIVISION_BITS;
+    const isFinished = step.kind === "done";
+    document.getElementById("restoring-quotient").textContent = isFinished ? step.quotientRegister + " (" + book.toHex(step.quotientRegister, DIVISION_BITS) + ")" : "계산 중";
+    document.getElementById("restoring-remainder").textContent = isFinished ? String(step.remainder) : "계산 중";
+    const texts = {
+      start: "시작. R = 0, Q = 피제수 " + step.dividend + ", D = " + step.divisor + ". 8번 반복한다.",
+      shift: "반복 " + step.iteration + ": R:Q 전체를 왼쪽으로 한 칸 민다. Q의 맨 윗비트가 R의 맨 아랫자리로 넘어간다. R = " + step.remainder,
+      subtract: "R에서 D를 빼 본다: R = " + step.remainder + (step.isNegative ? " — 음수다." : " — 0 이상이다."),
+      restore: "음수였으므로 D를 다시 더해 <b>복원</b>하고 Q의 맨 아랫자리에 몫 비트 <b>0</b>을 넣는다.",
+      keep: "뺀 결과를 그대로 두고 Q의 맨 아랫자리에 몫 비트 <b>1</b>을 넣는다.",
+      done: step.divisor === 0
+        ? "끝. 제수가 0이라 매번 빼기가 “성공”했고 몫은 <b>모든 비트 1 (" + step.quotientRegister + ")</b>, 나머지는 <b>피제수와 같은 " + step.remainder + "</b>이다. RISC-V의 0으로 나누기 규칙과 똑같다."
+        : "끝. " + step.dividend + " = " + step.divisor + " × " + step.quotientRegister + " + " + step.remainder + ".",
+    };
+    description.innerHTML = texts[step.kind];
+  }
+
+  controller = stepper.createStepper({
+    canvas: document.getElementById("restoring-canvas"),
+    canvasOptions: { aspectRatio: 0.27, minimumHeight: 214, maximumHeight: 218 },
+    draw,
+    describe,
+    buildSteps: () => buildRestoringSteps(Number(dividendRange.value), Number(divisorRange.value)),
+    stepButton: document.getElementById("restoring-step"),
+    playButton: document.getElementById("restoring-play"),
+    resetButton: document.getElementById("restoring-reset"),
+  });
+  book.range("restoring-dividend", () => { if (controller) controller.reset(); }, (value) => value + " (" + book.toBinary(value, DIVISION_BITS) + ")");
+  book.range("restoring-divisor", () => { if (controller) controller.reset(); }, (value) => value + " (" + book.toBinary(value, DIVISION_BITS) + ")");
+  controller.reset();
+})();
+</script>
+</body>
+</html>

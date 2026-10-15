@@ -1,0 +1,2026 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>22 부팅·SBI·플랫폼 규격 · RISC-V Book</title>
+<meta name="description" content="전원이 켜진 뒤 리눅스가 뜨기까지의 부팅 단계, 운영체제와 펌웨어 사이의 약속 SBI, CLINT·PLIC·AIA 인터럽트 구조, IOMMU, 디버그·트레이스, BRS·UEFI·ACPI 같은 플랫폼 규격을 그림과 시뮬레이터로 살펴본다.">
+<link rel="icon" href="../assets/img/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/style.css">
+<script src="../assets/js/book.js"></script>
+<script src="../assets/js/riscv.js"></script>
+<style>
+  .sbi-layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; padding: 16px 18px; }
+  @media (min-width: 760px) { .sbi-layout { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
+  .sbi-layout h4 { margin: 0 0 8px; font-size: 13px; color: var(--text-faint); letter-spacing: 0.06em; }
+  .sbi-layout .codebox { margin: 0; font-size: 13px; }
+  .sbi-signature { font-family: var(--mono); font-size: 13px; color: var(--accent); margin: 0 0 10px; overflow-wrap: anywhere; }
+  .control select { max-width: 100%; }
+  .debug-diagram-wrap { overflow-x: auto; padding: 12px 12px 4px; }
+  .debug-diagram-wrap svg { display: block; width: 100%; min-width: 600px; height: auto; }
+  .debug-diagram-wrap text { white-space: pre; }
+  .debug-link { stroke: var(--text-faint); stroke-width: 2; fill: none; }
+  .debug-link.is-active { stroke: var(--accent-2); stroke-width: 3.2; stroke-dasharray: 7 7; animation: flow-dash 1.1s linear infinite; }
+  .debug-box.is-active { stroke: var(--accent-2); stroke-width: 2.6; }
+  .debug-command-field { padding: 0 18px 14px; }
+  .debug-command-field .bitfield { margin-top: 6px; }
+  .platform-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; padding: 10px 18px 0; font-size: 13px; color: var(--text-dim); }
+  .platform-legend span::before { content: ""; display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 5px; vertical-align: -1px; background: var(--legend-color); }
+</style>
+</head>
+<body data-chapter="platform">
+<main class="chapter">
+  <header class="chapter-hero">
+    <div class="eyebrow">Chapter 22</div>
+    <h1>부팅·SBI·플랫폼 규격</h1>
+    <p class="lead">ISA 매뉴얼만 지킨 칩으로는 아직 컴퓨터가 되지 않는다. 전원이 켜지면 누가 먼저 일어나는지, 운영체제가 타이머를 맞추거나 다른 코어를 깨우려면 누구에게 부탁하는지, 장치의 인터럽트는 어떤 길로 하트에 닿는지까지 약속해야 같은 리눅스 이미지가 여러 칩에서 돈다. <strong>이 장은 ISA 바깥에서 RISC-V 시스템을 묶어 주는 규격들, 곧 SBI·인터럽트 컨트롤러·IOMMU·디버그·부트 규격을 부팅 순서를 따라 살펴본다.</strong></p>
+    <ul class="objectives">
+      <li>ZSBL → FSBL → OpenSBI → 부트로더 → 리눅스로 이어지는 부팅 단계와 각 단계의 특권 모드를 안다.</li>
+      <li>SBI 호출 규약(a7=EID, a6=FID, a0–a5 인자, a0=오류·a1=값)을 읽고 직접 레지스터를 채울 수 있다.</li>
+      <li>HSM 확장으로 보조 하트가 깨어나는 과정과 하트 상태 기계를 설명한다.</li>
+      <li>SBI 타이머와 Sstc, SBI IPI와 IMSIC처럼 펌웨어 경유 경로와 하드웨어 직접 경로를 비교한다.</li>
+      <li>CLINT·ACLINT → PLIC → AIA(APLIC·IMSIC)로 이어지는 인터럽트 구조의 변화와 MSI의 장점을 안다.</li>
+      <li>IOMMU, 외부 디버그(Debug Module·추상 명령), 트레이스, 세미호스팅의 역할을 구별한다.</li>
+      <li>BRS·UEFI·ACPI·Server Platform 규격이 소프트웨어 호환성을 어떻게 보장하는지 안다.</li>
+    </ul>
+    <div class="spec-meta">
+      <a class="spec-link" href="https://docs.riscv.org/reference/sbi/index.html" target="_blank" rel="noopener">SBI v3.0</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/aia/index.html" target="_blank" rel="noopener">AIA v1.0</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/plic/index.html" target="_blank" rel="noopener">PLIC v1.0.0</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/debug/index.html" target="_blank" rel="noopener">Debug v1.0</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/iommu/index.html" target="_blank" rel="noopener">IOMMU</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/brs/index.html" target="_blank" rel="noopener">BRS v1.0</a>
+    </div>
+  </header>
+
+  <!-- ============================================================ -->
+  <section id="why-platform">
+    <h2>ISA 바깥의 약속: 플랫폼이란</h2>
+    <p>17–21장에서 본 특권 아키텍처는 하트 <b>안쪽</b>의 규칙이다. CSR이 몇 번지에 있고 트랩이 나면 무엇이 바뀌는지를 정한다. 하지만 운영체제는 하트 바깥도 알아야 한다. 타이머 장치는 어디에 있는지, 인터럽트 컨트롤러는 어떤 레지스터를 가졌는지, 메모리는 몇 번지부터 몇 번지까지인지, 다른 하트를 깨우려면 무엇을 써야 하는지. 이런 것들을 칩마다 다르게 만들면 운영체제는 칩마다 따로 고쳐야 한다.</p>
+    <p>RISC-V는 이 문제를 <b>층을 나누는 방식</b>으로 푼다. 칩마다 달라지는 일은 M 모드에서 도는 펌웨어가 흡수하고, 운영체제(S 모드)는 펌웨어에게 정해진 방식으로 부탁만 한다. 그 부탁의 형식이 <span class="term">SBI</span><span class="english">(Supervisor Binary Interface)</span>다. 하드웨어 목록은 장치 트리(Device Tree)나 ACPI 표로 전달하고, 인터럽트·IOMMU·디버그처럼 운영체제가 직접 만지는 장치는 아예 표준 규격으로 정한다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 820 400" role="img" aria-label="RISC-V 시스템의 소프트웨어 층과 플랫폼 규격의 위치">
+        <defs>
+          <marker id="stack-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker>
+          <path id="stack-path-sbi" d="M530 152 V232"/>
+          <path id="stack-path-syscall" d="M410 72 V100"/>
+        </defs>
+        <!-- 흐르는 호출선 (상자 뒤에 그린다) -->
+        <use href="#stack-path-syscall" class="s-accent flow-dash"/>
+        <use href="#stack-path-sbi" class="s-gold flow-dash" stroke-width="3"/>
+        <path d="M410 284 V318" class="s-line flow-dash"/>
+        <!-- 가운데 층 -->
+        <rect x="260" y="20" width="300" height="52" rx="10" class="f-elev"/>
+        <text x="410" y="43" text-anchor="middle" class="t t-bold">U 모드 · 응용 프로그램</text>
+        <text x="410" y="61" text-anchor="middle" class="t-faint">셸 · 서버 · 브라우저</text>
+        <text x="420" y="91" class="t-faint">ecall → 시스템 호출</text>
+        <rect x="260" y="100" width="300" height="52" rx="10" class="f-violet-soft"/>
+        <text x="410" y="123" text-anchor="middle" class="t t-bold">S 모드 · 운영체제 커널</text>
+        <text x="410" y="141" text-anchor="middle" class="t-faint">리눅스 · FreeBSD · RTOS</text>
+        <rect x="260" y="172" width="300" height="40" rx="10" class="f-gold-soft"/>
+        <text x="410" y="197" text-anchor="middle" class="t-gold">SBI · ecall 로 펌웨어 호출</text>
+        <rect x="260" y="232" width="300" height="52" rx="10" class="f-surface"/>
+        <text x="410" y="255" text-anchor="middle" class="t t-bold">M 모드 · 런타임 펌웨어</text>
+        <text x="410" y="273" text-anchor="middle" class="t-faint">OpenSBI · RustSBI (SBI 구현)</text>
+        <circle r="6" fill="var(--accent-2)"><animateMotion dur="2.2s" begin="-0.4s" repeatCount="indefinite"><mpath href="#stack-path-sbi"/></animateMotion></circle>
+        <!-- 하드웨어 -->
+        <rect x="20" y="320" width="780" height="60" rx="12" class="f-accent"/>
+        <text x="410" y="346" text-anchor="middle" class="t-on-accent" style="font-size:15px">하드웨어 · 하트 · 메모리 · 장치</text>
+        <text x="410" y="366" text-anchor="middle" class="t-on-accent" style="font-size:12px;font-weight:400">ISA 매뉴얼(1·2권)이 정하는 부분</text>
+        <!-- 왼쪽: 장치 규격 -->
+        <rect x="20" y="100" width="210" height="64" rx="10" class="f-teal-soft"/>
+        <text x="125" y="126" text-anchor="middle" class="t t-bold">인터럽트 컨트롤러</text>
+        <text x="125" y="146" text-anchor="middle" class="t-dim">ACLINT · PLIC · AIA</text>
+        <path d="M125 164 V188" class="s-line"/>
+        <rect x="20" y="190" width="210" height="64" rx="10" class="f-teal-soft"/>
+        <text x="125" y="216" text-anchor="middle" class="t t-bold">IOMMU</text>
+        <text x="125" y="236" text-anchor="middle" class="t-dim">장치 DMA 주소 변환</text>
+        <path d="M125 254 V318" class="s-line"/>
+        <path d="M230 132 H258" class="s-line s-dashed"/>
+        <!-- 오른쪽: 부트·기술 규격 -->
+        <rect x="590" y="20" width="210" height="64" rx="10" class="f-elev"/>
+        <text x="695" y="46" text-anchor="middle" class="t t-bold">플랫폼 규격</text>
+        <text x="695" y="66" text-anchor="middle" class="t-dim">Server Platform · SoC</text>
+        <rect x="590" y="100" width="210" height="64" rx="10" class="f-elev"/>
+        <text x="695" y="126" text-anchor="middle" class="t t-bold">부트 · 하드웨어 기술</text>
+        <text x="695" y="146" text-anchor="middle" class="t-dim">UEFI · ACPI · Device Tree</text>
+        <path d="M588 126 H562" class="s-accent" marker-end="url(#stack-arrow)"/>
+        <rect x="590" y="232" width="210" height="64" rx="10" class="f-elev"/>
+        <text x="695" y="258" text-anchor="middle" class="t t-bold">디버그 · 트레이스</text>
+        <text x="695" y="278" text-anchor="middle" class="t-dim">외부 디버거 · JTAG</text>
+        <path d="M695 296 V318" class="s-line"/>
+      </svg></div>
+      <figcaption><b>그림 22-1.</b> RISC-V 시스템의 층. 운영체제(S)는 하드웨어 차이를 M 모드 펌웨어에 맡기고 SBI라는 정해진 형식으로 부탁한다(금색 점). 하드웨어 목록은 UEFI·ACPI·장치 트리로 넘겨받고, 인터럽트 컨트롤러·IOMMU처럼 운영체제가 직접 다루는 장치는 별도 규격으로 표준화되어 있다.</figcaption>
+    </figure>
+
+    <p>이 장에서 다루는 규격은 모두 ISA 매뉴얼 밖에 있는 별도 문서다. 공식 규격 라이브러리의 버전을 정리하면 다음과 같다.</p>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>규격</th><th>비준 버전</th><th>무엇을 정하나</th><th>이 장</th></tr></thead>
+      <tbody>
+        <tr><td><b>SBI</b> (Supervisor Binary Interface)</td><td>v3.0</td><td>S 모드 ↔ M 모드(또는 하이퍼바이저) 호출 규약과 확장들</td><td>SBI · HSM · 타이머</td></tr>
+        <tr><td><b>PLIC</b></td><td>v1.0.0</td><td>선으로 들어오는 외부 인터럽트의 우선순위·전달</td><td>인터럽트</td></tr>
+        <tr><td><b>AIA</b> (Advanced Interrupt Architecture)</td><td>v1.0</td><td>APLIC, IMSIC, MSI, 인터럽트 관련 CSR</td><td>인터럽트</td></tr>
+        <tr><td><b>IOMMU</b></td><td>v1.0.1 (2026-02-22 개정판)</td><td>장치 DMA 주소의 변환과 보호</td><td>IOMMU</td></tr>
+        <tr><td><b>Debug</b></td><td>v1.0</td><td>Debug Module, DTM, Sdext·Sdtrig</td><td>디버그</td></tr>
+        <tr><td><b>E-Trace · N-Trace</b></td><td>v2.0 · v1.0</td><td>실행 흐름 기록 형식</td><td>디버그</td></tr>
+        <tr><td><b>Semihosting</b></td><td>v1.0</td><td>대상 프로그램이 디버거 호스트의 입출력을 빌려 쓰는 방법</td><td>디버그</td></tr>
+        <tr><td><b>BRS</b> (Boot and Runtime Services)</td><td>v1.0</td><td>UEFI·ACPI·SBI·SMBIOS 요구사항 묶음</td><td>플랫폼 규격</td></tr>
+        <tr><td><b>UEFI Protocol</b></td><td>v1.0.0</td><td><code>RISCV_EFI_BOOT_PROTOCOL</code> (부트 하트 번호 전달)</td><td>플랫폼 규격</td></tr>
+        <tr><td><b>Server Platform · Server SoC</b></td><td>v1.0 · v1.0</td><td>서버가 갖춰야 할 ISA·하드웨어·펌웨어 조건</td><td>플랫폼 규격</td></tr>
+        <tr><td><b>RPMI</b> · <b>ACPI RIMT</b> · <b>ACPI FFH</b></td><td>v1.0 · v1.0 · v1.0.1</td><td>플랫폼 관리 메시지, IOMMU 기술 표, ACPI 고정 하드웨어 기능</td><td>플랫폼 규격</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="boot-flow">
+    <h2>전원이 켜진 뒤: 부팅 단계</h2>
+    <p>RISC-V 하트는 리셋되면 <b>M 모드</b>에서 구현이 정한 리셋 벡터 주소부터 실행한다(특권 규격의 리셋 규칙: 특권 모드는 M, <code>mstatus.MIE</code>는 0, pc는 구현이 정한 값). 그 순간에는 DRAM도 초기화되지 않았고 MMU도 꺼져 있다. 여기서부터 리눅스가 뜨기까지는 여러 단계의 프로그램이 바통을 넘기며 차례로 더 큰 세상을 준비한다. 이름과 단계 수는 칩마다 다르지만, 리눅스를 돌리는 RISC-V 보드에서 흔히 보는 순서는 다음과 같다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 320" role="img" aria-label="부팅 단계와 각 단계가 실행되는 특권 모드">
+        <defs>
+          <path id="boot-chain-path" d="M128 65 H388 C452 65 456 165 518 165 H648 C712 165 716 262 778 262"/>
+        </defs>
+        <!-- 모드 줄 -->
+        <rect x="0" y="16" width="860" height="96" rx="10" class="f-violet-soft"/>
+        <rect x="0" y="118" width="860" height="96" rx="10" class="f-accent-soft"/>
+        <rect x="0" y="220" width="860" height="90" rx="10" class="f-teal-soft"/>
+        <text x="32" y="60" text-anchor="middle" class="t-violet" style="font-size:18px">M</text>
+        <text x="32" y="80" text-anchor="middle" class="t-faint">모드</text>
+        <text x="32" y="162" text-anchor="middle" class="t-accent" style="font-size:18px">S</text>
+        <text x="32" y="182" text-anchor="middle" class="t-faint">모드</text>
+        <text x="32" y="262" text-anchor="middle" class="t-teal" style="font-size:18px">U</text>
+        <text x="32" y="282" text-anchor="middle" class="t-faint">모드</text>
+        <!-- 흐름선과 점 (상자 뒤) -->
+        <use href="#boot-chain-path" class="s-gold flow-dash" stroke-width="2.4"/>
+        <circle r="6" fill="var(--accent-2)"><animateMotion dur="6s" begin="-1s" repeatCount="indefinite"><mpath href="#boot-chain-path"/></animateMotion></circle>
+        <circle r="6" fill="var(--accent-2)"><animateMotion dur="6s" begin="-4s" repeatCount="indefinite"><mpath href="#boot-chain-path"/></animateMotion></circle>
+        <!-- 상주 펌웨어 -->
+        <path d="M446 100 H850" class="s-gold s-dashed"/>
+        <text x="648" y="92" text-anchor="middle" class="t-faint">OpenSBI는 계속 상주하며 SBI 호출을 받는다</text>
+        <text x="446" y="200" text-anchor="end" class="t-faint">mret · a0=hartid · a1=DTB 주소</text>
+        <text x="700" y="296" text-anchor="end" class="t-faint">ecall → 시스템 호출</text>
+        <!-- 단계 상자 -->
+        <g>
+          <rect x="70" y="36" width="116" height="58" rx="10" class="f-elev"/>
+          <text x="128" y="60" text-anchor="middle" class="t t-bold">ZSBL</text>
+          <text x="128" y="80" text-anchor="middle" class="t-faint">온칩 ROM</text>
+          <rect x="200" y="36" width="116" height="58" rx="10" class="f-elev"/>
+          <text x="258" y="60" text-anchor="middle" class="t t-bold">FSBL</text>
+          <text x="258" y="80" text-anchor="middle" class="t-faint">U-Boot SPL</text>
+          <rect x="330" y="36" width="116" height="58" rx="10" class="f-elev"/><rect x="330" y="36" width="116" height="58" rx="10" class="f-gold-soft"/>
+          <text x="388" y="60" text-anchor="middle" class="t t-bold">OpenSBI</text>
+          <text x="388" y="80" text-anchor="middle" class="t-faint">SBI 구현</text>
+          <rect x="460" y="136" width="116" height="58" rx="10" class="f-elev"/>
+          <text x="518" y="160" text-anchor="middle" class="t t-bold">U-Boot · EDK2</text>
+          <text x="518" y="180" text-anchor="middle" class="t-faint">부트로더</text>
+          <rect x="590" y="136" width="116" height="58" rx="10" class="f-elev"/>
+          <text x="648" y="160" text-anchor="middle" class="t t-bold">Linux 커널</text>
+          <text x="648" y="180" text-anchor="middle" class="t-faint">S 모드 OS</text>
+          <rect x="720" y="232" width="116" height="58" rx="10" class="f-elev"/>
+          <text x="778" y="256" text-anchor="middle" class="t t-bold">init (PID 1)</text>
+          <text x="778" y="276" text-anchor="middle" class="t-faint">사용자 공간</text>
+        </g>
+      </svg></div>
+      <figcaption><b>그림 22-2.</b> 리눅스 RISC-V 보드의 전형적인 부팅 사슬. 앞의 세 단계는 M 모드에서, 부트로더와 커널은 S 모드에서, init은 U 모드에서 돈다. 다른 단계는 일을 마치면 사라지지만 OpenSBI만은 M 모드에 남아 런타임 서비스(SBI)를 계속 제공한다.</figcaption>
+    </figure>
+
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>단계</th><th>모드</th><th>어디서 도나</th><th>하는 일</th><th>예</th></tr></thead>
+      <tbody>
+        <tr><td><b>ZSBL</b> (zero-stage)</td><td>M</td><td>칩 안의 마스크 ROM</td><td>부트 매체를 고르고 다음 단계를 SRAM으로 복사</td><td>칩 제조사 ROM 코드</td></tr>
+        <tr><td><b>FSBL</b> (first-stage)</td><td>M</td><td>칩 안의 SRAM</td><td>DRAM 초기화, 펌웨어·부트로더를 DRAM으로 적재</td><td>U-Boot SPL, coreboot</td></tr>
+        <tr><td><b>런타임 펌웨어</b></td><td>M</td><td>DRAM (상주)</td><td>PMP 설정, 트랩 위임, SBI 서비스 제공</td><td>OpenSBI, RustSBI</td></tr>
+        <tr><td><b>부트로더</b></td><td>S</td><td>DRAM</td><td>커널·장치 트리/ACPI·initramfs 적재, UEFI 서비스</td><td>U-Boot 본체, EDK2</td></tr>
+        <tr><td><b>운영체제</b></td><td>S</td><td>DRAM</td><td>MMU 켜기, 보조 하트 깨우기, 장치 구동</td><td>Linux</td></tr>
+      </tbody>
+    </table></div>
+
+    <div class="sim" id="boot-sim">
+      <div class="sim-head"><span class="sim-tag animation">ANIMATION</span><h3>부팅 흐름 따라가기</h3></div>
+      <div class="sim-view"><canvas id="boot-canvas" aria-label="부팅 단계와 하트 네 개의 위치를 보여 주는 애니메이션"></canvas></div>
+      <div class="platform-legend"><span style="--legend-color: var(--accent-2)">부트 하트 (hart 0)</span><span style="--legend-color: var(--accent)">보조 하트</span><span style="--legend-color: var(--text-faint)">주차됨 (대기·STOPPED)</span></div>
+      <div class="step-description" id="boot-description"></div>
+      <div class="sim-pad" style="padding-top:4px"><div class="cell-grid" id="boot-hart-grid"></div></div>
+      <div class="sim-controls">
+        <div class="control"><span>진행</span>
+          <div class="button-row">
+            <button class="button" id="boot-previous">이전</button>
+            <button class="button primary" id="boot-next">다음 단계</button>
+            <button class="button" id="boot-auto">자동 재생</button>
+            <button class="button" id="boot-reset">처음으로</button>
+          </div>
+        </div>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">단계</span><span class="value" id="boot-step-readout">1 / 10</span></div>
+        <div class="stat"><span class="key">부트 하트 모드</span><span class="value" id="boot-mode-readout">M</span></div>
+        <div class="stat"><span class="key">깨어 있는 하트</span><span class="value" id="boot-awake-readout">4</span></div>
+      </div>
+      <div class="sim-note">⑤단계에서 보조 하트 세 개가 OpenSBI 안에 <b>주차</b>되는 것, ⑧단계에서 리눅스가 SBI 호출로 그 하트들을 하나씩 깨우는 것을 눈여겨보자. 부트 하트만 처음부터 끝까지 일하고 나머지는 운영체제가 부를 때까지 기다린다.</div>
+    </div>
+
+    <div class="callout deep"><strong>부트 하트 복권(hart lottery)</strong><p>리셋 직후에는 모든 하트가 같은 코드를 동시에 실행한다. 누가 초기화를 맡을지 정하려고 OpenSBI와 리눅스 커널은 공유 변수에 원자적 연산(AMO)을 걸어 <b>가장 먼저 성공한 하트</b>를 부트 하트로 뽑는다. 이 방식을 흔히 “복권”이라 부른다. 규격은 hartid가 연속일 필요는 없고 최소 하나의 하트가 0번이어야 한다고만 정하므로, 소프트웨어는 hartid 0이 반드시 부트 하트라고 가정하지 않는다.</p></div>
+    <div class="callout tip"><strong>리눅스가 받는 인계 상태</strong><p>리눅스 RISC-V 부트 규약은 커널 진입 시 <code>a0</code>에 현재 하트의 hartid, <code>a1</code>에 메모리에 놓인 장치 트리(DTB)의 물리 주소, <code>satp</code>=0(MMU 꺼짐)을 요구한다. 커널은 이 두 레지스터만으로 자신이 누구이고 하드웨어가 무엇인지 알아낸다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="sbi">
+    <h2>SBI: 운영체제가 펌웨어에게 부탁하는 법</h2>
+    <p>PC의 BIOS 호출처럼, S 모드 운영체제는 <code>ecall</code> 명령으로 한 단계 높은 실행 환경(M 모드 펌웨어, 또는 하이퍼바이저)에 서비스를 요청한다. 이 요청의 레지스터 사용법을 정한 것이 SBI다. SBI를 제공하는 쪽을 규격은 <span class="term">SEE</span><span class="english">(Supervisor Execution Environment)</span> 또는 SBI 구현이라 부른다.</p>
+    <div class="callout spec"><strong>규격 원문에서</strong>
+      <blockquote>“The SBI allows supervisor-mode (S-mode or VS-mode) software to be portable across all RISC-V implementations by defining an abstraction for platform (or hypervisor) specific functionality.”</blockquote>
+      <p><a href="https://docs.riscv.org/reference/sbi/v3.0/intro.html" target="_blank" rel="noopener">SBI v3.0, Introduction</a> — 같은 커널 이미지가 실제 칩(M 모드 펌웨어 아래)에서도, 가상 머신(하이퍼바이저 아래)에서도 그대로 도는 이유가 여기에 있다.</p></div>
+
+    <h3>호출 규약</h3>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 820 230" role="img" aria-label="SBI 호출 규약의 레지스터 사용">
+        <text x="20" y="28" class="t t-bold">호출할 때</text>
+        <g>
+          <rect x="20" y="40" width="90" height="62" rx="9" class="f-teal-soft"/><text x="65" y="66" text-anchor="middle" class="t-mono t-bold">a0</text><text x="65" y="88" text-anchor="middle" class="t-faint">인자 0</text>
+          <rect x="120" y="40" width="90" height="62" rx="9" class="f-teal-soft"/><text x="165" y="66" text-anchor="middle" class="t-mono t-bold">a1</text><text x="165" y="88" text-anchor="middle" class="t-faint">인자 1</text>
+          <rect x="220" y="40" width="90" height="62" rx="9" class="f-teal-soft"/><text x="265" y="66" text-anchor="middle" class="t-mono t-bold">a2</text><text x="265" y="88" text-anchor="middle" class="t-faint">인자 2</text>
+          <rect x="320" y="40" width="90" height="62" rx="9" class="f-teal-soft"/><text x="365" y="66" text-anchor="middle" class="t-mono t-bold">a3</text><text x="365" y="88" text-anchor="middle" class="t-faint">인자 3</text>
+          <rect x="420" y="40" width="90" height="62" rx="9" class="f-teal-soft"/><text x="465" y="66" text-anchor="middle" class="t-mono t-bold">a4</text><text x="465" y="88" text-anchor="middle" class="t-faint">인자 4</text>
+          <rect x="520" y="40" width="90" height="62" rx="9" class="f-teal-soft"/><text x="565" y="66" text-anchor="middle" class="t-mono t-bold">a5</text><text x="565" y="88" text-anchor="middle" class="t-faint">인자 5</text>
+          <rect x="620" y="40" width="90" height="62" rx="9" class="f-violet-soft"/><text x="665" y="66" text-anchor="middle" class="t-mono t-bold">a6</text><text x="665" y="88" text-anchor="middle" class="t-violet" style="font-size:12px">FID</text>
+          <rect x="720" y="40" width="90" height="62" rx="9" class="f-gold-soft"/><text x="765" y="66" text-anchor="middle" class="t-mono t-bold">a7</text><text x="765" y="88" text-anchor="middle" class="t-gold" style="font-size:12px">EID</text>
+        </g>
+        <text x="410" y="124" text-anchor="middle" class="t-dim">ecall → (M 모드에서 처리) → mret</text>
+        <text x="20" y="150" class="t t-bold">돌아올 때</text>
+        <rect x="20" y="160" width="90" height="56" rx="9" class="f-ok-soft"/><text x="65" y="184" text-anchor="middle" class="t-mono t-bold">a0</text><text x="65" y="204" text-anchor="middle" class="t-ok" style="font-size:12px">error</text>
+        <rect x="120" y="160" width="90" height="56" rx="9" class="f-ok-soft"/><text x="165" y="184" text-anchor="middle" class="t-mono t-bold">a1</text><text x="165" y="204" text-anchor="middle" class="t-ok" style="font-size:12px">value</text>
+        <rect x="220" y="160" width="590" height="56" rx="9" class="f-surface"/>
+        <text x="515" y="184" text-anchor="middle" class="t">a0·a1을 뺀 모든 레지스터는 호출 전후 값이 보존된다</text>
+        <text x="515" y="204" text-anchor="middle" class="t-faint">struct sbiret { long error; long value; }</text>
+      </svg></div>
+      <figcaption><b>그림 22-3.</b> SBI 호출 규약. <code>a7</code>에 확장 번호(EID), <code>a6</code>에 함수 번호(FID), <code>a0</code>–<code>a5</code>에 인자를 넣고 <code>ecall</code>한다. 돌아오면 <code>a0</code>은 오류 코드, <code>a1</code>은 결과 값이다. 2×XLEN 폭의 인자는 번호가 낮은 레지스터에 하위 절반을 넣는다.</figcaption>
+    </figure>
+    <p>EID와 FID는 부호 있는 32비트 정수로 정의된다. 표준 확장의 EID는 대개 확장 이름의 <b>ASCII 코드</b>를 그대로 숫자로 만든 것이라, 16진수를 문자로 읽으면 이름이 보인다. 타이머 확장의 EID <code>0x54494D45</code>는 바이트 <code>54 49 4D 45</code>, 곧 “TIME”이다. 지원하지 않는 EID나 FID를 부르면 반드시 <code>SBI_ERR_NOT_SUPPORTED</code>(−2)가 돌아온다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 820 300" role="img" aria-label="ecall 로 S 모드에서 M 모드 펌웨어로 갔다가 돌아오는 경로">
+        <defs>
+          <path id="ecall-path" d="M115 68 V215 H700 V68"/>
+          <marker id="ecall-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent-2)"/></marker>
+        </defs>
+        <rect x="0" y="10" width="820" height="114" rx="12" class="f-violet-soft"/>
+        <rect x="0" y="140" width="820" height="150" rx="12" class="f-surface"/>
+        <text x="410" y="32" text-anchor="middle" class="t-violet">S 모드 · 커널</text>
+        <text x="410" y="164" text-anchor="middle" class="t-dim t-bold">M 모드 · OpenSBI</text>
+        <use href="#ecall-path" class="s-gold flow-dash" stroke-width="2.4"/>
+        <circle r="7" fill="var(--accent-2)"><animateMotion dur="4.5s" begin="-0.5s" repeatCount="indefinite"><mpath href="#ecall-path"/></animateMotion></circle>
+        <rect x="30" y="40" width="170" height="56" rx="10" class="f-elev"/>
+        <text x="115" y="63" text-anchor="middle" class="t t-bold">인자 준비</text>
+        <text x="115" y="83" text-anchor="middle" class="t-faint">a7=EID · a6=FID · a0–a5</text>
+        <rect x="615" y="40" width="170" height="56" rx="10" class="f-elev"/>
+        <text x="700" y="63" text-anchor="middle" class="t t-bold">결과 확인</text>
+        <text x="700" y="83" text-anchor="middle" class="t-faint">a0=error · a1=value</text>
+        <text x="126" y="136" class="t-gold">ecall</text>
+        <text x="711" y="136" class="t-gold">mret</text>
+        <rect x="30" y="180" width="170" height="74" rx="10" class="f-elev"/>
+        <text x="115" y="204" text-anchor="middle" class="t t-bold">트랩 진입</text>
+        <text x="115" y="224" text-anchor="middle" class="t-mono" style="font-size:12px">mcause = 9</text>
+        <text x="115" y="242" text-anchor="middle" class="t-faint">mepc ← ecall 주소</text>
+        <rect x="225" y="180" width="170" height="74" rx="10" class="f-elev"/>
+        <text x="310" y="204" text-anchor="middle" class="t t-bold">확장 찾기</text>
+        <text x="310" y="224" text-anchor="middle" class="t-mono" style="font-size:12px">a7 → 확장 표</text>
+        <text x="310" y="242" text-anchor="middle" class="t-faint">없으면 −2</text>
+        <rect x="420" y="180" width="170" height="74" rx="10" class="f-elev"/>
+        <text x="505" y="204" text-anchor="middle" class="t t-bold">함수 실행</text>
+        <text x="505" y="224" text-anchor="middle" class="t-mono" style="font-size:12px">a6 → 함수</text>
+        <text x="505" y="242" text-anchor="middle" class="t-faint">장치 조작 · 검사</text>
+        <rect x="615" y="180" width="170" height="74" rx="10" class="f-elev"/>
+        <text x="700" y="204" text-anchor="middle" class="t t-bold">결과 기록</text>
+        <text x="700" y="224" text-anchor="middle" class="t-mono" style="font-size:12px">a0, a1 ← 결과</text>
+        <text x="700" y="242" text-anchor="middle" class="t-faint">mepc ← mepc + 4</text>
+      </svg></div>
+      <figcaption><b>그림 22-4.</b> SBI 호출 한 번의 왕복. S 모드에서 실행한 <code>ecall</code>은 위임되지 않은 예외(원인 9, Environment call from S-mode)로 M 모드에 트랩된다. OpenSBI는 <code>a7</code>로 확장을, <code>a6</code>로 함수를 찾아 실행하고, 복귀 주소를 <code>ecall</code> 다음 명령으로 옮긴 뒤 <code>mret</code>한다.</figcaption>
+    </figure>
+
+    <h3>표준 확장 목록</h3>
+    <p>SBI는 작은 Base 확장과 선택적 확장들로 이루어진다. Base 확장(EID <code>0x10</code>)은 모든 구현이 반드시 제공하며, 버전 조회와 <code>sbi_probe_extension()</code>으로 다른 확장이 있는지 묻는 기능만 들어 있다. 운영체제는 부팅 초기에 필요한 확장을 하나씩 탐색한 뒤 쓴다.</p>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>확장</th><th>EID</th><th>ASCII</th><th>도입</th><th>하는 일</th></tr></thead>
+      <tbody>
+        <tr><td><b>Base</b></td><td><code>0x10</code></td><td>—</td><td>0.2</td><td>SBI 버전, 구현 ID, 확장 탐색, mvendorid 등 조회</td></tr>
+        <tr><td><b>Legacy</b></td><td><code>0x00</code>–<code>0x0F</code></td><td>—</td><td>0.1</td><td>옛 호출 방식. TIME·IPI·RFENCE·SRST·DBCN으로 대체되어 폐기 권고</td></tr>
+        <tr><td><b>TIME</b></td><td><code>0x54494D45</code></td><td>TIME</td><td>0.2</td><td>다음 타이머 인터럽트 시각 설정</td></tr>
+        <tr><td><b>IPI</b></td><td><code>0x735049</code></td><td>sPI</td><td>0.2</td><td>다른 하트에 S 모드 소프트웨어 인터럽트 보내기</td></tr>
+        <tr><td><b>RFENCE</b></td><td><code>0x52464E43</code></td><td>RFNC</td><td>0.2</td><td>원격 FENCE.I, SFENCE.VMA, HFENCE.GVMA/VVMA</td></tr>
+        <tr><td><b>HSM</b></td><td><code>0x48534D</code></td><td>HSM</td><td>0.2</td><td>하트 시작·정지·상태 조회·일시 중지(suspend는 0.3)</td></tr>
+        <tr><td><b>SRST</b></td><td><code>0x53525354</code></td><td>SRST</td><td>0.3</td><td>시스템 종료, 콜드·웜 재시작</td></tr>
+        <tr><td><b>PMU</b></td><td><code>0x504D55</code></td><td>PMU</td><td>0.3</td><td>하드웨어·펌웨어 성능 카운터 설정</td></tr>
+        <tr><td><b>DBCN</b></td><td><code>0x4442434E</code></td><td>DBCN</td><td>2.0</td><td>디버그 콘솔 읽기·쓰기 (부팅 초기 출력)</td></tr>
+        <tr><td><b>SUSP</b></td><td><code>0x53555350</code></td><td>SUSP</td><td>2.0</td><td>시스템 전체를 절전 상태로</td></tr>
+        <tr><td><b>CPPC</b></td><td><code>0x43505043</code></td><td>CPPC</td><td>2.0</td><td>ACPI CPPC 성능 제어 레지스터 접근</td></tr>
+        <tr><td><b>NACL</b></td><td><code>0x4E41434C</code></td><td>NACL</td><td>2.0</td><td>중첩 가상화 가속(공유 메모리로 CSR 동기화)</td></tr>
+        <tr><td><b>STA</b></td><td><code>0x535441</code></td><td>STA</td><td>2.0</td><td>가상 CPU가 빼앗긴 시간(steal time) 알림</td></tr>
+        <tr><td><b>SSE</b></td><td><code>0x535345</code></td><td>SSE</td><td>3.0</td><td>모든 트랩보다 앞서는 S 모드 소프트웨어 이벤트(RAS 등)</td></tr>
+        <tr><td><b>FWFT</b></td><td><code>0x46574654</code></td><td>FWFT</td><td>3.0</td><td>펌웨어 기능 켜고 끄기(예: 정렬 안 된 접근 예외 위임)</td></tr>
+        <tr><td><b>DBTR</b></td><td><code>0x44425452</code></td><td>DBTR</td><td>3.0</td><td>S 모드에서 디버그 트리거 설치·관리</td></tr>
+        <tr><td><b>MPXY</b></td><td><code>0x4D505859</code></td><td>MPXY</td><td>3.0</td><td>펌웨어를 거쳐 RPMI 같은 메시지 프로토콜 주고받기</td></tr>
+      </tbody>
+    </table></div>
+    <p>오류 코드는 v3.0 기준으로 다음 열다섯 가지가 정의되어 있다. 성공이 아니면 <code>a1</code>의 값은 함수가 따로 정하지 않는 한 정의되지 않는다.</p>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>이름</th><th class="number">값</th><th>뜻</th><th>이름</th><th class="number">값</th><th>뜻</th></tr></thead>
+      <tbody>
+        <tr><td><code>SBI_SUCCESS</code></td><td class="number">0</td><td>성공</td><td><code>SBI_ERR_ALREADY_STOPPED</code></td><td class="number">−8</td><td>이미 정지됨</td></tr>
+        <tr><td><code>SBI_ERR_FAILED</code></td><td class="number">−1</td><td>실패</td><td><code>SBI_ERR_NO_SHMEM</code></td><td class="number">−9</td><td>공유 메모리 없음</td></tr>
+        <tr><td><code>SBI_ERR_NOT_SUPPORTED</code></td><td class="number">−2</td><td>지원 안 함</td><td><code>SBI_ERR_INVALID_STATE</code></td><td class="number">−10</td><td>잘못된 상태</td></tr>
+        <tr><td><code>SBI_ERR_INVALID_PARAM</code></td><td class="number">−3</td><td>잘못된 인자</td><td><code>SBI_ERR_BAD_RANGE</code></td><td class="number">−11</td><td>잘못된 범위</td></tr>
+        <tr><td><code>SBI_ERR_DENIED</code></td><td class="number">−4</td><td>거부됨</td><td><code>SBI_ERR_TIMEOUT</code></td><td class="number">−12</td><td>시간 초과</td></tr>
+        <tr><td><code>SBI_ERR_INVALID_ADDRESS</code></td><td class="number">−5</td><td>잘못된 주소</td><td><code>SBI_ERR_IO</code></td><td class="number">−13</td><td>입출력 오류</td></tr>
+        <tr><td><code>SBI_ERR_ALREADY_AVAILABLE</code></td><td class="number">−6</td><td>이미 사용 가능</td><td><code>SBI_ERR_DENIED_LOCKED</code></td><td class="number">−14</td><td>잠금 때문에 거부</td></tr>
+        <tr><td><code>SBI_ERR_ALREADY_STARTED</code></td><td class="number">−7</td><td>이미 시작됨</td><td></td><td></td><td></td></tr>
+      </tbody>
+    </table></div>
+
+    <div class="sim" id="sbi-sim">
+      <div class="sim-head"><span class="sim-tag">SIMULATOR</span><h3>SBI 호출 탐색기</h3></div>
+      <div class="sbi-layout">
+        <div>
+          <h4>ecall 직전 레지스터</h4>
+          <p class="sbi-signature" id="sbi-signature"></p>
+          <div class="cell-grid" id="sbi-registers"></div>
+        </div>
+        <div>
+          <h4>어셈블리</h4>
+          <div class="codebox" id="sbi-assembly"></div>
+        </div>
+      </div>
+      <div class="sim-view"><canvas id="sbi-canvas" aria-label="SBI 호출이 S 모드에서 M 모드로 갔다가 돌아오는 애니메이션"></canvas></div>
+      <div class="step-description" id="sbi-description"></div>
+      <div class="sim-controls">
+        <label class="control"><span>함수</span>
+          <select id="sbi-function"></select>
+        </label>
+        <div class="control"><span>경우</span><div class="segmented" id="sbi-case"><button data-value="success" class="on">정상</button><button data-value="failure">오류</button></div></div>
+        <div class="control"><span>실행</span><div class="button-row"><button class="button primary" id="sbi-run">ecall 실행</button><button class="button" id="sbi-reset">처음으로</button></div></div>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">a7 · EID</span><span class="value" id="sbi-extension-readout">—</span></div>
+        <div class="stat"><span class="key">a6 · FID</span><span class="value" id="sbi-function-readout">—</span></div>
+        <div class="stat"><span class="key">복귀 a0 (error)</span><span class="value" id="sbi-error-readout">—</span></div>
+        <div class="stat"><span class="key">복귀 a1 (value)</span><span class="value" id="sbi-value-readout">—</span></div>
+      </div>
+      <div class="sim-note">함수를 바꿔 가며 <code>a7</code>의 16진수가 어떤 ASCII 이름이 되는지 보자. <b>오류</b> 경우로 바꾸면 이미 켜진 하트를 다시 시작하거나 없는 하트에 IPI를 보내는 등 흔한 실수가 어떤 오류 코드로 돌아오는지 볼 수 있다. <code>sbi_system_reset</code>은 성공하면 돌아오지 않는다.</div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="hart-management">
+    <h2>HSM: 하트를 켜고 끄는 약속</h2>
+    <p>보조 하트를 깨우는 방법이 칩마다 다르면 운영체제는 곤란하다. 어떤 칩은 전원 도메인을 켜야 하고, 어떤 칩은 특정 레지스터에 시작 주소를 써야 한다. SBI의 <span class="term">HSM</span><span class="english">(Hart State Management)</span> 확장은 이 차이를 펌웨어 안에 숨기고, 운영체제에는 하트마다 일곱 가지 상태와 네 가지 함수만 보여 준다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 900 330" role="img" aria-label="HSM 하트 상태 기계">
+        <defs>
+          <marker id="hsm-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--text-faint)"/></marker>
+          <path id="hsm-cycle-path" d="M110 165 C110 80 170 60 320 60 C480 60 530 80 530 165 C530 250 480 270 320 270 C160 270 110 250 110 165"/>
+        </defs>
+        <!-- 시작·정지 고리 (상자 뒤에 그려 상자 안에서는 가려진다) -->
+        <use href="#hsm-cycle-path" class="s-gold flow-dash" stroke-width="1.8"/>
+        <circle r="7" fill="var(--accent-2)"><animateMotion dur="7s" begin="-0.6s" repeatCount="indefinite"><mpath href="#hsm-cycle-path"/></animateMotion></circle>
+        <!-- 일시 중지·재개 화살표 -->
+        <path d="M610 133 V62 H696" class="s-line" marker-end="url(#hsm-arrow)"/>
+        <path d="M790 94 V131" class="s-line" marker-end="url(#hsm-arrow)"/>
+        <path d="M790 197 V236" class="s-line" marker-end="url(#hsm-arrow)"/>
+        <path d="M698 270 H610 V199" class="s-line" marker-end="url(#hsm-arrow)"/>
+        <rect x="20" y="135" width="180" height="60" rx="12" class="f-elev"/><rect x="20" y="135" width="180" height="60" rx="12" class="f-surface"/>
+        <text x="110" y="160" text-anchor="middle" class="t-mono t-bold">STOPPED</text>
+        <text x="110" y="180" text-anchor="middle" class="t-faint">상태 1 · 펌웨어 소유</text>
+        <rect x="230" y="30" width="180" height="60" rx="12" class="f-elev"/><rect x="230" y="30" width="180" height="60" rx="12" class="f-gold-soft"/>
+        <text x="320" y="55" text-anchor="middle" class="t-mono t-bold">START_PENDING</text>
+        <text x="320" y="75" text-anchor="middle" class="t-faint">상태 2</text>
+        <rect x="440" y="135" width="180" height="60" rx="12" class="f-elev"/><rect x="440" y="135" width="180" height="60" rx="12" class="f-ok-soft"/>
+        <text x="530" y="160" text-anchor="middle" class="t-mono t-bold">STARTED</text>
+        <text x="530" y="180" text-anchor="middle" class="t-faint">상태 0 · S 모드 실행</text>
+        <rect x="230" y="240" width="180" height="60" rx="12" class="f-elev"/><rect x="230" y="240" width="180" height="60" rx="12" class="f-gold-soft"/>
+        <text x="320" y="265" text-anchor="middle" class="t-mono t-bold">STOP_PENDING</text>
+        <text x="320" y="285" text-anchor="middle" class="t-faint">상태 3</text>
+        <rect x="700" y="32" width="180" height="60" rx="12" class="f-elev"/><rect x="700" y="32" width="180" height="60" rx="12" class="f-violet-soft"/>
+        <text x="790" y="57" text-anchor="middle" class="t-mono t-bold" style="font-size:12px">SUSPEND_PENDING</text>
+        <text x="790" y="77" text-anchor="middle" class="t-faint">상태 5</text>
+        <rect x="700" y="135" width="180" height="60" rx="12" class="f-elev"/><rect x="700" y="135" width="180" height="60" rx="12" class="f-violet-soft"/>
+        <text x="790" y="160" text-anchor="middle" class="t-mono t-bold">SUSPENDED</text>
+        <text x="790" y="180" text-anchor="middle" class="t-faint">상태 4 · 저전력</text>
+        <rect x="700" y="240" width="180" height="60" rx="12" class="f-elev"/><rect x="700" y="240" width="180" height="60" rx="12" class="f-violet-soft"/>
+        <text x="790" y="265" text-anchor="middle" class="t-mono t-bold" style="font-size:12px">RESUME_PENDING</text>
+        <text x="790" y="285" text-anchor="middle" class="t-faint">상태 6</text>
+        <!-- 전이 이름 -->
+        <text x="40" y="104" class="t-dim">hart_start</text>
+        <text x="542" y="116" class="t-faint">시작 완료</text>
+        <text x="542" y="232" class="t-dim">hart_stop</text>
+        <text x="40" y="232" class="t-faint">정지 완료</text>
+        <text x="618" y="52" class="t-dim" style="font-size:12px">hart_suspend</text>
+        <text x="798" y="117" class="t-faint">대기</text>
+        <text x="798" y="221" class="t-faint">인터럽트</text>
+        <text x="650" y="262" class="t-faint">재개</text>
+      </svg></div>
+      <figcaption><b>그림 22-5.</b> HSM 확장의 하트 상태 기계(EID <code>0x48534D</code>). 왼쪽 고리는 시작·정지, 오른쪽 줄은 일시 중지·재개다. <code>_PENDING</code> 상태는 펌웨어가 요청을 처리하는 중간 단계다. 금색 점은 하트 하나가 켜졌다 꺼지는 한 바퀴를 나타낸다.</figcaption>
+    </figure>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>함수 (FID)</th><th>설명</th></tr></thead>
+      <tbody>
+        <tr><td><b>sbi_hart_start</b> (0)</td><td>인자 <code>hartid</code>, <code>start_addr</code>, <code>opaque</code>. STOPPED 하트를 S 모드 <code>start_addr</code>(물리 주소)에서 시작시킨다. 깨어난 하트는 <code>satp</code>=0, <code>sstatus.SIE</code>=0, <code>a0</code>=hartid, <code>a1</code>=opaque. 비동기 호출이다.</td></tr>
+        <tr><td><b>sbi_hart_stop</b> (1)</td><td>인자 없음. 호출한 하트 자신을 정지시켜 펌웨어에 돌려준다. 성공하면 돌아오지 않는다.</td></tr>
+        <tr><td><b>sbi_hart_get_status</b> (2)</td><td>인자 <code>hartid</code>. 하트의 HSM 상태 번호(0–6)를 <code>a1</code>로 돌려준다.</td></tr>
+        <tr><td><b>sbi_hart_suspend</b> (3)</td><td>인자 <code>suspend_type</code>, <code>resume_addr</code>, <code>opaque</code>. 호출한 하트를 저전력 상태로 보낸다. 레지스터를 보존하는(retentive) 방식과 보존하지 않는(non-retentive) 방식이 있다.</td></tr>
+      </tbody>
+    </table></div>
+    <div class="callout warn"><strong>start_addr이 XLEN 하나로 충분한 이유</strong><p>깨어난 하트는 MMU가 꺼진 S 모드에서 시작한다. 그래서 <code>start_addr</code>은 가상 주소가 아닌 <b>물리 주소</b>이고, 커널은 보조 하트용 진입 코드에서 스스로 페이지 테이블을 켠다. 이미 STARTED인 하트에 다시 <code>sbi_hart_start</code>를 부르면 <code>SBI_ERR_ALREADY_AVAILABLE</code>(−6)이 돌아온다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="timer-ipi">
+    <h2>타이머·IPI·원격 펜스: 펌웨어 경유와 하드웨어 직행</h2>
+    <p>특권 규격에서 타이머 비교 레지스터 <code>mtimecmp</code>와 소프트웨어 인터럽트 비트는 <b>M 모드만</b> 만질 수 있는 메모리 매핑 장치였다. 그래서 초기 RISC-V 리눅스는 타이머를 맞출 때마다, 다른 하트를 깨울 때마다 SBI로 펌웨어를 불렀다. 문제는 비용이다. 타이머 이벤트 하나에 M 모드 트랩이 두 번(설정 ecall, 만료 인터럽트) 끼어든다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 820 344" role="img" aria-label="SBI 타이머 경로와 Sstc 경로 비교">
+        <defs><marker id="timer-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent-2)"/></marker></defs>
+        <text x="205" y="24" text-anchor="middle" class="t t-bold">Sstc 없음 · SBI 경유</text>
+        <text x="615" y="24" text-anchor="middle" class="t t-bold">Sstc 있음 · 직접 설정</text>
+        <!-- 왼쪽 -->
+        <rect x="30" y="40" width="350" height="38" rx="9" class="f-violet-soft"/><text x="205" y="64" text-anchor="middle" class="t">S: sbi_set_timer(t) → ecall</text>
+        <path d="M205 80 V94" class="s-gold flow-dash" marker-end="url(#timer-arrow)"/>
+        <rect x="30" y="98" width="350" height="38" rx="9" class="f-surface"/><text x="205" y="122" text-anchor="middle" class="t">M: OpenSBI가 mtimecmp ← t</text>
+        <path d="M205 138 V152" class="s-gold flow-dash" marker-end="url(#timer-arrow)"/>
+        <rect x="30" y="156" width="350" height="38" rx="9" class="f-accent-soft"/><text x="205" y="180" text-anchor="middle" class="t">하드웨어: mtime ≥ mtimecmp → M 타이머 인터럽트</text>
+        <path d="M205 196 V210" class="s-gold flow-dash" marker-end="url(#timer-arrow)"/>
+        <rect x="30" y="214" width="350" height="38" rx="9" class="f-surface"/><text x="205" y="238" text-anchor="middle" class="t">M: OpenSBI가 mip.STIP ← 1</text>
+        <path d="M205 254 V268" class="s-gold flow-dash" marker-end="url(#timer-arrow)"/>
+        <rect x="30" y="272" width="350" height="38" rx="9" class="f-violet-soft"/><text x="205" y="296" text-anchor="middle" class="t">S: 타이머 인터럽트 처리</text>
+        <text x="205" y="334" text-anchor="middle" class="t-bad">M 모드 진입 2번</text>
+        <!-- 오른쪽 -->
+        <rect x="440" y="40" width="350" height="38" rx="9" class="f-violet-soft"/><text x="615" y="64" text-anchor="middle" class="t">S: csrw stimecmp, t <tspan class="t-mono">(CSR 0x14D)</tspan></text>
+        <path d="M615 80 V152" class="s-gold flow-dash" marker-end="url(#timer-arrow)"/>
+        <rect x="440" y="156" width="350" height="38" rx="9" class="f-accent-soft"/><text x="615" y="180" text-anchor="middle" class="t">하드웨어: time ≥ stimecmp → STIP</text>
+        <path d="M615 196 V268" class="s-gold flow-dash" marker-end="url(#timer-arrow)"/>
+        <rect x="440" y="272" width="350" height="38" rx="9" class="f-violet-soft"/><text x="615" y="296" text-anchor="middle" class="t">S: 타이머 인터럽트 처리</text>
+        <text x="615" y="334" text-anchor="middle" class="t-ok">M 모드 진입 0번</text>
+      </svg></div>
+      <figcaption><b>그림 22-6.</b> 타이머 한 번을 맞추는 두 경로. 왼쪽은 SBI TIME 확장을 쓰는 경로로 펌웨어가 M 모드 타이머를 대신 다루고 S 모드에 인터럽트를 넘겨준다. 오른쪽 Sstc 확장은 S 모드 전용 비교 레지스터 <code>stimecmp</code>를 두어 펌웨어를 거치지 않는다. 가상 머신에서는 <code>vstimecmp</code>(<code>0x24D</code>)가 같은 일을 한다.</figcaption>
+    </figure>
+    <p>같은 흐름이 IPI와 원격 TLB 무효화에도 있다. 리눅스가 다른 하트의 TLB를 비우려면 그 하트에게 “sfence.vma를 실행하라”고 알려야 하는데, 소프트웨어 인터럽트를 거는 장치가 M 모드 전용이면 SBI의 IPI·RFENCE 확장을 쓸 수밖에 없다. AIA의 IMSIC이 있으면 S 모드가 다른 하트의 인터럽트 파일에 직접 MSI를 써서 IPI를 보낼 수 있다. BRS 규격은 바로 이 관계를 규칙으로 적어 두었다.</p>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>BRS 규칙</th><th>내용</th></tr></thead>
+      <tbody>
+        <tr><td><code>SBI_010</code></td><td>SBI 구현은 SBI v2.0 이상을 따라야 한다.</td></tr>
+        <tr><td><code>SBI_020</code></td><td>HSM 확장은 반드시 구현한다.</td></tr>
+        <tr><td><code>SBI_030</code></td><td>Sstc가 없으면 TIME 확장을 구현해야 한다.</td></tr>
+        <tr><td><code>SBI_040</code> · <code>SBI_050</code></td><td>IMSIC이 없으면 IPI(sPI)와 RFENCE(RFNC) 확장을 구현해야 한다.</td></tr>
+        <tr><td><code>SBI_060</code></td><td>카운터 위임 확장(Sscsrind·Ssccfg)이 없으면 PMU 확장을 구현해야 한다.</td></tr>
+        <tr><td><code>SBI_070</code></td><td>ACPI SPCR 표가 인터페이스 유형 <code>0x15</code>를 가리키면 DBCN 확장을 구현해야 한다.</td></tr>
+      </tbody>
+    </table></div>
+    <div class="callout tip"><strong>추세: 펌웨어는 점점 얇아진다</strong><p>Sstc(타이머), AIA IMSIC(IPI·외부 인터럽트), Svinval·Sscofpmf 같은 확장이 하나씩 비준되면서 “자주 일어나는 일은 S 모드가 하드웨어로 직접, 드물고 플랫폼마다 다른 일은 SBI로”라는 분업이 굳어지고 있다. RVA23 프로파일이 Sstc를 필수로 넣은 것도 같은 이유다(23장).</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="interrupts">
+    <h2>인터럽트 구조의 진화: CLINT에서 AIA까지</h2>
+    <p>특권 규격은 하트 안의 인터럽트 비트(<code>mip</code>·<code>mie</code>의 소프트웨어·타이머·외부 인터럽트)만 정하고, 그 비트를 바깥에서 누가 올리는지는 정하지 않았다. 그 바깥 장치가 세 세대에 걸쳐 바뀌어 왔다.</p>
+    <ol>
+      <li><b>CLINT / ACLINT</b> — 하트마다 타이머(<code>mtime</code>·<code>mtimecmp</code>)와 소프트웨어 인터럽트 비트(<code>msip</code>)를 메모리 주소에 둔 단순한 장치. CLINT는 SiFive 구현에서 시작한 사실상의 표준이고, 이를 정리한 ACLINT는 공개 규격이지만 공식 비준 목록에는 없다.</li>
+      <li><b>PLIC</b> — 장치의 인터럽트 <b>선</b>을 모아 우선순위를 매기고 하트의 외부 인터럽트 선(EIP)으로 전달한다. 원래 특권 규격 초안에 있다가 분리되어 PLIC v1.0.0으로 비준되었다.</li>
+      <li><b>AIA</b> — 인터럽트를 선 대신 <b>메모리 쓰기(MSI)</b>로 전달하는 IMSIC과, 선 인터럽트를 받아 MSI로 바꿔 주는 APLIC을 정의한다. 가상화(게스트 인터럽트 파일)와 수천 개의 인터럽트를 염두에 둔 설계다.</li>
+    </ol>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 820 320" role="img" aria-label="PLIC 의 구조: 소스, 게이트웨이, 코어, 컨텍스트">
+        <defs><marker id="plic-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker></defs>
+        <!-- 소스 -->
+        <rect x="20" y="40" width="120" height="44" rx="9" class="f-elev"/><text x="80" y="60" text-anchor="middle" class="t t-bold">UART</text><text x="80" y="76" text-anchor="middle" class="t-faint">소스 1</text>
+        <rect x="20" y="110" width="120" height="44" rx="9" class="f-elev"/><text x="80" y="130" text-anchor="middle" class="t t-bold">디스크</text><text x="80" y="146" text-anchor="middle" class="t-faint">소스 2</text>
+        <rect x="20" y="180" width="120" height="44" rx="9" class="f-elev"/><text x="80" y="200" text-anchor="middle" class="t t-bold">네트워크</text><text x="80" y="216" text-anchor="middle" class="t-faint">소스 3</text>
+        <path d="M142 62 H168" class="s-accent flow-dash"/><path d="M142 132 H168" class="s-accent flow-dash"/><path d="M142 202 H168" class="s-accent flow-dash"/>
+        <!-- 게이트웨이 -->
+        <rect x="170" y="44" width="92" height="36" rx="8" class="f-teal-soft"/><text x="216" y="67" text-anchor="middle" class="t-dim">게이트웨이</text>
+        <rect x="170" y="114" width="92" height="36" rx="8" class="f-teal-soft"/><text x="216" y="137" text-anchor="middle" class="t-dim">게이트웨이</text>
+        <rect x="170" y="184" width="92" height="36" rx="8" class="f-teal-soft"/><text x="216" y="207" text-anchor="middle" class="t-dim">게이트웨이</text>
+        <path d="M264 62 H298" class="s-accent" marker-end="url(#plic-arrow)"/><path d="M264 132 H298" class="s-accent" marker-end="url(#plic-arrow)"/><path d="M264 202 H298" class="s-accent" marker-end="url(#plic-arrow)"/>
+        <!-- 코어 -->
+        <rect x="300" y="24" width="240" height="220" rx="12" class="f-accent-soft"/>
+        <text x="420" y="48" text-anchor="middle" class="t-accent">PLIC 코어</text>
+        <rect x="316" y="62" width="208" height="30" rx="6" class="f-elev"/><text x="420" y="82" text-anchor="middle" class="t">우선순위 · 소스마다</text>
+        <rect x="316" y="98" width="208" height="30" rx="6" class="f-elev"/><text x="420" y="118" text-anchor="middle" class="t">대기 비트 IP · 소스마다</text>
+        <rect x="316" y="134" width="208" height="30" rx="6" class="f-elev"/><text x="420" y="154" text-anchor="middle" class="t">허용 비트 IE · 컨텍스트마다</text>
+        <rect x="316" y="170" width="208" height="30" rx="6" class="f-elev"/><text x="420" y="190" text-anchor="middle" class="t">문턱값 · 컨텍스트마다</text>
+        <rect x="316" y="206" width="208" height="30" rx="6" class="f-gold-soft"/><text x="420" y="226" text-anchor="middle" class="t">claim / complete</text>
+        <!-- 컨텍스트 -->
+        <path d="M542 56 H588" class="s-gold flow-dash"/><path d="M542 108 H588" class="s-gold flow-dash"/><path d="M542 160 H588" class="s-gold flow-dash"/><path d="M542 212 H588" class="s-gold flow-dash"/>
+        <rect x="590" y="36" width="210" height="40" rx="9" class="f-surface"/><text x="695" y="61" text-anchor="middle" class="t">컨텍스트 0 · 하트 0 M</text>
+        <rect x="590" y="88" width="210" height="40" rx="9" class="f-violet-soft"/><text x="695" y="113" text-anchor="middle" class="t">컨텍스트 1 · 하트 0 S</text>
+        <rect x="590" y="140" width="210" height="40" rx="9" class="f-surface"/><text x="695" y="165" text-anchor="middle" class="t">컨텍스트 2 · 하트 1 M</text>
+        <rect x="590" y="192" width="210" height="40" rx="9" class="f-violet-soft"/><text x="695" y="217" text-anchor="middle" class="t">컨텍스트 3 · 하트 1 S</text>
+        <text x="695" y="252" text-anchor="middle" class="t-faint">EIP 선 · 번호 배정은 구현마다 다르다</text>
+        <text x="410" y="280" text-anchor="middle" class="t-dim">claim = 컨텍스트의 claim/complete 레지스터를 MMIO로 읽기 → 가장 우선인 소스 ID</text>
+        <text x="410" y="302" text-anchor="middle" class="t-dim">complete = 같은 레지스터에 그 ID를 MMIO로 쓰기 → 게이트웨이가 다음 요청을 받아 줌</text>
+      </svg></div>
+      <figcaption><b>그림 22-7.</b> PLIC의 구조. 컨텍스트는 “어느 하트의 어느 특권 모드”라는 인터럽트 목적지다. 우선순위가 문턱값보다 크고 허용된 대기 인터럽트가 있으면 그 컨텍스트의 EIP 선이 올라간다. PLIC은 소스 최대 1023개(0번은 없음), 컨텍스트 최대 15872개를 지원한다.</figcaption>
+    </figure>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>PLIC 레지스터 (base 기준 오프셋)</th><th>내용</th></tr></thead>
+      <tbody>
+        <tr><td><code>0x000004</code>–<code>0x000FFC</code></td><td>소스 1–1023의 우선순위 (4바이트씩, <code>0x000000</code>은 예약)</td></tr>
+        <tr><td><code>0x001000</code>–<code>0x00107C</code></td><td>대기 비트 (소스 0–1023, 32개씩 한 워드)</td></tr>
+        <tr><td><code>0x002000</code> + <code>0x80</code> × 컨텍스트</td><td>그 컨텍스트의 허용 비트</td></tr>
+        <tr><td><code>0x200000</code> + <code>0x1000</code> × 컨텍스트</td><td>그 컨텍스트의 우선순위 문턱값</td></tr>
+        <tr><td><code>0x200004</code> + <code>0x1000</code> × 컨텍스트</td><td>claim (읽기) / complete (쓰기)</td></tr>
+      </tbody>
+    </table></div>
+
+    <h3>AIA: 인터럽트를 메모리 쓰기로</h3>
+    <p>PCI Express 장치는 원래 인터럽트를 <b>메모리 쓰기</b>로 알린다(MSI). 정해진 주소에 정해진 값을 쓰면 그것이 곧 인터럽트다. AIA의 <span class="term">IMSIC</span><span class="english">(Incoming MSI Controller)</span>은 하트마다 하나씩 붙어 이 쓰기를 받는다. IMSIC 안에는 특권 수준마다 <b>인터럽트 파일</b>이 있고(M 파일, S 파일, H 확장이 있으면 게스트 파일 GEILEN개), 파일마다 4 KiB 페이지 하나를 차지한다. 그 페이지 오프셋 <code>0x000</code>의 <code>seteipnum_le</code>에 식별자 번호를 쓰면 해당 대기 비트가 켜진다. 파일 하나가 지원하는 식별자 수는 64의 배수보다 하나 적은 값으로 최소 63, 최대 2047이다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 820 330" role="img" aria-label="AIA 구성: APLIC 과 하트별 IMSIC, PCIe 장치의 MSI">
+        <defs>
+          <path id="aia-path-aplic" d="M402 80 C440 80 450 100 500 100"/>
+          <path id="aia-path-pcie" d="M402 240 C440 240 450 262 500 262"/>
+          <path id="aia-path-device" d="M162 240 H198"/>
+        </defs>
+        <!-- 장치 -->
+        <rect x="20" y="30" width="140" height="44" rx="9" class="f-elev"/><text x="90" y="57" text-anchor="middle" class="t">UART (선)</text>
+        <rect x="20" y="86" width="140" height="44" rx="9" class="f-elev"/><text x="90" y="113" text-anchor="middle" class="t">GPIO (선)</text>
+        <path d="M162 52 H198" class="s-accent flow-dash"/><path d="M162 108 H198" class="s-accent flow-dash"/>
+        <rect x="20" y="214" width="140" height="56" rx="9" class="f-elev"/><text x="90" y="238" text-anchor="middle" class="t t-bold">PCIe 장치</text><text x="90" y="258" text-anchor="middle" class="t-faint">선 없음 · MSI만</text>
+        <use href="#aia-path-device" class="s-gold flow-dash"/>
+        <!-- APLIC -->
+        <rect x="200" y="20" width="200" height="130" rx="12" class="f-teal-soft"/>
+        <text x="300" y="44" text-anchor="middle" class="t t-bold">APLIC</text>
+        <text x="300" y="68" text-anchor="middle" class="t-dim">루트 도메인 (M)</text>
+        <text x="300" y="88" text-anchor="middle" class="t-dim">└ 자식 도메인 (S)</text>
+        <text x="300" y="112" text-anchor="middle" class="t-faint">domaincfg.DM = 1</text>
+        <text x="300" y="130" text-anchor="middle" class="t-faint">MSI 전달 모드</text>
+        <!-- IOMMU -->
+        <rect x="200" y="200" width="200" height="80" rx="12" class="f-surface"/>
+        <text x="300" y="228" text-anchor="middle" class="t t-bold">IOMMU · 인터커넥트</text>
+        <text x="300" y="250" text-anchor="middle" class="t-faint">MSI 주소 검사·변환</text>
+        <!-- MSI 경로 -->
+        <use href="#aia-path-aplic" class="s-gold flow-dash" stroke-width="2.4"/>
+        <use href="#aia-path-pcie" class="s-gold flow-dash" stroke-width="2.4"/>
+        <circle r="6" fill="var(--accent-2)"><animateMotion dur="1.8s" begin="-0.3s" repeatCount="indefinite"><mpath href="#aia-path-aplic"/></animateMotion></circle>
+        <circle r="6" fill="var(--accent-2)"><animateMotion dur="1.8s" begin="-1.1s" repeatCount="indefinite"><mpath href="#aia-path-pcie"/></animateMotion></circle>
+        <circle r="5" fill="var(--accent-2)"><animateMotion dur="1.2s" begin="-0.6s" repeatCount="indefinite"><mpath href="#aia-path-device"/></animateMotion></circle>
+        <text x="452" y="70" text-anchor="middle" class="t-gold" style="font-size:12px">MSI 쓰기</text>
+        <text x="452" y="230" text-anchor="middle" class="t-gold" style="font-size:12px">MSI 쓰기</text>
+        <!-- 하트 0 IMSIC -->
+        <rect x="500" y="20" width="300" height="140" rx="12" class="f-accent-soft"/>
+        <text x="650" y="42" text-anchor="middle" class="t-accent">하트 0 의 IMSIC</text>
+        <rect x="514" y="54" width="86" height="56" rx="7" class="f-elev"/><text x="557" y="78" text-anchor="middle" class="t t-bold">M 파일</text><text x="557" y="97" text-anchor="middle" class="t-faint">4 KiB</text>
+        <rect x="607" y="54" width="86" height="56" rx="7" class="f-gold-soft"/><text x="650" y="78" text-anchor="middle" class="t t-bold">S 파일</text><text x="650" y="97" text-anchor="middle" class="t-faint">4 KiB</text>
+        <rect x="700" y="54" width="86" height="56" rx="7" class="f-violet-soft"/><text x="743" y="78" text-anchor="middle" class="t t-bold">게스트</text><text x="743" y="97" text-anchor="middle" class="t-faint">× GEILEN</text>
+        <text x="650" y="136" text-anchor="middle" class="t-mono" style="font-size:12px">+0x000 seteipnum_le ← 식별자</text>
+        <text x="650" y="152" text-anchor="middle" class="t-faint">하트는 stopei CSR로 받는다</text>
+        <!-- 하트 1 IMSIC -->
+        <rect x="500" y="182" width="300" height="140" rx="12" class="f-accent-soft"/>
+        <text x="650" y="204" text-anchor="middle" class="t-accent">하트 1 의 IMSIC</text>
+        <rect x="514" y="216" width="86" height="56" rx="7" class="f-elev"/><text x="557" y="240" text-anchor="middle" class="t t-bold">M 파일</text><text x="557" y="259" text-anchor="middle" class="t-faint">4 KiB</text>
+        <rect x="607" y="216" width="86" height="56" rx="7" class="f-gold-soft"/><text x="650" y="240" text-anchor="middle" class="t t-bold">S 파일</text><text x="650" y="259" text-anchor="middle" class="t-faint">4 KiB</text>
+        <rect x="700" y="216" width="86" height="56" rx="7" class="f-violet-soft"/><text x="743" y="240" text-anchor="middle" class="t t-bold">게스트</text><text x="743" y="259" text-anchor="middle" class="t-faint">× GEILEN</text>
+        <text x="650" y="298" text-anchor="middle" class="t-mono" style="font-size:12px">+0x000 seteipnum_le ← 식별자</text>
+        <text x="650" y="314" text-anchor="middle" class="t-faint">IPI도 이 페이지에 쓰면 된다</text>
+      </svg></div>
+      <figcaption><b>그림 22-8.</b> AIA의 구성. 선으로 인터럽트를 내는 장치는 APLIC이 받아 MSI로 바꾸고(MSI 전달 모드), PCIe 장치는 처음부터 MSI를 쓴다. MSI는 결국 목적지 하트 IMSIC의 특정 인터럽트 파일 페이지에 대한 4바이트 쓰기다. APLIC의 도메인은 트리 구조이며 루트 도메인은 언제나 M 수준이다.</figcaption>
+    </figure>
+    <p>하트 쪽에서는 새 CSR로 인터럽트를 받는다. <code>stopei</code>(<code>0x15C</code>)를 읽으면 비트 26:16에 가장 우선인(번호가 가장 작은) 대기 식별자가 나오고, <code>csrrw a0, stopei, zero</code>처럼 읽으면서 쓰면 그 대기 비트가 지워진다. PLIC의 claim처럼 버스를 건너는 MMIO 읽기가 필요 없다. M 수준은 <code>mtopei</code>(<code>0x35C</code>), 게스트는 <code>vstopei</code>를 쓴다.</p>
+
+    <div class="sim" id="interrupt-sim">
+      <div class="sim-head"><span class="sim-tag animation">ANIMATION</span><h3>PLIC과 AIA의 인터럽트 전달 비교</h3></div>
+      <div class="sim-view"><canvas id="interrupt-canvas" aria-label="장치 인터럽트가 하트에 전달되는 과정을 보여 주는 애니메이션"></canvas></div>
+      <div class="step-description" id="interrupt-description"></div>
+      <div class="sim-controls">
+        <div class="control"><span>전달 방식</span><div class="segmented" id="interrupt-mode"><button data-value="plic" class="on">PLIC (선)</button><button data-value="aplic">APLIC → IMSIC</button><button data-value="pcie">PCIe MSI → IMSIC</button></div></div>
+        <div class="control"><span>실행</span><div class="button-row"><button class="button primary" id="interrupt-fire">인터럽트 발생</button><button class="button" id="interrupt-step">한 단계</button><button class="button" id="interrupt-reset">처음으로</button></div></div>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">단계</span><span class="value" id="interrupt-phase-readout">0 / 5</span></div>
+        <div class="stat"><span class="key">하트의 MMIO 접근</span><span class="value" id="interrupt-mmio-readout">0</span></div>
+        <div class="stat"><span class="key">MSI 메모리 쓰기</span><span class="value" id="interrupt-write-readout">0</span></div>
+        <div class="stat"><span class="key">CSR 접근</span><span class="value" id="interrupt-csr-readout">0</span></div>
+      </div>
+      <div class="sim-note">세 방식을 차례로 실행하고 마지막 줄의 숫자를 비교하자. PLIC은 처리기가 claim과 complete로 <b>MMIO를 두 번</b> 왕복해야 하지만, IMSIC은 CSR 한 번으로 끝난다. MMIO 접근은 수백 사이클이 걸릴 수 있어 인터럽트가 잦은 고속 네트워크·저장 장치에서 차이가 커진다.</div>
+    </div>
+
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th></th><th>CLINT · ACLINT</th><th>PLIC</th><th>AIA (APLIC + IMSIC)</th></tr></thead>
+      <tbody>
+        <tr><td><b>다루는 것</b></td><td>하트별 타이머·소프트웨어 인터럽트</td><td>장치의 선 인터럽트</td><td>선 인터럽트 + MSI, IPI도 MSI로</td></tr>
+        <tr><td><b>규격 상태</b></td><td>사실상 표준·공개 규격(비준 목록 밖)</td><td>PLIC v1.0.0 비준</td><td>AIA v1.0 비준</td></tr>
+        <tr><td><b>규모</b></td><td>하트 수만큼</td><td>소스 1023 · 컨텍스트 15872</td><td>파일당 식별자 63–2047, 하트마다 IMSIC</td></tr>
+        <tr><td><b>처리기 확인</b></td><td>—</td><td>claim MMIO 읽기 + complete MMIO 쓰기</td><td><code>*topei</code> CSR 읽기·쓰기</td></tr>
+        <tr><td><b>가상화</b></td><td>—</td><td>하이퍼바이저가 흉내 내야 함</td><td>게스트 인터럽트 파일로 직접 전달</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="iommu">
+    <h2>IOMMU: 장치의 DMA에도 울타리를</h2>
+    <p>CPU의 메모리 접근은 MMU와 PMP가 지키지만, 네트워크 카드나 저장 장치는 <b>DMA</b>로 메모리를 직접 읽고 쓴다. 장치 드라이버의 버그나 악의적인 장치가 아무 물리 주소에나 쓸 수 있다면 운영체제의 격리는 무너진다. 가상 머신에 장치를 통째로 넘겨줄 때는 더 심각하다. 게스트는 자기 “물리 주소”를 장치에 알려 주지만, 그것은 사실 게스트 물리 주소(GPA)일 뿐이다.</p>
+    <p>RISC-V <span class="term">IOMMU</span> 규격은 장치가 낸 주소(IOVA)를 CPU와 <b>같은 페이지 테이블 형식</b>으로 변환한다. 장치는 <code>device_id</code>(최대 24비트, PCIe라면 버스·장치·함수 번호)로 구별되고, 공유 가상 주소를 쓰는 장치는 <code>process_id</code>(최대 20비트, PCIe의 PASID)도 함께 낸다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 820 310" role="img" aria-label="IOMMU 의 주소 변환 과정">
+        <defs>
+          <marker id="iommu-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker>
+          <path id="iommu-flow-path" d="M150 150 H186 V60 H415 V264 H640 V150 H676"/>
+        </defs>
+        <use href="#iommu-flow-path" class="s-gold flow-dash" stroke-width="2"/>
+        <circle r="6" fill="var(--accent-2)"><animateMotion dur="5s" begin="-1.2s" repeatCount="indefinite"><mpath href="#iommu-flow-path"/></animateMotion></circle>
+        <rect x="20" y="104" width="130" height="92" rx="12" class="f-elev"/>
+        <text x="85" y="132" text-anchor="middle" class="t t-bold">장치 (DMA)</text>
+        <text x="85" y="154" text-anchor="middle" class="t-mono" style="font-size:12px">device_id</text>
+        <text x="85" y="172" text-anchor="middle" class="t-mono" style="font-size:12px">process_id</text>
+        <text x="85" y="188" text-anchor="middle" class="t-faint">IOVA</text>
+        <rect x="190" y="18" width="450" height="282" rx="14" class="f-accent-soft" fill-opacity="0.5"/>
+        <text x="415" y="40" text-anchor="middle" class="t-accent">IOMMU</text>
+        <rect x="210" y="52" width="410" height="42" rx="8" class="f-elev"/>
+        <text x="415" y="78" text-anchor="middle" class="t">① DDT 검색: device_id → 장치 문맥(DC)</text>
+        <rect x="210" y="104" width="410" height="42" rx="8" class="f-elev"/>
+        <text x="415" y="130" text-anchor="middle" class="t">② PDT 검색: process_id → 프로세스 문맥 (선택)</text>
+        <rect x="210" y="156" width="410" height="42" rx="8" class="f-elev"/><rect x="210" y="156" width="410" height="42" rx="8" class="f-violet-soft"/>
+        <text x="415" y="182" text-anchor="middle" class="t">③ 1단계: VA → GPA (Sv39 · Sv48 · Sv57)</text>
+        <rect x="210" y="208" width="410" height="42" rx="8" class="f-elev"/><rect x="210" y="208" width="410" height="42" rx="8" class="f-gold-soft"/>
+        <text x="415" y="234" text-anchor="middle" class="t">④ 2단계: GPA → SPA (<tspan class="t-mono">Sv39x4 · Sv48x4 · Sv57x4</tspan>)</text>
+        <text x="415" y="284" text-anchor="middle" class="t-faint">결과는 IOTLB에 캐시 · 어느 단계든 Bare로 끌 수 있다</text>
+        <rect x="676" y="56" width="124" height="188" rx="12" class="f-surface"/>
+        <text x="738" y="82" text-anchor="middle" class="t t-bold">메모리</text>
+        <text x="738" y="110" text-anchor="middle" class="t-dim">데이터 버퍼</text>
+        <text x="738" y="136" text-anchor="middle" class="t-dim">DDT · PDT</text>
+        <text x="738" y="162" text-anchor="middle" class="t-dim">페이지 테이블</text>
+        <text x="738" y="188" text-anchor="middle" class="t-dim">명령 큐</text>
+        <text x="738" y="214" text-anchor="middle" class="t-dim">폴트 큐</text>
+      </svg></div>
+      <figcaption><b>그림 22-9.</b> IOMMU의 변환 과정. 장치 번호로 장치 문맥을 찾고, 그 문맥이 정한 방식으로 2단계 변환(21장의 하이퍼바이저와 같은 VS 단계·G 단계 구조)을 한다. 소프트웨어는 메모리에 놓인 명령 큐로 IOMMU에 무효화 같은 명령을 보내고, IOMMU는 폴트 큐로 오류를 알린다.</figcaption>
+    </figure>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>1단계</th><th>2단계</th><th>장치가 내는 주소(IOVA)의 뜻</th><th>쓰임</th></tr></thead>
+      <tbody>
+        <tr><td>Bare</td><td>Bare</td><td>그대로 물리 주소(SPA)</td><td>변환·보호 없음</td></tr>
+        <tr><td>Bare</td><td>켜짐</td><td>게스트 물리 주소(GPA)</td><td>장치를 가상 머신에 직접 넘김</td></tr>
+        <tr><td>켜짐</td><td>Bare</td><td>가상 주소(VA)</td><td>호스트 OS의 DMA 격리, 공유 가상 주소</td></tr>
+        <tr><td>켜짐</td><td>켜짐</td><td>게스트 가상 주소(VA)</td><td>게스트 안에서도 DMA 격리</td></tr>
+      </tbody>
+    </table></div>
+    <div class="callout deep"><strong>MSI도 IOMMU를 지난다</strong><p>장치의 MSI 역시 메모리 쓰기이므로 IOMMU를 통과한다. IOMMU 규격은 장치 문맥마다 MSI 전용 페이지 테이블을 두어, 게스트에 넘긴 장치의 MSI를 그 게스트의 IMSIC 게스트 인터럽트 파일로 바로 보낼 수 있게 한다. 21장의 하이퍼바이저가 장치 인터럽트를 흉내 내지 않아도 되는 이유다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="debug-trace">
+    <h2>디버그·트레이스·세미호스팅: 칩을 처음 깨울 때</h2>
+    <p>새 칩에 처음 전원을 넣었을 때는 콘솔도 운영체제도 없다. 이때 쓰는 것이 외부 디버거다. RISC-V Debug 규격은 JTAG 같은 전송 수단으로 들어온 디버거가 하트를 멈추고, 레지스터와 메모리를 읽고 쓰고, 다시 실행시키는 방법을 정한다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 820 300" role="img" aria-label="RISC-V 디버그 시스템 구성">
+        <defs><marker id="debug-figure-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker></defs>
+        <text x="20" y="18" class="t-faint">디버그 호스트 (예: 노트북)</text>
+        <rect x="20" y="26" width="220" height="56" rx="10" class="f-elev"/><text x="130" y="50" text-anchor="middle" class="t t-bold">디버거</text><text x="130" y="70" text-anchor="middle" class="t-faint">gdb</text>
+        <path d="M242 54 H296" class="s-accent flow-dash" marker-end="url(#debug-figure-arrow)"/>
+        <rect x="300" y="26" width="220" height="56" rx="10" class="f-elev"/><text x="410" y="50" text-anchor="middle" class="t t-bold">디버그 변환기</text><text x="410" y="70" text-anchor="middle" class="t-faint">OpenOCD</text>
+        <path d="M522 54 H576" class="s-accent flow-dash" marker-end="url(#debug-figure-arrow)"/>
+        <rect x="580" y="26" width="220" height="56" rx="10" class="f-elev"/><text x="690" y="50" text-anchor="middle" class="t t-bold">전송 하드웨어</text><text x="690" y="70" text-anchor="middle" class="t-faint">USB-JTAG 어댑터</text>
+        <path d="M690 84 V110 H130 V156" class="s-accent flow-dash" marker-end="url(#debug-figure-arrow)"/>
+        <text x="410" y="104" text-anchor="middle" class="t-dim">JTAG (TCK · TMS · TDI · TDO)</text>
+        <rect x="10" y="124" width="800" height="168" rx="14" fill="none" stroke="var(--border)" stroke-dasharray="6 5"/>
+        <text x="790" y="144" text-anchor="end" class="t-faint">칩 (하드웨어 플랫폼)</text>
+        <rect x="30" y="160" width="200" height="110" rx="12" class="f-teal-soft"/>
+        <text x="130" y="186" text-anchor="middle" class="t t-bold">DTM</text>
+        <text x="130" y="206" text-anchor="middle" class="t-dim">JTAG TAP</text>
+        <text x="130" y="228" text-anchor="middle" class="t-mono" style="font-size:12px">IR 0x10 dtmcs</text>
+        <text x="130" y="246" text-anchor="middle" class="t-mono" style="font-size:12px">IR 0x11 dmi</text>
+        <path d="M232 215 H296" class="s-gold flow-dash" stroke-width="2.4" marker-end="url(#debug-figure-arrow)"/>
+        <text x="264" y="206" text-anchor="middle" class="t-gold" style="font-size:12px">DMI</text>
+        <rect x="300" y="160" width="250" height="110" rx="12" class="f-accent-soft"/>
+        <text x="425" y="186" text-anchor="middle" class="t t-bold">Debug Module (DM)</text>
+        <text x="425" y="208" text-anchor="middle" class="t-dim">dmcontrol · dmstatus</text>
+        <text x="425" y="228" text-anchor="middle" class="t-dim">추상 명령 · 프로그램 버퍼</text>
+        <text x="425" y="248" text-anchor="middle" class="t-faint">시스템 버스 접근 (선택)</text>
+        <path d="M552 190 H596" class="s-accent" marker-end="url(#debug-figure-arrow)"/>
+        <path d="M552 240 H596" class="s-accent" marker-end="url(#debug-figure-arrow)"/>
+        <rect x="600" y="160" width="190" height="48" rx="10" class="f-elev"/><text x="695" y="181" text-anchor="middle" class="t t-bold">하트 0</text><text x="695" y="199" text-anchor="middle" class="t-faint">+ 트리거 모듈</text>
+        <rect x="600" y="220" width="190" height="48" rx="10" class="f-elev"/><text x="695" y="241" text-anchor="middle" class="t t-bold">하트 1</text><text x="695" y="259" text-anchor="middle" class="t-faint">+ 트리거 모듈</text>
+      </svg></div>
+      <figcaption><b>그림 22-10.</b> RISC-V 디버그 시스템. 디버그 전송 모듈(DTM)은 JTAG 같은 외부 신호를 Debug Module Interface(DMI) 버스 접근으로 바꾼다. DM은 자신이 맡은 하트들을 멈추고(halt) 재개(resume)시키며, 추상 명령으로 레지스터에 접근한다. 하트마다 하나의 DM이 그 하트를 맡는다.</figcaption>
+    </figure>
+    <div class="callout spec"><strong>규격 원문에서</strong>
+      <blockquote>“Each hart in the hardware platform is controlled by exactly one DM. … Abstract commands provide access to GPRs. Additional registers are accessible through abstract commands or by writing programs to the optional Program Buffer.”</blockquote>
+      <p><a href="https://docs.riscv.org/reference/debug/v1.0/overview.html" target="_blank" rel="noopener">The RISC-V Debug Specification v1.0, System Overview</a></p></div>
+
+    <h3>Debug 모드와 추상 명령</h3>
+    <p>하트가 멈추면 M 모드보다도 높은 <span class="term">Debug 모드</span><span class="english">(Debug Mode)</span>에 들어간다(Sdext 확장). 이때 하트는 멈춘 주소를 <code>dpc</code>(<code>0x7B1</code>)에, 멈춘 이유와 이전 특권 수준을 <code>dcsr</code>(<code>0x7B0</code>)에 기록한다. <code>dcsr.cause</code>(비트 8:6)는 1=ebreak, 2=트리거, 3=haltreq, 4=한 단계 실행(step), 5=resethaltreq, 6=halt group이고, <code>dcsr.prv</code>(비트 1:0)는 멈추기 전 특권 수준이다. 디버그 전용 CSR <code>0x7B0–0x7BF</code>는 Debug 모드에서만 보이며, 하드웨어 중단점을 만드는 트리거 CSR(<code>tselect</code> <code>0x7A0</code>, <code>tdata1</code>–<code>tdata3</code> <code>0x7A1–0x7A3</code>, Sdtrig 확장)은 M 모드에서도 접근할 수 있다.</p>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>DMI 주소</th><th>레지스터</th><th>쓰임</th></tr></thead>
+      <tbody>
+        <tr><td><code>0x04</code>–<code>0x0f</code></td><td><code>data0</code>–<code>data11</code></td><td>추상 명령의 인자·결과 (64비트 값은 data0=하위, data1=상위)</td></tr>
+        <tr><td><code>0x10</code></td><td><code>dmcontrol</code></td><td>haltreq(31), resumereq(30), hartsel, ndmreset(1), dmactive(0)</td></tr>
+        <tr><td><code>0x11</code></td><td><code>dmstatus</code></td><td>allhalted(9), anyhalted(8), allrunning(11), allresumeack(17), version(3:0)=3이면 1.0</td></tr>
+        <tr><td><code>0x16</code></td><td><code>abstractcs</code></td><td>progbufsize(28:24), busy(12), cmderr(10:8, 1을 써서 지움), datacount(3:0)</td></tr>
+        <tr><td><code>0x17</code></td><td><code>command</code></td><td>쓰는 순간 추상 명령 실행</td></tr>
+        <tr><td><code>0x20</code>–</td><td><code>progbuf0</code>…</td><td>프로그램 버퍼: 하트가 Debug 모드에서 실행할 짧은 명령들</td></tr>
+      </tbody>
+    </table></div>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 820 196" role="img" aria-label="Access Register 추상 명령의 비트 배치와 예">
+        <g class="t-faint" style="font-size:11px">
+          <text x="30" y="30" class="t-faint">31</text><text x="214" y="30" text-anchor="end" class="t-faint">24</text>
+          <text x="230" y="30" text-anchor="middle" class="t-faint">23</text>
+          <text x="246" y="30" class="t-faint">22</text><text x="310" y="30" text-anchor="end" class="t-faint">20</text>
+          <text x="326" y="30" text-anchor="middle" class="t-faint">19</text><text x="350" y="30" text-anchor="middle" class="t-faint">18</text>
+          <text x="374" y="30" text-anchor="middle" class="t-faint">17</text><text x="398" y="30" text-anchor="middle" class="t-faint">16</text>
+          <text x="414" y="30" class="t-faint">15</text><text x="790" y="30" text-anchor="end" class="t-faint">0</text>
+        </g>
+        <rect x="26" y="38" width="192" height="46" class="f-violet-soft"/><text x="122" y="67" text-anchor="middle" class="t-mono t-bold">0</text>
+        <rect x="218" y="38" width="24" height="46" class="f-surface"/><text x="230" y="67" text-anchor="middle" class="t-mono">0</text>
+        <rect x="242" y="38" width="72" height="46" class="f-teal-soft"/><text x="278" y="67" text-anchor="middle" class="t-mono t-bold">3</text>
+        <rect x="314" y="38" width="24" height="46" class="f-surface"/><text x="326" y="67" text-anchor="middle" class="t-mono">0</text>
+        <rect x="338" y="38" width="24" height="46" class="f-surface"/><text x="350" y="67" text-anchor="middle" class="t-mono">0</text>
+        <rect x="362" y="38" width="24" height="46" class="f-gold-soft"/><text x="374" y="67" text-anchor="middle" class="t-mono t-bold">1</text>
+        <rect x="386" y="38" width="24" height="46" class="f-surface"/><text x="398" y="67" text-anchor="middle" class="t-mono">0</text>
+        <rect x="410" y="38" width="384" height="46" class="f-accent-soft"/><text x="602" y="67" text-anchor="middle" class="t-mono t-bold">0x100a</text>
+        <text x="122" y="104" text-anchor="middle" class="t-dim">cmdtype (0 = Access Register)</text>
+        <text x="278" y="104" text-anchor="middle" class="t-dim">aarsize</text>
+        <text x="602" y="104" text-anchor="middle" class="t-dim">regno (<tspan class="t-mono" style="font-size:12px">0x1000</tspan> + GPR 번호)</text>
+        <path d="M326 84 V112" class="s-line"/><text x="322" y="124" text-anchor="end" class="t-dim">aarpostincrement</text>
+        <path d="M350 84 V130" class="s-line"/><text x="346" y="142" text-anchor="end" class="t-dim">postexec</text>
+        <path d="M374 84 V130" class="s-line"/><text x="378" y="142" class="t-dim">transfer</text>
+        <path d="M398 84 V112" class="s-line"/><text x="402" y="124" class="t-dim">write</text>
+        <text x="410" y="178" text-anchor="middle" class="t-mono t-bold">= 0x0032100a : a0(x10)을 64비트로 읽어 data0·data1에 담아라</text>
+      </svg></div>
+      <figcaption><b>그림 22-11.</b> Access Register 추상 명령(cmdtype 0)의 비트 배치. aarsize는 2=32비트, 3=64비트, 4=128비트. regno는 <code>0x0000–0x0FFF</code>가 CSR, <code>0x1000–0x101F</code>가 정수 레지스터, <code>0x1020–0x103F</code>가 부동소수점 레지스터다. 멈춘 하트의 정수 레지스터 읽기·쓰기는 모든 DM이 반드시 지원해야 한다.</figcaption>
+    </figure>
+
+    <div class="sim" id="debug-sim">
+      <div class="sim-head"><span class="sim-tag">SIMULATOR</span><h3>Debug Module 조작해 보기</h3></div>
+      <div class="debug-diagram-wrap scroll-x">
+        <svg viewBox="0 0 820 230" role="img" aria-label="디버거, DTM, Debug Module, 하트 사이의 연결과 현재 상태">
+          <rect x="10" y="70" width="150" height="90" rx="12" class="f-elev debug-box" id="debug-sim-host"/>
+          <text x="85" y="104" text-anchor="middle" class="t t-bold">디버거</text>
+          <text x="85" y="126" text-anchor="middle" class="t-faint">gdb + OpenOCD</text>
+          <path d="M162 115 H218" class="debug-link" id="debug-sim-link-jtag"/>
+          <text x="190" y="104" text-anchor="middle" class="t-faint" style="font-size:11px">JTAG</text>
+          <rect x="220" y="70" width="120" height="90" rx="12" class="f-teal-soft debug-box" id="debug-sim-dtm"/>
+          <text x="280" y="104" text-anchor="middle" class="t t-bold">DTM</text>
+          <text x="280" y="126" text-anchor="middle" class="t-mono" style="font-size:12px">dmi (0x11)</text>
+          <path d="M342 115 H398" class="debug-link" id="debug-sim-link-dmi"/>
+          <text x="370" y="104" text-anchor="middle" class="t-faint" style="font-size:11px">DMI</text>
+          <rect x="400" y="10" width="220" height="210" rx="12" class="f-accent-soft debug-box" id="debug-sim-module"/>
+          <text x="510" y="32" text-anchor="middle" class="t t-bold">Debug Module</text>
+          <text x="414" y="58" class="t-mono" style="font-size:12px" id="debug-sim-dmcontrol">dmcontrol  0x00000001</text>
+          <text x="414" y="80" class="t-mono" style="font-size:12px" id="debug-sim-dmstatus">dmstatus   0x00000c83</text>
+          <text x="414" y="102" class="t-mono" style="font-size:12px" id="debug-sim-abstractcs">abstractcs 0x02000002</text>
+          <text x="414" y="124" class="t-mono" style="font-size:12px" id="debug-sim-command">command    —</text>
+          <text x="414" y="146" class="t-mono" style="font-size:12px" id="debug-sim-data0">data0      0x00000000</text>
+          <text x="414" y="168" class="t-mono" style="font-size:12px" id="debug-sim-data1">data1      0x00000000</text>
+          <text x="510" y="204" text-anchor="middle" class="t-faint">DMI 레지스터 (32비트)</text>
+          <path d="M622 115 H668" class="debug-link" id="debug-sim-link-hart"/>
+          <rect x="670" y="40" width="140" height="150" rx="12" class="f-elev debug-box" id="debug-sim-hart"/>
+          <text x="740" y="64" text-anchor="middle" class="t t-bold">하트 0</text>
+          <text x="740" y="88" text-anchor="middle" class="t-ok" id="debug-sim-hart-state">실행 중</text>
+          <text x="740" y="112" text-anchor="middle" class="t-mono" style="font-size:11px" id="debug-sim-hart-pc">pc 0x80200100</text>
+          <text x="740" y="134" text-anchor="middle" class="t-mono" style="font-size:11px" id="debug-sim-hart-a0">a0 = 0</text>
+          <text x="740" y="156" text-anchor="middle" class="t-mono" style="font-size:11px" id="debug-sim-hart-dpc">dpc —</text>
+          <text x="740" y="176" text-anchor="middle" class="t-mono" style="font-size:11px" id="debug-sim-hart-dcsr">dcsr.cause —</text>
+        </svg>
+      </div>
+      <div class="debug-command-field" id="debug-command-field"></div>
+      <div class="log-box" id="debug-log" aria-live="polite"></div>
+      <div class="sim-controls">
+        <div class="control"><span>하트 제어</span><div class="button-row"><button class="button primary" id="debug-halt">정지 (haltreq)</button><button class="button" id="debug-resume">재개 (resumereq)</button></div></div>
+        <div class="control"><span>읽을 레지스터</span><div class="segmented" id="debug-register"><button data-value="a0" class="on">a0</button><button data-value="sp">sp</button><button data-value="ra">ra</button><button data-value="dpc">dpc</button><button data-value="dcsr">dcsr</button></div></div>
+        <div class="control"><span>추상 명령</span><div class="button-row"><button class="button" id="debug-read">레지스터 읽기</button><button class="button" id="debug-write">a0 ← 42 쓰기</button><button class="button" id="debug-reset">처음으로</button></div></div>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">하트 상태</span><span class="value" id="debug-state-readout">실행 중</span></div>
+        <div class="stat"><span class="key">dmstatus.allhalted</span><span class="value" id="debug-halted-readout">0</span></div>
+        <div class="stat"><span class="key">abstractcs.cmderr</span><span class="value" id="debug-cmderr-readout">0</span></div>
+        <div class="stat"><span class="key">DMI 트랜잭션</span><span class="value" id="debug-transaction-readout">2</span></div>
+      </div>
+      <div class="sim-note">먼저 하트가 <b>실행 중일 때</b> “레지스터 읽기”를 눌러 보자. 이 DM은 실행 중인 하트의 레지스터 접근을 지원하지 않으므로 <code>cmderr</code>=4(halt/resume)가 되고, 디버거는 1을 써서 지워야 한다. 그다음 정지 → 읽기 → a0 쓰기 → 재개 순서로 해 보고, 재개 뒤 a0가 42부터 다시 늘어나는지 확인하자.</div>
+    </div>
+
+    <h3>트레이스와 세미호스팅</h3>
+    <p>디버거로 멈추면 실시간 동작이 깨진다. 멈추지 않고 실행 흐름을 기록하려면 <b>트레이스</b>를 쓴다. E-Trace(Efficient Trace, v2.0)는 모든 명령을 기록하지 않고 분기 결과와 불연속 지점만 압축해 내보내며, 디코더가 프로그램 바이너리와 맞춰 보며 실행 경로를 복원한다. N-Trace(v1.0)는 Nexus 표준 메시지 형식을 쓰는 방식이다. 트레이스 제어 인터페이스, 커넥터, 캡슐화 형식도 각각 별도 규격으로 비준되어 있다.</p>
+    <p><b>세미호스팅</b>(Semihosting v1.0)은 반대 방향이다. 운영체제가 없는 대상 프로그램이 디버거 호스트의 파일·콘솔을 빌려 쓴다. RISC-V에는 <code>ebreak</code>가 하나뿐이라, 디버거가 넣은 중단점과 구별하려고 특별한 세 명령 묶음을 쓴다. 연산 번호는 <code>a0</code>, 인자는 <code>a1</code>, 결과는 <code>a0</code>로 돌아온다.</p>
+    <div class="codebox" data-title="세미호스팅 호출 순서 — 세 명령 모두 32비트여야 한다">slli x0, x0, 0x1f   <span class="comment"># 0x01f01013  시작 표시용 NOP</span>
+ebreak              <span class="comment"># 0x00100073  디버거로 넘어간다</span>
+srai x0, x0, 7      <span class="comment"># 0x40705013  끝 표시용 NOP</span></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="firmware-standards">
+    <h2>플랫폼 규격: BRS·UEFI·ACPI·서버</h2>
+    <p>지금까지의 규격은 부품이다. “이 부품들을 어떤 조합으로 갖추면 상용 리눅스 배포판을 그대로 설치할 수 있다”는 약속은 플랫폼 규격이 한다. x86 PC가 UEFI와 ACPI 덕분에 어느 회사 메인보드에서나 같은 설치 USB로 부팅되는 것처럼, RISC-V도 같은 길을 택했다.</p>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>규격</th><th>핵심 내용</th></tr></thead>
+      <tbody>
+        <tr><td><b>BRS v1.0</b></td><td>두 가지 조합(recipe)을 정의한다. <b>BRS-I</b>(Interoperable)는 UEFI + ACPI로 범용 OS가 그대로 돌게 하는 조합, <b>BRS-B</b>(Bespoke)는 특정 용도에 맞춘 조합이다. SBI v2.0 이상과 HSM을 요구한다.</td></tr>
+        <tr><td><b>UEFI Protocol v1.0.0</b></td><td><code>RISCV_EFI_BOOT_PROTOCOL</code>의 <code>GetBootHartId()</code>로 부트 하트 번호를 전달한다. UEFI 응용의 호출 규약 때문에 a0로는 hartid를 넘길 수 없고, 장치 트리의 <code>/chosen</code> 방식은 ACPI 시스템에서 쓸 수 없기 때문이다.</td></tr>
+        <tr><td><b>ACPI 표</b></td><td><b>RHCT</b>(RISC-V Hart Capabilities Table: ISA 문자열·캐시·MMU 정보), <b>MADT</b>의 하트별 <b>RINTC</b> 구조와 PLIC/APLIC 구조, IOMMU가 있으면 <b>RIMT</b>(RISC-V IO Mapping Table). ACPI FFH 규격은 저전력 상태·CPPC 같은 기능을 SBI 호출로 연결한다.</td></tr>
+        <tr><td><b>Server Platform v1.0</b></td><td>응용 프로세서 하트는 <b>RVA23S64</b> 프로파일에 더해 Sv48, Sdtrig, Sdext, Zkr, Ssccfg, Ssstrict, Ssaia를 갖춰야 하고, BRS-I를 따르며, IOMMU는 RIMT로 기술하고, UEFI 보안 부팅을 구현해야 한다.</td></tr>
+        <tr><td><b>RPMI v1.0</b></td><td>응용 프로세서와 전원·클록을 관리하는 플랫폼 마이크로컨트롤러 사이의 메시지 형식. S 모드는 SBI MPXY 확장을 거쳐 이 메시지를 주고받을 수 있다.</td></tr>
+      </tbody>
+    </table></div>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 820 250" role="img" aria-label="장치 트리 경로와 UEFI ACPI 경로 비교">
+        <defs><marker id="describe-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker></defs>
+        <text x="200" y="24" text-anchor="middle" class="t t-bold">임베디드 · 보드 중심 (BRS-B 등)</text>
+        <text x="620" y="24" text-anchor="middle" class="t t-bold">범용 서버 · PC (BRS-I)</text>
+        <rect x="40" y="40" width="320" height="44" rx="9" class="f-surface"/><text x="200" y="67" text-anchor="middle" class="t">OpenSBI (M) · SBI</text>
+        <path d="M200 86 V110" class="s-accent flow-dash" marker-end="url(#describe-arrow)"/>
+        <rect x="40" y="114" width="320" height="44" rx="9" class="f-elev"/><text x="200" y="141" text-anchor="middle" class="t">U-Boot (S)</text>
+        <path d="M200 160 V184" class="s-accent flow-dash" marker-end="url(#describe-arrow)"/>
+        <rect x="40" y="188" width="320" height="50" rx="9" class="f-violet-soft"/><text x="200" y="210" text-anchor="middle" class="t t-bold">커널</text><text x="200" y="228" text-anchor="middle" class="t-faint">a0=hartid · a1=장치 트리(DTB)</text>
+        <rect x="460" y="40" width="320" height="44" rx="9" class="f-surface"/><text x="620" y="67" text-anchor="middle" class="t">OpenSBI (M) · SBI v2.0 이상 · HSM</text>
+        <path d="M620 86 V110" class="s-accent flow-dash" marker-end="url(#describe-arrow)"/>
+        <rect x="460" y="114" width="320" height="44" rx="9" class="f-elev"/><text x="620" y="134" text-anchor="middle" class="t">EDK2 등 UEFI 펌웨어 (S)</text><text x="620" y="151" text-anchor="middle" class="t-faint" style="font-size:11px">GetBootHartId · ACPI 표 · SMBIOS</text>
+        <path d="M620 160 V184" class="s-accent flow-dash" marker-end="url(#describe-arrow)"/>
+        <rect x="460" y="188" width="320" height="50" rx="9" class="f-violet-soft"/><text x="620" y="210" text-anchor="middle" class="t t-bold">커널</text><text x="620" y="228" text-anchor="middle" class="t-faint">RHCT · MADT(RINTC) · RIMT로 하드웨어 파악</text>
+      </svg></div>
+      <figcaption><b>그림 22-12.</b> 하드웨어를 운영체제에 알려 주는 두 길. 보드 중심 시스템은 장치 트리를 a1로 넘기고, 범용 시스템은 UEFI 서비스와 ACPI 표로 알려 준다. 어느 쪽이든 그 아래에서 SBI 구현이 M 모드 서비스를 제공한다는 점은 같다.</figcaption>
+    </figure>
+    <div class="callout history"><strong>PC가 걸어온 길을 따라서</strong><p>초기 RISC-V 보드는 장치 트리와 보드별 부트로더로 충분했다. 하지만 서버 시장에서는 “배포판 설치 이미지 하나로 모든 서버에 설치”가 기본 요구다. BRS와 Server Platform 규격은 그 요구를 RVA23 프로파일(23장), UEFI, ACPI, 그리고 이 장의 SBI·AIA·IOMMU를 묶어 하나의 체크리스트로 만든 것이다.</p></div>
+  </section>
+
+  <section class="keypoints" id="summary">
+    <h2>핵심 정리</h2>
+    <ol>
+      <li>하트는 리셋되면 M 모드로 시작하고, ZSBL → FSBL → 런타임 펌웨어(OpenSBI) → 부트로더(S) → 커널(S) → init(U) 순으로 바통을 넘긴다. 런타임 펌웨어만 M 모드에 상주한다.</li>
+      <li><b>SBI</b>는 S 모드가 ecall로 상위 실행 환경에 부탁하는 규약이다. <code>a7</code>=EID, <code>a6</code>=FID, <code>a0</code>–<code>a5</code>=인자, 돌아오면 <code>a0</code>=오류, <code>a1</code>=값. EID는 대개 이름의 ASCII 코드다(TIME = <code>0x54494D45</code>).</li>
+      <li><b>HSM</b> 확장의 <code>sbi_hart_start(hartid, start_addr, opaque)</code>로 보조 하트를 깨운다. 깨어난 하트는 MMU가 꺼진 S 모드에서 a0=hartid, a1=opaque로 시작한다.</li>
+      <li>타이머·IPI·원격 펜스는 SBI로 펌웨어를 거칠 수도, Sstc(<code>stimecmp</code>)와 AIA IMSIC으로 하드웨어에서 직접 처리할 수도 있다. 추세는 후자다.</li>
+      <li>인터럽트 구조는 CLINT/ACLINT(타이머·소프트웨어) → PLIC(선, claim/complete MMIO) → AIA(APLIC + IMSIC, MSI 쓰기와 <code>*topei</code> CSR)로 발전했다.</li>
+      <li>IOMMU는 CPU와 같은 페이지 테이블 형식으로 장치 DMA를 2단계 변환해 격리하며, MSI도 게스트 인터럽트 파일로 보낼 수 있다.</li>
+      <li>Debug 규격은 DTM → DMI → Debug Module 구조로 하트를 멈추고 추상 명령으로 레지스터에 접근한다. BRS·UEFI·ACPI·Server Platform 규격이 이 모든 부품을 소프트웨어 호환성 약속으로 묶는다.</li>
+    </ol>
+  </section>
+
+  <section id="quiz">
+    <h2>확인 퀴즈</h2>
+    <div class="quiz">
+      <div class="quiz-question"><p>SBI 호출에서 확장 번호(EID)를 담는 레지스터는?</p><div class="options">
+        <button class="option">a0</button>
+        <button class="option">a6</button>
+        <button class="option" data-correct>a7</button>
+        <button class="option">t0</button>
+      </div><div class="quiz-explanation">a7=EID, a6=FID, a0–a5=인자다. 돌아올 때 a0는 오류 코드, a1은 값이다.</div></div>
+      <div class="quiz-question"><p>EID <code>0x48534D</code>를 ASCII로 읽으면 어떤 확장인가?</p><div class="options">
+        <button class="option">TIME — 타이머</button>
+        <button class="option" data-correct>HSM — 하트 상태 관리</button>
+        <button class="option">SRST — 시스템 리셋</button>
+        <button class="option">sPI — IPI</button>
+      </div><div class="quiz-explanation"><code>0x48</code> 'H', <code>0x53</code> 'S', <code>0x4D</code> 'M'. 하트를 시작·정지·일시 중지하는 HSM 확장이다.</div></div>
+      <div class="quiz-question"><p>이미 STARTED 상태인 하트에 <code>sbi_hart_start</code>를 다시 부르면 돌아오는 오류 코드는?</p><div class="options">
+        <button class="option">SBI_ERR_INVALID_PARAM (−3)</button>
+        <button class="option" data-correct>SBI_ERR_ALREADY_AVAILABLE (−6)</button>
+        <button class="option">SBI_ERR_ALREADY_STARTED (−7)</button>
+        <button class="option">SBI_ERR_NOT_SUPPORTED (−2)</button>
+      </div><div class="quiz-explanation">HSM 규격의 hart start 오류 표는 “이미 시작된 하트”에 SBI_ERR_ALREADY_AVAILABLE을 쓰도록 정한다. 이름이 비슷한 ALREADY_STARTED와 헷갈리기 쉽다.</div></div>
+      <div class="quiz-question"><p>Sstc 확장이 있을 때 타이머 이벤트 하나를 처리하는 데 필요한 M 모드 진입 횟수는?</p><div class="options">
+        <button class="option" data-correct>0번</button>
+        <button class="option">1번</button>
+        <button class="option">2번</button>
+        <button class="option">하트 수만큼</button>
+      </div><div class="quiz-explanation">S 모드가 stimecmp를 직접 쓰고, 만료되면 하드웨어가 STIP를 올린다. SBI 경로는 설정 ecall과 M 타이머 인터럽트로 두 번 M 모드에 들어간다.</div></div>
+      <div class="quiz-question"><p>PLIC에서 처리기가 “어느 장치의 인터럽트인가”를 알아내는 방법은?</p><div class="options">
+        <button class="option">mcause의 하위 비트를 읽는다</button>
+        <button class="option" data-correct>컨텍스트의 claim/complete 레지스터를 MMIO로 읽는다</button>
+        <button class="option">stopei CSR을 읽는다</button>
+        <button class="option">모든 장치의 상태 레지스터를 차례로 읽는다</button>
+      </div><div class="quiz-explanation">claim 읽기는 가장 우선인 대기 인터럽트 ID를 돌려주며 그 대기 비트를 지운다. 처리 후 같은 레지스터에 ID를 써서 complete한다. stopei는 AIA IMSIC의 방법이다.</div></div>
+      <div class="quiz-question"><p>AIA에서 장치가 하트 1의 S 모드에 인터럽트 식별자 42를 보내려면?</p><div class="options">
+        <button class="option">하트 1의 sip CSR에 42를 쓴다</button>
+        <button class="option">PLIC의 우선순위 레지스터 42번에 쓴다</button>
+        <button class="option" data-correct>하트 1 IMSIC의 S 인터럽트 파일 페이지 seteipnum_le에 42를 쓴다</button>
+        <button class="option">OpenSBI에 ecall을 한다</button>
+      </div><div class="quiz-explanation">MSI는 그냥 메모리 쓰기다. 인터럽트 파일 페이지의 오프셋 <code>0x000</code> seteipnum_le에 식별자를 쓰면 그 대기 비트가 켜진다.</div></div>
+      <div class="quiz-question"><p>Debug Module의 Access Register 명령으로 정수 레지스터 x10(a0)을 지정하는 regno 값은?</p><div class="options">
+        <button class="option"><code>0x000a</code></button>
+        <button class="option" data-correct><code>0x100a</code></button>
+        <button class="option"><code>0x7b1</code></button>
+        <button class="option"><code>0x1020</code></button>
+      </div><div class="quiz-explanation">regno <code>0x1000–0x101F</code>가 정수 레지스터이므로 x10은 <code>0x100a</code>다. <code>0x0000–0x0FFF</code>는 CSR(<code>0x7b1</code>은 dpc), <code>0x1020</code>부터는 부동소수점 레지스터다.</div></div>
+      <div class="quiz-question"><p>UEFI로 부팅하는 RISC-V 시스템에서 OS 로더가 부트 하트 번호를 얻는 표준 방법은?</p><div class="options">
+        <button class="option">a0 레지스터를 읽는다</button>
+        <button class="option">mhartid CSR을 읽는다</button>
+        <button class="option" data-correct>RISCV_EFI_BOOT_PROTOCOL의 GetBootHartId()를 부른다</button>
+        <button class="option">ACPI RIMT 표를 읽는다</button>
+      </div><div class="quiz-explanation">UEFI 호출 규약 때문에 a0로 hartid를 받을 수 없고, mhartid는 M 모드 CSR이라 S 모드에서 읽을 수 없다. RIMT는 IOMMU를 기술하는 표다.</div></div>
+    </div>
+  </section>
+
+  <section id="references">
+    <h2>더 읽을거리</h2>
+    <ul class="references">
+      <li><a href="https://docs.riscv.org/reference/sbi/v3.0/index.html" target="_blank" rel="noopener">RISC-V Supervisor Binary Interface Specification v3.0</a> — 호출 규약, 오류 코드, 모든 확장</li>
+      <li><a href="https://docs.riscv.org/reference/aia/v1.0/index.html" target="_blank" rel="noopener">The RISC-V Advanced Interrupt Architecture v1.0</a> — IMSIC, APLIC, 인터럽트 CSR</li>
+      <li><a href="https://docs.riscv.org/reference/plic/v1.0.0/index.html" target="_blank" rel="noopener">RISC-V Platform-Level Interrupt Controller Specification v1.0.0</a></li>
+      <li><a href="https://docs.riscv.org/reference/iommu/index.html" target="_blank" rel="noopener">RISC-V IOMMU Architecture Specification</a></li>
+      <li><a href="https://docs.riscv.org/reference/debug/v1.0/index.html" target="_blank" rel="noopener">The RISC-V Debug Specification v1.0</a> — Debug Module, DTM, Sdext, Sdtrig</li>
+      <li><a href="https://docs.riscv.org/reference/e-trace/index.html" target="_blank" rel="noopener">Efficient Trace for RISC-V (E-Trace)</a> · <a href="https://docs.riscv.org/reference/nexus-trace/index.html" target="_blank" rel="noopener">N-Trace</a> · <a href="https://docs.riscv.org/reference/semihosting/index.html" target="_blank" rel="noopener">Semihosting</a></li>
+      <li><a href="https://docs.riscv.org/reference/brs/v1.0/index.html" target="_blank" rel="noopener">RISC-V Boot and Runtime Services (BRS) v1.0</a> · <a href="https://docs.riscv.org/reference/uefi/v1.0.0/boot_protocol.html" target="_blank" rel="noopener">RISC-V UEFI Protocol</a></li>
+      <li><a href="https://docs.riscv.org/reference/server-platform/index.html" target="_blank" rel="noopener">RISC-V Server Platform</a> · <a href="https://docs.riscv.org/reference/server-soc/index.html" target="_blank" rel="noopener">Server SoC</a> · <a href="https://docs.riscv.org/reference/rpmi/index.html" target="_blank" rel="noopener">RPMI</a> · <a href="https://docs.riscv.org/reference/acpi-rimt/index.html" target="_blank" rel="noopener">ACPI RIMT</a></li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/priv/priv-csrs.html" target="_blank" rel="noopener">Volume II: Privileged Architecture — CSR 주소 목록</a> (stimecmp, dcsr, dpc, 트리거 CSR)</li>
+      <li>OpenSBI 프로젝트 문서 (github.com/riscv-software-src/opensbi) · 리눅스 커널 문서 <i>RISC-V Kernel Boot Requirements and Constraints</i></li>
+    </ul>
+  </section>
+</main>
+
+<script>
+/* ---------------------------------------------------------------------------
+   부팅 흐름 애니메이션: 모드 줄(M/S/U) 위에 단계 상자를 놓고, 하트 네 개가
+   단계에 따라 상자 사이를 옮겨 다니는 모습을 보여 준다.
+   화면이 좁으면 줄과 단계의 방향을 바꿔(모드가 세로 칸, 단계가 아래로) 글자를 지킨다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const NARROW_LAYOUT_WIDTH = 560;
+  const MOVE_DURATION_SECONDS = 0.9;
+  const AUTO_ADVANCE_SECONDS = 3.6;
+  const CALL_DOT_PERIOD_SECONDS = 1.4;
+  const LABEL_COLUMN_WIDTH = 58;
+  const NARROW_HEADER_HEIGHT = 26;
+  const HART_COUNT = 4;
+  const BOOT_HART_INDEX = 0;
+
+  const LANES = [
+    { label: "M 모드", colorName: "violet", softColorName: "violetSoft" },
+    { label: "S 모드", colorName: "accent", softColorName: "accentSoft" },
+    { label: "U 모드", colorName: "teal", softColorName: "tealSoft" },
+  ];
+  const STAGES = [
+    { key: "zsbl", lane: 0, title: "ZSBL", subtitle: "온칩 ROM" },
+    { key: "fsbl", lane: 0, title: "FSBL", subtitle: "U-Boot SPL" },
+    { key: "opensbi", lane: 0, title: "OpenSBI", subtitle: "SBI 구현" },
+    { key: "bootloader", lane: 1, title: "U-Boot·EDK2", subtitle: "부트로더" },
+    { key: "linux", lane: 1, title: "Linux", subtitle: "커널" },
+    { key: "init", lane: 2, title: "init", subtitle: "사용자 공간" },
+  ];
+  const MODE_OF_LANE = ["M", "S", "U"];
+
+  // 하트 상태를 짧게 적기 위한 도우미: stage 는 STAGES 의 key, isParked 는 잠들어 기다리는지
+  const hart = (stage, status, isParked) => ({ stage, status, isParked: Boolean(isParked) });
+
+  const STEPS = [
+    { activeStage: "zsbl", call: null,
+      harts: [hart("zsbl", "리셋"), hart("zsbl", "리셋"), hart("zsbl", "리셋"), hart("zsbl", "리셋")],
+      description: "<b>① 리셋.</b> 전원이 들어오면 모든 하트가 <b>M 모드</b>로 깨어나 구현이 정한 리셋 벡터에서 실행을 시작한다. 보통 칩 안의 마스크 ROM에 든 첫 코드, ZSBL(zero-stage bootloader)이다. DRAM도 MMU도 아직 쓸 수 없는 가장 원초적인 상태다." },
+    { activeStage: "zsbl", call: null,
+      harts: [hart("zsbl", "부트 매체 선택"), hart("zsbl", "wfi 대기", true), hart("zsbl", "wfi 대기", true), hart("zsbl", "wfi 대기", true)],
+      description: "<b>② ZSBL.</b> 부트 하트 하나만 일한다. 부트 핀을 보고 SPI 플래시·SD 카드·eMMC 중 어디서 읽을지 정한 뒤, 다음 단계(FSBL)를 칩 안의 SRAM으로 복사한다. 나머지 하트는 <code>wfi</code>로 잠들어 신호를 기다린다." },
+    { activeStage: "fsbl", call: { from: "zsbl", to: "fsbl", label: "점프" },
+      harts: [hart("fsbl", "DRAM 초기화"), hart("zsbl", "wfi 대기", true), hart("zsbl", "wfi 대기", true), hart("zsbl", "wfi 대기", true)],
+      description: "<b>③ FSBL (예: U-Boot SPL).</b> 작은 SRAM 안에서 돌며 DRAM 컨트롤러를 초기화한다. 그다음 OpenSBI와 U-Boot 본체가 함께 든 이미지를 DRAM으로 읽어 들이고 OpenSBI로 뛴다. 여전히 M 모드다." },
+    { activeStage: "opensbi", call: { from: "fsbl", to: "opensbi", label: "점프" },
+      harts: [hart("opensbi", "콜드 부트"), hart("opensbi", "웜 부트 대기", true), hart("opensbi", "웜 부트 대기", true), hart("opensbi", "웜 부트 대기", true)],
+      description: "<b>④ OpenSBI 진입.</b> 모든 하트가 OpenSBI로 들어온다. 원자적 연산으로 먼저 성공한 하트가 콜드 부트를 맡고(부트 하트 복권), 나머지는 기다린다. 콜드 부트 하트는 콘솔·타이머·IPI 장치를 초기화하고, PMP로 펌웨어 영역을 막고, <code>medeleg</code>·<code>mideleg</code>로 S 모드가 처리할 트랩을 위임한다." },
+    { activeStage: "bootloader", call: { from: "opensbi", to: "bootloader", label: "mret" },
+      harts: [hart("bootloader", "S 모드 진입"), hart("opensbi", "STOPPED", true), hart("opensbi", "STOPPED", true), hart("opensbi", "STOPPED", true)],
+      description: "<b>⑤ S 모드로 넘기기.</b> 콜드 부트 하트는 <code>mstatus.MPP</code>를 S로, <code>mepc</code>를 다음 단계 주소로 맞추고 <code>mret</code>한다. a0에는 hartid, a1에는 장치 트리 주소를 넣는다. 나머지 하트는 HSM 상태 <b>STOPPED</b>로 OpenSBI 안에 주차된다. OpenSBI는 M 모드에 상주하며 이후의 SBI 호출을 받는다." },
+    { activeStage: "bootloader", call: null,
+      harts: [hart("bootloader", "커널 적재"), hart("opensbi", "STOPPED", true), hart("opensbi", "STOPPED", true), hart("opensbi", "STOPPED", true)],
+      description: "<b>⑥ 부트로더 (U-Boot 본체 또는 EDK2).</b> S 모드에서 돈다. 디스크나 네트워크에서 커널 이미지, 장치 트리 또는 ACPI 표, initramfs를 읽는다. UEFI라면 OS 로더가 <code>RISCV_EFI_BOOT_PROTOCOL</code>의 <code>GetBootHartId()</code>로 부트 하트 번호를 얻는다." },
+    { activeStage: "linux", call: { from: "bootloader", to: "linux", label: "커널로 점프" },
+      harts: [hart("linux", "MMU 켜기"), hart("opensbi", "STOPPED", true), hart("opensbi", "STOPPED", true), hart("opensbi", "STOPPED", true)],
+      description: "<b>⑦ 리눅스 초기화.</b> 커널은 a0=hartid, a1=DTB, <code>satp</code>=0(MMU 꺼짐)으로 시작한다. 페이지 테이블을 만들어 <code>satp</code>로 MMU를 켜고, 장치 트리나 ACPI로 하드웨어를 파악한다. <code>sbi_get_spec_version()</code>과 <code>sbi_probe_extension()</code>으로 펌웨어가 어떤 SBI 확장을 주는지도 확인한다." },
+    { activeStage: "linux", call: { from: "linux", to: "opensbi", label: "sbi_hart_start" },
+      harts: [hart("linux", "hart_start 호출"), hart("opensbi", "START_PENDING"), hart("opensbi", "START_PENDING"), hart("opensbi", "START_PENDING")],
+      description: "<b>⑧ 보조 하트 깨우기.</b> 부트 하트가 하트마다 <code>sbi_hart_start(hartid, start_addr, opaque)</code>를 부른다(HSM, EID <code>0x48534D</code>, FID 0). OpenSBI는 대상 하트를 START_PENDING으로 바꾸고 깨워서 S 모드 <code>start_addr</code>로 보낸다. 깨어난 하트는 a0=hartid, a1=opaque, satp=0, sstatus.SIE=0이다." },
+    { activeStage: "linux", call: null,
+      harts: [hart("linux", "STARTED"), hart("linux", "STARTED"), hart("linux", "STARTED"), hart("linux", "STARTED")],
+      description: "<b>⑨ 모든 하트 가동.</b> 네 하트가 모두 HSM 상태 STARTED가 되어 리눅스 스케줄러에 합류한다. 이제 하트 사이의 IPI, 원격 TLB 무효화, 타이머 설정은 SBI 호출(또는 AIA·Sstc 같은 하드웨어 경로)로 처리한다." },
+    { activeStage: "init", call: { from: "init", to: "linux", label: "ecall (시스템 호출)" },
+      harts: [hart("init", "PID 1"), hart("linux", "커널 스레드"), hart("init", "셸"), hart("linux", "유휴")],
+      description: "<b>⑩ 사용자 공간.</b> 커널이 첫 사용자 프로세스 init을 U 모드로 실행한다. 이제 세 층이 모두 살아 있다. U 모드는 ecall로 커널에 시스템 호출(원인 8)을, 커널은 ecall로 OpenSBI에 SBI 호출(원인 9)을 한다. 같은 명령이지만 실행한 모드에 따라 원인 값이 달라 받는 쪽이 구별한다." },
+  ];
+
+  const canvas = document.getElementById("boot-canvas");
+  const descriptionElement = document.getElementById("boot-description");
+  const hartGrid = document.getElementById("boot-hart-grid");
+  const autoButton = document.getElementById("boot-auto");
+  let stepIndex = 0;
+  let movementProgress = 1;
+  let startPositions = null;
+  let lastLayout = null;
+  let isAutoPlaying = false;
+  let autoElapsedSeconds = 0;
+  let callDotPhase = 0;
+
+  function computeLayout(width, height) {
+    const isNarrow = width < NARROW_LAYOUT_WIDTH;
+    const boxes = {};
+    const lanes = [];
+    if (!isNarrow) {
+      const laneHeight = (height - 12) / LANES.length;
+      const columnWidth = (width - LABEL_COLUMN_WIDTH - 6) / STAGES.length;
+      LANES.forEach((lane, laneIndex) => lanes.push({ x: 4, y: 6 + laneIndex * laneHeight, width: width - 8, height: laneHeight - 4, labelX: LABEL_COLUMN_WIDTH / 2, labelY: 6 + laneIndex * laneHeight + laneHeight / 2 }));
+      STAGES.forEach((stage, stageIndex) => {
+        boxes[stage.key] = { x: LABEL_COLUMN_WIDTH + stageIndex * columnWidth + 5, y: 6 + stage.lane * laneHeight + 10, width: columnWidth - 10, height: laneHeight - 24 };
+      });
+    } else {
+      const columnWidth = (width - 8) / LANES.length;
+      const rowHeight = (height - NARROW_HEADER_HEIGHT - 8) / STAGES.length;
+      LANES.forEach((lane, laneIndex) => lanes.push({ x: 4 + laneIndex * columnWidth, y: 4, width: columnWidth - 4, height: height - 8, labelX: 4 + laneIndex * columnWidth + columnWidth / 2, labelY: 4 + NARROW_HEADER_HEIGHT / 2 }));
+      STAGES.forEach((stage, stageIndex) => {
+        boxes[stage.key] = { x: 4 + stage.lane * columnWidth + 5, y: NARROW_HEADER_HEIGHT + 4 + stageIndex * rowHeight + 3, width: columnWidth - 14, height: rowHeight - 6 };
+      });
+    }
+    return { isNarrow, boxes, lanes };
+  }
+
+  // 같은 상자 안에 있는 하트끼리 나란히 놓으려고 상자 안에서의 순서를 센다
+  function tokenPosition(layout, stepData, hartIndex) {
+    const current = stepData.harts[hartIndex];
+    const box = layout.boxes[current.stage];
+    const sameStageIndexes = [];
+    stepData.harts.forEach((other, index) => { if (other.stage === current.stage) sameStageIndexes.push(index); });
+    const order = sameStageIndexes.indexOf(hartIndex);
+    const count = sameStageIndexes.length;
+    const radius = tokenRadius(layout);
+    const spacing = Math.min(radius * 2 + 5, (box.width - 6) / count);
+    return { x: box.x + box.width / 2 + (order - (count - 1) / 2) * spacing, y: box.y + box.height - radius - 5 };
+  }
+  function tokenRadius(layout) {
+    return layout.isNarrow ? 7 : 9;
+  }
+
+  // 선분이 상자 테두리와 만나는 점: 화살표가 상자 안쪽이 아니라 가장자리에서 시작하도록
+  function edgePoint(box, towardX, towardY) {
+    const centerX = box.x + box.width / 2;
+    const centerY = box.y + box.height / 2;
+    const deltaX = towardX - centerX;
+    const deltaY = towardY - centerY;
+    const scaleX = deltaX === 0 ? Infinity : (box.width / 2) / Math.abs(deltaX);
+    const scaleY = deltaY === 0 ? Infinity : (box.height / 2) / Math.abs(deltaY);
+    const scale = Math.min(scaleX, scaleY);
+    return { x: centerX + deltaX * scale, y: centerY + deltaY * scale };
+  }
+
+  function draw(context, width, height, colors) {
+    const layout = computeLayout(width, height);
+    lastLayout = layout;
+    const stepData = STEPS[stepIndex];
+    const titleSize = layout.isNarrow ? 11.5 : 14;
+    const subtitleSize = layout.isNarrow ? 10 : 12;
+
+    layout.lanes.forEach((lane, laneIndex) => {
+      context.fillStyle = colors[LANES[laneIndex].softColorName];
+      book.roundedRectangle(context, lane.x, lane.y, lane.width, lane.height, 10);
+      context.fill();
+      const labelText = layout.isNarrow ? LANES[laneIndex].label : MODE_OF_LANE[laneIndex];
+      book.drawText(context, labelText, lane.labelX, lane.labelY - (layout.isNarrow ? 0 : 9), { size: layout.isNarrow ? 12 : 18, bold: true, color: colors[LANES[laneIndex].colorName], align: "center" });
+      if (!layout.isNarrow) book.drawText(context, "모드", lane.labelX, lane.labelY + 12, { size: 11, color: colors.faint, align: "center" });
+    });
+
+    STAGES.forEach((stage) => {
+      const box = layout.boxes[stage.key];
+      const isActive = stage.key === stepData.activeStage;
+      // 금색 반투명 강조를 불투명한 바탕 위에 겹쳐야 모드 줄 색이 비치지 않는다
+      context.fillStyle = colors.elevated;
+      book.roundedRectangle(context, box.x, box.y, box.width, box.height, 8);
+      context.fill();
+      if (isActive) {
+        context.fillStyle = colors.goldSoft;
+        context.fill();
+      }
+      context.strokeStyle = isActive ? colors.gold : colors.border;
+      context.lineWidth = isActive ? 2.4 : 1.2;
+      context.stroke();
+      book.drawText(context, stage.title, box.x + box.width / 2, box.y + (layout.isNarrow ? 11 : 18), { size: titleSize, bold: true, color: colors.text, align: "center" });
+      book.drawText(context, stage.subtitle, box.x + box.width / 2, box.y + (layout.isNarrow ? 24 : 37), { size: subtitleSize, color: colors.faint, align: "center" });
+    });
+
+    if (stepData.call) drawCall(context, layout, stepData.call, colors);
+
+    for (let hartIndex = 0; hartIndex < HART_COUNT; hartIndex += 1) {
+      const target = tokenPosition(layout, stepData, hartIndex);
+      let position = target;
+      if (startPositions && movementProgress < 1) {
+        const fraction = book.easeInOut(movementProgress);
+        position = { x: book.linearInterpolate(startPositions[hartIndex].x, target.x, fraction), y: book.linearInterpolate(startPositions[hartIndex].y, target.y, fraction) };
+      }
+      drawToken(context, layout, position, hartIndex, stepData.harts[hartIndex].isParked, colors);
+    }
+  }
+
+  function drawCall(context, layout, call, colors) {
+    const fromBox = layout.boxes[call.from];
+    const toBox = layout.boxes[call.to];
+    const fromCenter = { x: fromBox.x + fromBox.width / 2, y: fromBox.y + fromBox.height / 2 };
+    const toCenter = { x: toBox.x + toBox.width / 2, y: toBox.y + toBox.height / 2 };
+    const start = edgePoint(fromBox, toCenter.x, toCenter.y);
+    const end = edgePoint(toBox, fromCenter.x, fromCenter.y);
+    book.drawArrow(context, start.x, start.y, end.x, end.y, { color: colors.gold, width: 2.2, headSize: 9, dash: [6, 5] });
+    const dotX = book.linearInterpolate(start.x, end.x, callDotPhase);
+    const dotY = book.linearInterpolate(start.y, end.y, callDotPhase);
+    context.fillStyle = colors.gold;
+    context.beginPath();
+    context.arc(dotX, dotY, 4.5, 0, Math.PI * 2);
+    context.fill();
+    const labelSize = layout.isNarrow ? 10 : 12;
+    context.font = "700 " + labelSize + "px " + colors.mono;
+    const labelWidth = context.measureText(call.label).width + 10;
+    const middleX = (start.x + end.x) / 2;
+    const middleY = (start.y + end.y) / 2;
+    context.fillStyle = colors.background;
+    book.roundedRectangle(context, middleX - labelWidth / 2, middleY - 9, labelWidth, 18, 5);
+    context.fill();
+    book.drawText(context, call.label, middleX, middleY, { size: labelSize, bold: true, color: colors.gold, align: "center", mono: true });
+  }
+
+  function drawToken(context, layout, position, hartIndex, isParked, colors) {
+    const radius = tokenRadius(layout);
+    let fillColor = colors.accent;
+    if (hartIndex === BOOT_HART_INDEX) fillColor = colors.gold;
+    if (isParked) fillColor = colors.faint;
+    context.fillStyle = fillColor;
+    context.beginPath();
+    context.arc(position.x, position.y, radius, 0, Math.PI * 2);
+    context.fill();
+    book.drawText(context, String(hartIndex), position.x, position.y + 0.5, { size: radius + 2, bold: true, color: colors.onAccent, align: "center", mono: true });
+  }
+
+  const canvasController = book.createCanvas(canvas, draw, { aspectRatio: 0.5, minimumHeight: 440, maximumHeight: 480 });
+
+  function renderTextParts() {
+    const stepData = STEPS[stepIndex];
+    descriptionElement.innerHTML = stepData.description;
+    hartGrid.innerHTML = stepData.harts.map((hartState, index) => {
+      const stage = STAGES.find((item) => item.key === hartState.stage);
+      const mode = MODE_OF_LANE[stage.lane];
+      const roleText = index === BOOT_HART_INDEX ? "부트" : "보조";
+      const classNames = ["cell"];
+      if (!hartState.isParked) classNames.push("active");
+      if (hartState.isParked) classNames.push("zero");
+      return '<div class="' + classNames.join(" ") + '"><div class="cell-name"><span>하트 ' + index + "</span><span>" + roleText + '</span></div><div class="cell-value">' + mode + " · " + stage.title + '</div><div class="cell-name"><span>' + hartState.status + "</span></div></div>";
+    }).join("");
+    document.getElementById("boot-step-readout").textContent = (stepIndex + 1) + " / " + STEPS.length;
+    const bootStage = STAGES.find((item) => item.key === stepData.harts[BOOT_HART_INDEX].stage);
+    document.getElementById("boot-mode-readout").textContent = MODE_OF_LANE[bootStage.lane];
+    document.getElementById("boot-awake-readout").textContent = String(stepData.harts.filter((hartState) => !hartState.isParked).length);
+  }
+
+  function goToStep(nextIndex) {
+    const clampedIndex = book.clamp(nextIndex, 0, STEPS.length - 1);
+    if (lastLayout) {
+      // 지금 그려진 위치를 출발점으로 기억해 두어야 하트가 순간 이동하지 않고 미끄러져 간다
+      const currentStep = STEPS[stepIndex];
+      startPositions = [];
+      for (let hartIndex = 0; hartIndex < HART_COUNT; hartIndex += 1) startPositions.push(tokenPosition(lastLayout, currentStep, hartIndex));
+    }
+    stepIndex = clampedIndex;
+    movementProgress = 0;
+    callDotPhase = 0;
+    renderTextParts();
+    canvasController.redraw();
+  }
+
+  function setAutoPlaying(shouldPlay) {
+    isAutoPlaying = shouldPlay;
+    autoElapsedSeconds = 0;
+    autoButton.textContent = isAutoPlaying ? "멈춤" : "자동 재생";
+  }
+
+  book.animationLoop(canvas, (deltaSeconds) => {
+    if (movementProgress < 1) movementProgress = Math.min(1, movementProgress + deltaSeconds / MOVE_DURATION_SECONDS);
+    callDotPhase = (callDotPhase + deltaSeconds / CALL_DOT_PERIOD_SECONDS) % 1;
+    if (isAutoPlaying) {
+      autoElapsedSeconds += deltaSeconds;
+      if (autoElapsedSeconds >= AUTO_ADVANCE_SECONDS) {
+        autoElapsedSeconds = 0;
+        if (stepIndex >= STEPS.length - 1) setAutoPlaying(false);
+        else goToStep(stepIndex + 1);
+      }
+    }
+    canvasController.redraw();
+  });
+
+  document.getElementById("boot-next").addEventListener("click", () => { setAutoPlaying(false); goToStep(stepIndex + 1); });
+  document.getElementById("boot-previous").addEventListener("click", () => { setAutoPlaying(false); goToStep(stepIndex - 1); });
+  document.getElementById("boot-reset").addEventListener("click", () => { setAutoPlaying(false); goToStep(0); });
+  autoButton.addEventListener("click", () => {
+    if (isAutoPlaying) { setAutoPlaying(false); return; }
+    if (stepIndex >= STEPS.length - 1) goToStep(0);
+    setAutoPlaying(true);
+  });
+  renderTextParts();
+})();
+
+/* ---------------------------------------------------------------------------
+   SBI 호출 탐색기: 함수를 고르면 ecall 직전 레지스터와 어셈블리를 보여 주고,
+   S 모드 → M 모드 → S 모드 왕복을 캔버스에서 점이 따라가며 설명한다.
+   값과 오류 코드는 SBI v3.0 규격의 함수 설명을 따른다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const Riscv = window.Riscv;
+  const SECONDS_PER_SEGMENT = 1.1;
+  const ENVIRONMENT_CALL_FROM_SUPERVISOR = 9;
+  const BASE_EXTENSION_ID = 0x10;
+  const PRINTABLE_FIRST = 0x20;
+  const PRINTABLE_LAST = 0x7e;
+  const BYTE_MASK = 0xff;
+  const BITS_PER_BYTE = 8;
+  const MAXIMUM_EXTENSION_ID_BYTES = 4;
+
+  const ERROR_NAMES = {
+    0: "SBI_SUCCESS", "-1": "SBI_ERR_FAILED", "-2": "SBI_ERR_NOT_SUPPORTED", "-3": "SBI_ERR_INVALID_PARAM",
+    "-4": "SBI_ERR_DENIED", "-5": "SBI_ERR_INVALID_ADDRESS", "-6": "SBI_ERR_ALREADY_AVAILABLE",
+  };
+
+  /* 각 함수: 확장 이름, EID, FID, 인자(레지스터 → 값과 뜻), 정상·오류 경우의 인자 바꿈과 결과.
+     value 가 null 이면 규격이 그 함수의 a1 을 정의하지 않았다는 뜻이다. */
+  const FUNCTIONS = [
+    { key: "get_spec_version", name: "sbi_get_spec_version", shortName: "spec_version", extensionId: BASE_EXTENSION_ID, functionId: 0, signature: "struct sbiret sbi_get_spec_version(void)",
+      argumentsList: [],
+      success: { error: 0, value: "0x03000000", meaning: "상위 7비트(30:24)가 주 버전 3, 하위 24비트가 부 버전 0 → v3.0", handler: "구현이 따르는 SBI 규격 버전을 돌려준다. Base 확장이라 반드시 성공한다." },
+      failure: null },
+    { key: "probe_extension", name: "sbi_probe_extension", shortName: "probe", extensionId: BASE_EXTENSION_ID, functionId: 3, signature: "struct sbiret sbi_probe_extension(long extension_id)",
+      argumentsList: [{ register: "a0", name: "extension_id", value: "0x48534d", note: "HSM 있나?" }],
+      success: { error: 0, value: "1", meaning: "1 = 그 확장이 있다", handler: "확장 표에서 HSM(0x48534D)을 찾았다. 있으면 1(또는 구현이 정한 0 아닌 값)을 돌려준다." },
+      failure: { overrides: { a0: { value: "0x12345678", note: "없는 확장" } }, error: 0, value: "0", meaning: "0 = 그런 확장 없음 (오류가 아니다)", handler: "탐색은 실패해도 오류가 아니다. error=0, value=0 으로 '없다'고 답한다." } },
+    { key: "set_timer", name: "sbi_set_timer", shortName: "set_timer", extensionId: 0x54494d45, functionId: 0, signature: "struct sbiret sbi_set_timer(uint64_t stime_value)",
+      argumentsList: [{ register: "a0", name: "stime_value", value: "0x1312d00", note: "절대 시각" }],
+      success: { error: 0, value: null, meaning: "정의되지 않음 (항상 SBI_SUCCESS)", handler: "M 모드 타이머 비교 레지스터를 stime_value 로 맞추고, 미래 시각이므로 대기 중인 S 타이머 인터럽트(STIP)를 지운다." },
+      failure: null },
+    { key: "send_ipi", name: "sbi_send_ipi", shortName: "send_ipi", extensionId: 0x735049, functionId: 0, signature: "struct sbiret sbi_send_ipi(unsigned long hart_mask, unsigned long hart_mask_base)",
+      argumentsList: [{ register: "a0", name: "hart_mask", value: "0b1110", note: "하트 1·2·3" }, { register: "a1", name: "hart_mask_base", value: "0", note: "0번부터" }],
+      success: { error: 0, value: null, meaning: "모든 대상 하트에 IPI를 보냄", handler: "하트 1·2·3의 M 소프트웨어 인터럽트를 걸고, 각 하트의 펌웨어가 S 소프트웨어 인터럽트(SSIP)로 바꿔 전달한다." },
+      failure: { overrides: { a0: { value: "0b1", note: "하트 8" }, a1: { value: "8", note: "8번부터" } }, error: -3, value: null, meaning: "하트 8은 없다 (4하트 시스템)", handler: "hart_mask_base=8, hart_mask=1 이 가리키는 하트 8이 플랫폼에 없어 SBI_ERR_INVALID_PARAM 을 돌려준다." } },
+    { key: "remote_sfence_vma", name: "sbi_remote_sfence_vma", shortName: "rfence", extensionId: 0x52464e43, functionId: 1, signature: "struct sbiret sbi_remote_sfence_vma(unsigned long hart_mask, unsigned long hart_mask_base, unsigned long start_addr, unsigned long size)",
+      argumentsList: [{ register: "a0", name: "hart_mask", value: "0b1110", note: "하트 1·2·3" }, { register: "a1", name: "hart_mask_base", value: "0", note: "0번부터" }, { register: "a2", name: "start_addr", value: "0x400000", note: "가상 주소" }, { register: "a3", name: "size", value: "0x1000", note: "한 페이지" }],
+      success: { error: 0, value: null, meaning: "대상 하트에 원격 펜스 요청 완료", handler: "대상 하트들에 IPI를 보내 각자 0x400000–0x400FFF 범위에 SFENCE.VMA 를 실행하게 한다." },
+      failure: { overrides: { a0: { value: "0b1", note: "하트 8" }, a1: { value: "8", note: "8번부터" } }, error: -3, value: null, meaning: "없는 하트가 대상에 포함됨", handler: "대상 하트 목록에 존재하지 않는 하트 8이 들어 있어 SBI_ERR_INVALID_PARAM 을 돌려준다." } },
+    { key: "hart_start", name: "sbi_hart_start", shortName: "hart_start", extensionId: 0x48534d, functionId: 0, signature: "struct sbiret sbi_hart_start(unsigned long hartid, unsigned long start_addr, unsigned long opaque)",
+      argumentsList: [{ register: "a0", name: "hartid", value: "2", note: "하트 2" }, { register: "a1", name: "start_addr", value: "0x80201000", note: "물리 주소" }, { register: "a2", name: "opaque", value: "0x80c00000", note: "a1로 전달" }],
+      success: { error: 0, value: null, meaning: "하트 2가 STOPPED → START_PENDING → STARTED", handler: "하트 2를 START_PENDING 으로 바꾸고 깨워 S 모드 0x80201000 으로 보낸다. 하트 2는 a0=2, a1=0x80c00000 으로 시작한다." },
+      failure: { overrides: {}, error: -6, value: null, meaning: "하트 2는 이미 켜져 있다", handler: "하트 2가 이미 STARTED 상태라 SBI_ERR_ALREADY_AVAILABLE 을 돌려준다." } },
+    { key: "hart_get_status", name: "sbi_hart_get_status", shortName: "get_status", extensionId: 0x48534d, functionId: 2, signature: "struct sbiret sbi_hart_get_status(unsigned long hartid)",
+      argumentsList: [{ register: "a0", name: "hartid", value: "3", note: "하트 3" }],
+      success: { error: 0, value: "1", meaning: "1 = STOPPED", handler: "하트 3의 HSM 상태 번호를 돌려준다. 0=STARTED, 1=STOPPED, 2=START_PENDING …" },
+      failure: { overrides: { a0: { value: "99", note: "하트 99" } }, error: -3, value: null, meaning: "그런 하트 번호는 없다", handler: "하트 99는 유효한 hartid 가 아니어서 SBI_ERR_INVALID_PARAM 을 돌려준다." } },
+    { key: "system_reset", name: "sbi_system_reset", shortName: "system_reset", extensionId: 0x53525354, functionId: 0, signature: "struct sbiret sbi_system_reset(uint32_t reset_type, uint32_t reset_reason)",
+      argumentsList: [{ register: "a0", name: "reset_type", value: "0", note: "0=종료" }, { register: "a1", name: "reset_reason", value: "0", note: "이유 없음" }],
+      success: { error: null, value: null, meaning: "성공하면 돌아오지 않는다", handler: "시스템 전원을 끈다(reset_type 0=Shutdown, 1=Cold reboot, 2=Warm reboot). 성공하면 ecall 다음 명령은 영영 실행되지 않는다." },
+      failure: { overrides: { a0: { value: "3", note: "예약된 값" } }, error: -3, value: null, meaning: "reset_type 3은 예약 영역", handler: "0x00000003–0xEFFFFFFF 는 예약된 reset_type 이라 SBI_ERR_INVALID_PARAM 을 돌려준다." } },
+    { key: "debug_console_write", name: "sbi_debug_console_write", shortName: "console_write", extensionId: 0x4442434e, functionId: 0, signature: "struct sbiret sbi_debug_console_write(unsigned long num_bytes, unsigned long base_addr_lo, unsigned long base_addr_hi)",
+      argumentsList: [{ register: "a0", name: "num_bytes", value: "14", note: "\"Hello, RISC-V\\n\"" }, { register: "a1", name: "base_addr_lo", value: "0x80c01000", note: "물리 주소 하위" }, { register: "a2", name: "base_addr_hi", value: "0", note: "물리 주소 상위" }],
+      success: { error: 0, value: "14", meaning: "14바이트를 모두 썼다", handler: "물리 주소 0x80c01000 의 14바이트를 콘솔(UART)로 내보낸다. 비차단 호출이라 일부만 쓸 수도 있으므로 쓴 바이트 수를 a1 로 돌려준다." },
+      failure: { overrides: {}, error: -4, value: null, meaning: "콘솔 쓰기가 허용되지 않음", handler: "펌웨어가 이 S 모드 소프트웨어의 콘솔 쓰기를 막아 두어 SBI_ERR_DENIED 를 돌려준다." } },
+  ];
+  const ARGUMENT_REGISTERS = ["a0", "a1", "a2", "a3", "a4", "a5"];
+
+  const selectElement = document.getElementById("sbi-function");
+  const registerGrid = document.getElementById("sbi-registers");
+  const assemblyElement = document.getElementById("sbi-assembly");
+  const signatureElement = document.getElementById("sbi-signature");
+  const descriptionElement = document.getElementById("sbi-description");
+  const canvas = document.getElementById("sbi-canvas");
+  let currentFunction = FUNCTIONS[0];
+  let currentCase = "success";
+  let progress = 0;
+  let isRunning = false;
+  let reachedNodeIndex = -1;
+
+  FUNCTIONS.forEach((item) => {
+    const option = document.createElement("option");
+    option.value = item.key;
+    option.textContent = item.name;
+    selectElement.appendChild(option);
+  });
+
+  /** EID 의 바이트를 높은 쪽부터 읽어 모두 인쇄 가능한 글자면 ASCII 이름으로 보여 준다. */
+  function extensionIdAsText(extensionId) {
+    const characters = [];
+    for (let byteIndex = MAXIMUM_EXTENSION_ID_BYTES - 1; byteIndex >= 0; byteIndex -= 1) {
+      const byteValue = Math.floor(extensionId / Math.pow(2, BITS_PER_BYTE * byteIndex)) & BYTE_MASK;
+      if (byteValue === 0 && characters.length === 0) continue;
+      if (byteValue < PRINTABLE_FIRST || byteValue > PRINTABLE_LAST) return null;
+      characters.push(String.fromCharCode(byteValue));
+    }
+    if (characters.length < 2) return null;
+    return characters.join("");
+  }
+
+  function hexText(value) {
+    return "0x" + value.toString(16);
+  }
+
+  /** 정상/오류 경우에 맞춰 실제로 넣을 인자 목록을 만든다. */
+  function effectiveArguments() {
+    const isFailure = currentCase === "failure" && currentFunction.failure;
+    return currentFunction.argumentsList.map((argument) => {
+      const override = isFailure ? currentFunction.failure.overrides[argument.register] : null;
+      if (override) return Object.assign({}, argument, override, { isChanged: true });
+      return argument;
+    });
+  }
+  function currentOutcome() {
+    if (currentCase === "failure" && currentFunction.failure) return currentFunction.failure;
+    return currentFunction.success;
+  }
+
+  function renderStatic() {
+    const extensionText = extensionIdAsText(currentFunction.extensionId);
+    const argumentsList = effectiveArguments();
+    signatureElement.textContent = currentFunction.signature;
+    const cells = [];
+    cells.push({ register: "a7", value: hexText(currentFunction.extensionId), note: extensionText ? "EID \"" + extensionText + "\"" : "EID (Base)", isUsed: true, isChanged: false });
+    cells.push({ register: "a6", value: String(currentFunction.functionId), note: "FID", isUsed: true, isChanged: false });
+    ARGUMENT_REGISTERS.forEach((register) => {
+      const argument = argumentsList.find((item) => item.register === register);
+      if (argument) cells.push({ register, value: argument.value, note: argument.name, isUsed: true, isChanged: Boolean(argument.isChanged) });
+      else cells.push({ register, value: "—", note: "쓰지 않음", isUsed: false, isChanged: false });
+    });
+    registerGrid.innerHTML = cells.map((cell) => {
+      const classNames = ["cell"];
+      if (!cell.isUsed) classNames.push("zero");
+      if (cell.isChanged) classNames.push("changed");
+      return '<div class="' + classNames.join(" ") + '"><div class="cell-name"><span>' + cell.register + '</span></div><div class="cell-value">' + cell.value + '</div><div class="cell-name"><span>' + cell.note + "</span></div></div>";
+    }).join("");
+
+    const lines = [];
+    lines.push("# " + currentFunction.name);
+    lines.push("li   a7, " + hexText(currentFunction.extensionId) + (extensionText ? "    # EID \"" + extensionText + "\"" : "    # EID: Base 확장"));
+    lines.push("li   a6, " + currentFunction.functionId + "             # FID");
+    argumentsList.forEach((argument) => lines.push("li   " + argument.register + ", " + argument.value + "    # " + argument.name));
+    lines.push("ecall");
+    if (currentOutcome().error === null) lines.push("# 성공하면 여기로 돌아오지 않는다");
+    else lines.push("bnez a0, sbi_error        # a0 = error");
+    assemblyElement.innerHTML = Riscv.highlightAssembly(lines.join("\n"));
+
+    document.getElementById("sbi-extension-readout").textContent = hexText(currentFunction.extensionId) + (extensionText ? " \"" + extensionText + "\"" : "");
+    document.getElementById("sbi-function-readout").textContent = String(currentFunction.functionId);
+    document.getElementById("sbi-case").querySelector('[data-value="failure"]').disabled = !currentFunction.failure;
+  }
+
+  // 본문 글꼴(Pretendard)은 숫자 사이의 x 를 곱셈 기호처럼 그리므로 16진수는 고정폭 글꼴로 감싼다
+  const HEXADECIMAL_PATTERN = /0x[0-9A-Fa-f]+(?:–0x[0-9A-Fa-f]+)?/g;
+  function monospaceHexadecimal(text) {
+    return text.replace(HEXADECIMAL_PATTERN, (match) => "<code>" + match + "</code>");
+  }
+
+  function nodeList() {
+    const outcome = currentOutcome();
+    const extensionText = extensionIdAsText(currentFunction.extensionId);
+    const nodes = [
+      { lane: 0, xFraction: 0.1, title: "인자 준비", detail: "a7·a6·a0–a5",
+        text: "<b>① 인자 준비.</b> 커널이 <code>a7</code>=<code>" + hexText(currentFunction.extensionId) + "</code>" + (extensionText ? "(\"" + extensionText + "\")" : "(Base)") + ", <code>a6</code>=" + currentFunction.functionId + "과 인자를 채우고 <code>ecall</code>을 실행한다." },
+      { lane: 1, xFraction: 0.3, title: "트랩 진입", detail: "mcause=" + ENVIRONMENT_CALL_FROM_SUPERVISOR,
+        text: "<b>② M 모드 트랩.</b> S 모드의 ecall은 M 모드로 트랩된다. <code>mcause</code>=" + ENVIRONMENT_CALL_FROM_SUPERVISOR + "(Environment call from S-mode), <code>mepc</code>=ecall 주소. OpenSBI의 트랩 처리기가 레지스터를 저장한다." },
+      { lane: 1, xFraction: 0.5, title: "확장 찾기", detail: "a7=EID",
+        text: "<b>③ 확장 찾기.</b> OpenSBI가 <code>a7</code> 값으로 등록된 확장을 찾고 <code>a6</code>으로 함수를 고른다. 없는 EID·FID였다면 여기서 바로 SBI_ERR_NOT_SUPPORTED(−2)로 돌아간다." },
+      { lane: 1, xFraction: 0.7, title: "함수 실행", detail: currentFunction.shortName,
+        text: "<b>④ " + currentFunction.name + " 처리.</b> " + monospaceHexadecimal(outcome.handler) },
+    ];
+    if (outcome.error === null) return nodes;
+    const errorName = ERROR_NAMES[String(outcome.error)] || String(outcome.error);
+    const valueText = outcome.value === null ? "정의되지 않음" : outcome.value;
+    nodes.push({ lane: 0, xFraction: 0.9, title: "복귀", detail: "a0=" + outcome.error,
+      text: "<b>⑤ 복귀.</b> <code>mepc</code>를 4 늘려 ecall 다음 명령을 가리키게 하고 <code>mret</code>. 커널은 <code>a0</code>=" + outcome.error + "(" + errorName + "), <code>a1</code>=" + monospaceHexadecimal(valueText) + "을 받는다. " + monospaceHexadecimal(outcome.meaning) + "." });
+    return nodes;
+  }
+
+  function nodeBoxWidth(width) {
+    return Math.min(118, width * 0.18);
+  }
+  // 좁은 화면에서 양 끝 상자가 캔버스 밖으로 잘리지 않도록 가운데 좌표를 안쪽으로 당긴다
+  function nodePosition(node, width, height) {
+    const laneHeight = height / 2;
+    const halfBox = nodeBoxWidth(width) / 2 + 6;
+    return { x: book.clamp(width * node.xFraction, halfBox, width - halfBox), y: laneHeight * node.lane + laneHeight / 2 + 6 };
+  }
+
+  function draw(context, width, height, colors) {
+    const laneHeight = height / 2;
+    const isNarrow = width < 520;
+    const labels = ["S 모드 · 커널", "M 모드 · OpenSBI"];
+    const laneColors = [colors.violetSoft, colors.surface];
+    labels.forEach((label, laneIndex) => {
+      context.fillStyle = laneColors[laneIndex];
+      book.roundedRectangle(context, 4, 4 + laneIndex * laneHeight, width - 8, laneHeight - 8, 10);
+      context.fill();
+      book.drawText(context, label, 12, 16 + laneIndex * laneHeight, { size: 11, bold: true, color: laneIndex === 0 ? colors.violet : colors.dim });
+    });
+    const nodes = nodeList();
+    const positions = nodes.map((node) => nodePosition(node, width, height));
+    context.strokeStyle = colors.border;
+    context.lineWidth = 2;
+    context.setLineDash([5, 5]);
+    context.beginPath();
+    positions.forEach((position, index) => { if (index === 0) context.moveTo(position.x, position.y); else context.lineTo(position.x, position.y); });
+    context.stroke();
+    context.setLineDash([]);
+    const boxWidth = nodeBoxWidth(width);
+    const boxHeight = isNarrow ? 40 : 46;
+    nodes.forEach((node, index) => {
+      const position = positions[index];
+      const isReached = index <= reachedNodeIndex;
+      context.fillStyle = colors.elevated;
+      book.roundedRectangle(context, position.x - boxWidth / 2, position.y - boxHeight / 2, boxWidth, boxHeight, 8);
+      context.fill();
+      if (isReached) {
+        context.fillStyle = colors.goldSoft;
+        context.fill();
+      }
+      context.strokeStyle = isReached ? colors.gold : colors.border;
+      context.lineWidth = isReached ? 2 : 1;
+      context.stroke();
+      book.drawText(context, node.title, position.x, position.y - (isNarrow ? 7 : 8), { size: isNarrow ? 10.5 : 13, bold: true, color: colors.text, align: "center" });
+      book.drawText(context, node.detail, position.x, position.y + (isNarrow ? 9 : 11), { size: isNarrow ? 9 : 11, color: colors.dim, align: "center", mono: true });
+    });
+    if (isRunning || reachedNodeIndex >= 0) {
+      const segmentIndex = Math.min(Math.floor(progress), positions.length - 2);
+      const fraction = Math.min(1, progress - segmentIndex);
+      const from = positions[Math.max(0, segmentIndex)];
+      const to = positions[Math.min(positions.length - 1, segmentIndex + 1)];
+      const dotX = book.linearInterpolate(from.x, to.x, book.easeInOut(fraction));
+      const dotY = book.linearInterpolate(from.y, to.y, book.easeInOut(fraction));
+      context.fillStyle = colors.gold;
+      context.beginPath();
+      context.arc(dotX, dotY, 7, 0, Math.PI * 2);
+      context.fill();
+    }
+  }
+
+  const canvasController = book.createCanvas(canvas, draw, { aspectRatio: 0.3, minimumHeight: 190, maximumHeight: 250 });
+
+  function updateDescription() {
+    const nodes = nodeList();
+    if (reachedNodeIndex < 0) {
+      descriptionElement.innerHTML = "<b>ecall 실행</b>을 누르면 호출이 S 모드에서 M 모드로 갔다가 돌아오는 과정을 단계별로 보여 준다.";
+      return;
+    }
+    descriptionElement.innerHTML = nodes[Math.min(reachedNodeIndex, nodes.length - 1)].text;
+  }
+
+  function updateResultReadout() {
+    const outcome = currentOutcome();
+    const nodes = nodeList();
+    const isFinished = reachedNodeIndex >= nodes.length - 1;
+    const errorElement = document.getElementById("sbi-error-readout");
+    const valueElement = document.getElementById("sbi-value-readout");
+    if (!isFinished) { errorElement.textContent = "—"; valueElement.textContent = "—"; return; }
+    if (outcome.error === null) { errorElement.textContent = "돌아오지 않음"; valueElement.textContent = "—"; return; }
+    errorElement.innerHTML = String(outcome.error) + '<br><span style="font-size:11.5px;font-weight:600">' + (ERROR_NAMES[String(outcome.error)] || "") + "</span>";
+    valueElement.textContent = outcome.value === null ? "정의 안 됨" : outcome.value;
+  }
+
+  function resetRun() {
+    isRunning = false;
+    progress = 0;
+    reachedNodeIndex = -1;
+    updateDescription();
+    updateResultReadout();
+    canvasController.redraw();
+  }
+
+  book.animationLoop(canvas, (deltaSeconds) => {
+    if (!isRunning) return;
+    const lastIndex = nodeList().length - 1;
+    progress = Math.min(lastIndex, progress + deltaSeconds / SECONDS_PER_SEGMENT);
+    const reached = Math.floor(progress + 0.0001);
+    if (reached !== reachedNodeIndex) {
+      reachedNodeIndex = reached;
+      updateDescription();
+      updateResultReadout();
+    }
+    if (progress >= lastIndex) isRunning = false;
+    canvasController.redraw();
+  });
+
+  selectElement.addEventListener("change", () => {
+    currentFunction = FUNCTIONS.find((item) => item.key === selectElement.value);
+    if (!currentFunction.failure) caseControl.set("success");
+    renderStatic();
+    resetRun();
+  });
+  const caseControl = book.segmented("sbi-case", (value) => {
+    currentCase = value;
+    if (!currentFunction) return;
+    renderStatic();
+    resetRun();
+  });
+  document.getElementById("sbi-run").addEventListener("click", () => {
+    progress = 0;
+    reachedNodeIndex = 0;
+    isRunning = true;
+    updateDescription();
+    updateResultReadout();
+  });
+  document.getElementById("sbi-reset").addEventListener("click", resetRun);
+  renderStatic();
+  resetRun();
+})();
+
+/* ---------------------------------------------------------------------------
+   PLIC 과 AIA 비교 애니메이션: 같은 '장치 인터럽트 한 번'이 세 가지 길로
+   하트에 닿는 과정을 단계별로 움직이고, 하트가 낸 MMIO·CSR 접근 수를 센다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const SECONDS_PER_PHASE = 1.5;
+  const NARROW_WIDTH = 520;
+  const PLIC_CONTEXT_NUMBER = 3;
+  const PLIC_CLAIM_BASE_OFFSET = 0x200004;
+  const PLIC_CONTEXT_STRIDE = 0x1000;
+  const claimOffsetText = "0x" + (PLIC_CLAIM_BASE_OFFSET + PLIC_CONTEXT_STRIDE * PLIC_CONTEXT_NUMBER).toString(16);
+
+  // 모드마다 장치·제어기·하트 상자에 적을 글과 단계 목록
+  const MODES = {
+    plic: {
+      device: ["UART", "소스 10", "선 인터럽트"],
+      controller: ["PLIC", "IP[10] · 우선순위 3", "문턱값 0 · claim"],
+      hartInput: ["EIP 선", "sip.SEIP"],
+      hartCore: ["처리기", "하트 1 · S"],
+      linkStyle: ["wire", "wire"],
+      phases: [
+        { path: ["deviceOut", "controllerIn"], label: "IRQ 선", highlight: "controller", counts: {},
+          text: "<b>① 선 올리기.</b> UART가 인터럽트 선을 올린다. PLIC의 게이트웨이가 요청 하나를 코어로 넘기고, 코어는 대기 비트 IP[10]을 1로 만든다." },
+        { path: ["controllerOut", "hartInput"], label: "EIP", highlight: "hartInput", counts: {},
+          text: "<b>② 컨텍스트로 전달.</b> 소스 10의 우선순위(3)가 컨텍스트 " + PLIC_CONTEXT_NUMBER + "(하트 1의 S 모드)의 문턱값(0)보다 크고 허용 비트도 켜져 있다. PLIC이 그 컨텍스트의 <b>EIP 선</b>을 올리면 하트 1의 <code>sip.SEIP</code>가 1이 되어 S 모드 외부 인터럽트 트랩이 일어난다." },
+        { path: ["hartCore", "controllerOut"], label: "MMIO 읽기", highlight: "controller", counts: { memoryMappedAccess: 1 },
+          text: "<b>③ claim.</b> 처리기는 어느 장치가 불렀는지 모른다. 그래서 PLIC의 claim 레지스터(<code>base + " + claimOffsetText + "</code> = <code>0x200004 + 0x1000 × " + PLIC_CONTEXT_NUMBER + "</code>)를 <b>MMIO로 읽는다</b>. 버스를 건너가 답을 기다리는 느린 읽기다." },
+        { path: ["controllerOut", "hartCore"], label: "ID 10", highlight: "hartCore", counts: {},
+          text: "<b>④ ID 받기.</b> PLIC은 가장 우선인 대기 인터럽트의 ID 10을 돌려주면서 IP[10]을 원자적으로 지운다. 처리기는 ID 10에 연결된 UART 드라이버를 부른다." },
+        { path: ["hartCore", "controllerOut"], label: "complete 쓰기", highlight: "controller", counts: { memoryMappedAccess: 1 },
+          text: "<b>⑤ complete.</b> 처리가 끝나면 같은 주소에 10을 <b>MMIO로 써서</b> 완료를 알린다. 게이트웨이는 이 신호를 받아야 소스 10의 다음 요청을 받아 준다. 하트가 낸 MMIO 접근은 모두 2번이다." },
+      ],
+    },
+    aplic: {
+      device: ["UART", "소스 10", "선 인터럽트"],
+      controller: ["APLIC", "DM=1 (MSI 모드)", "target: 하트 1, EIID 10"],
+      hartInput: ["IMSIC S 파일", "eip · eie"],
+      hartCore: ["처리기", "하트 1 · S"],
+      linkStyle: ["wire", "message"],
+      phases: [
+        { path: ["deviceOut", "controllerIn"], label: "IRQ 선", highlight: "controller", counts: {},
+          text: "<b>① 선 올리기.</b> UART의 선이 APLIC의 소스 10으로 들어간다. 이 APLIC 도메인은 <code>domaincfg.DM</code>=1, 곧 <b>MSI 전달 모드</b>로 설정되어 있다." },
+        { path: ["controllerOut", "hartInput"], label: "MSI 쓰기", highlight: "hartInput", counts: { messageWrite: 1 },
+          text: "<b>② MSI로 바꿔 보내기.</b> APLIC은 소스 10의 target 레지스터에 적힌 대로 하트 1, 식별자(EIID) 10을 골라 <b>메모리 쓰기 한 번</b>을 낸다. 목적지는 하트 1 IMSIC의 S 인터럽트 파일 페이지 오프셋 <code>0x000</code>, <code>seteipnum_le</code>이고 값은 10이다." },
+        { path: ["hartInput", "hartCore"], label: "eip[10]=1", highlight: "hartCore", counts: {},
+          text: "<b>③ 대기 비트.</b> IMSIC이 S 파일의 eip[10]을 1로 만든다. eie[10]도 켜져 있으므로 하트 1의 SEIP가 올라가 트랩이 일어난다." },
+        { path: ["hartCore", "hartInput"], label: "csrrw stopei", highlight: "hartInput", counts: { csrAccess: 1 },
+          text: "<b>④ 식별자 받기.</b> 처리기는 <code>csrrw a0, stopei, zero</code> 한 번으로 가장 우선인 식별자(비트 26:16에 10)를 읽으면서 그 대기 비트를 지운다. 버스를 건너는 MMIO가 아니라 하트 안의 <b>CSR 접근</b>이다." },
+        { path: ["hartCore", "hartCore"], label: "처리", highlight: "hartCore", counts: {},
+          text: "<b>⑤ 끝.</b> UART 드라이버가 일을 마친다. IMSIC에는 complete 단계가 없다. 하트가 낸 MMIO 접근 0번, CSR 접근 1번." },
+      ],
+    },
+    pcie: {
+      device: ["NVMe", "PCIe 장치", "MSI만 사용"],
+      controller: ["IOMMU", "인터커넥트", "MSI 주소 검사"],
+      hartInput: ["IMSIC S 파일", "eip · eie"],
+      hartCore: ["처리기", "하트 1 · S"],
+      linkStyle: ["message", "message"],
+      phases: [
+        { path: ["deviceOut", "controllerIn"], label: "DMA 쓰기", highlight: "controller", counts: { messageWrite: 1 },
+          text: "<b>① MSI 쓰기.</b> PCIe 장치에는 인터럽트 선이 없다. 미리 설정된 MSI 주소에 MSI 데이터(식별자 42)를 쓰는 <b>메모리 쓰기</b>를 낸다." },
+        { path: ["controllerOut", "hartInput"], label: "seteipnum_le ← 42", highlight: "hartInput", counts: {},
+          text: "<b>② 목적지 도착.</b> 쓰기는 IOMMU(있다면 MSI 주소도 검사·변환)와 인터커넥트를 지나 하트 1 IMSIC의 S 파일 <code>seteipnum_le</code>에 값 42로 도착한다. 장치마다 다른 식별자를 배정해 두면 처리기가 장치에게 물어볼 필요가 없다." },
+        { path: ["hartInput", "hartCore"], label: "eip[42]=1", highlight: "hartCore", counts: {},
+          text: "<b>③ 대기 비트.</b> eip[42]가 1이 되고 SEIP가 올라가 트랩이 일어난다." },
+        { path: ["hartCore", "hartInput"], label: "csrrw stopei", highlight: "hartInput", counts: { csrAccess: 1 },
+          text: "<b>④ 식별자 받기.</b> <code>csrrw a0, stopei, zero</code>로 식별자 42를 받으며 대기 비트를 지운다." },
+        { path: ["hartCore", "hartCore"], label: "처리", highlight: "hartCore", counts: {},
+          text: "<b>⑤ 끝.</b> 장치에서 하트까지 선도 PLIC도 거치지 않았다. 가상 머신에 장치를 넘겨줄 때는 같은 쓰기를 게스트 인터럽트 파일로 보내 하이퍼바이저 개입 없이 게스트에 인터럽트를 전할 수 있다(21장)." },
+      ],
+    },
+  };
+
+  const canvas = document.getElementById("interrupt-canvas");
+  const descriptionElement = document.getElementById("interrupt-description");
+  let modeKey = "plic";
+  let phaseIndex = -1;
+  let phaseProgress = 0;
+  let isPlaying = false;
+  let shouldContinue = false;
+
+  function computeLayout(width, height) {
+    const top = height * 0.1;
+    const boxHeight = height * 0.8;
+    const device = { x: width * 0.02, y: height * 0.3, width: width * 0.22, height: height * 0.4 };
+    const controller = { x: width * 0.33, y: top, width: width * 0.28, height: boxHeight };
+    const hart = { x: width * 0.69, y: top, width: width * 0.29, height: boxHeight };
+    const hartInput = { x: hart.x + 6, y: hart.y + boxHeight * 0.1, width: hart.width - 12, height: boxHeight * 0.34 };
+    const hartCore = { x: hart.x + 6, y: hart.y + boxHeight * 0.56, width: hart.width - 12, height: boxHeight * 0.34 };
+    const anchors = {
+      deviceOut: { x: device.x + device.width, y: device.y + device.height / 2 },
+      controllerIn: { x: controller.x, y: device.y + device.height / 2 },
+      controllerOut: { x: controller.x + controller.width, y: hartInput.y + hartInput.height / 2 },
+      hartInput: { x: hartInput.x, y: hartInput.y + hartInput.height / 2 },
+      hartCore: { x: hartCore.x + hartCore.width / 2, y: hartCore.y + hartCore.height / 2 },
+    };
+    return { device, controller, hart, hartInput, hartCore, anchors, isNarrow: width < NARROW_WIDTH };
+  }
+
+  function drawBox(context, box, lines, isHighlighted, fillColor, colors, isNarrow) {
+    context.fillStyle = colors.elevated;
+    book.roundedRectangle(context, box.x, box.y, box.width, box.height, 9);
+    context.fill();
+    context.fillStyle = fillColor;
+    context.fill();
+    context.strokeStyle = isHighlighted ? colors.gold : colors.border;
+    context.lineWidth = isHighlighted ? 2.6 : 1.2;
+    context.stroke();
+    const lineGap = isNarrow ? 14 : 18;
+    const startY = box.y + box.height / 2 - ((lines.length - 1) * lineGap) / 2;
+    lines.forEach((line, index) => {
+      book.drawText(context, line, box.x + box.width / 2, startY + index * lineGap, { size: index === 0 ? (isNarrow ? 11.5 : 14) : (isNarrow ? 9.5 : 12), bold: index === 0, color: index === 0 ? colors.text : colors.dim, align: "center" });
+    });
+  }
+
+  function drawLink(context, from, to, style, colors) {
+    context.save();
+    context.strokeStyle = style === "wire" ? colors.accent : colors.gold;
+    context.lineWidth = style === "wire" ? 3 : 2;
+    if (style !== "wire") context.setLineDash([6, 5]);
+    context.beginPath();
+    context.moveTo(from.x, from.y);
+    context.lineTo(to.x, to.y);
+    context.stroke();
+    context.restore();
+  }
+
+  function draw(context, width, height, colors) {
+    const layout = computeLayout(width, height);
+    const mode = MODES[modeKey];
+    const phase = phaseIndex >= 0 ? mode.phases[phaseIndex] : null;
+    const highlight = phase ? phase.highlight : "";
+    drawLink(context, layout.anchors.deviceOut, layout.anchors.controllerIn, mode.linkStyle[0], colors);
+    drawLink(context, layout.anchors.controllerOut, layout.anchors.hartInput, mode.linkStyle[1], colors);
+    drawBox(context, layout.device, mode.device, highlight === "device", colors.surface, colors, layout.isNarrow);
+    drawBox(context, layout.controller, mode.controller, highlight === "controller", modeKey === "plic" ? colors.accentSoft : colors.tealSoft, colors, layout.isNarrow);
+    context.fillStyle = colors.surface;
+    book.roundedRectangle(context, layout.hart.x, layout.hart.y, layout.hart.width, layout.hart.height, 10);
+    context.fill();
+    context.strokeStyle = colors.border;
+    context.lineWidth = 1;
+    context.stroke();
+    drawBox(context, layout.hartInput, mode.hartInput, highlight === "hartInput", modeKey === "plic" ? colors.violetSoft : colors.goldSoft, colors, layout.isNarrow);
+    drawBox(context, layout.hartCore, mode.hartCore, highlight === "hartCore", colors.violetSoft, colors, layout.isNarrow);
+    book.drawText(context, "하트 1", layout.hart.x + layout.hart.width / 2, layout.hart.y + layout.hart.height * 0.5, { size: layout.isNarrow ? 9.5 : 11, color: colors.faint, align: "center" });
+    book.drawText(context, "선 = 실선 · 메모리 쓰기 = 점선", 8, height - 10, { size: layout.isNarrow ? 9.5 : 11, color: colors.faint });
+
+    if (phase) {
+      const from = layout.anchors[phase.path[0]];
+      const to = layout.anchors[phase.path[1]];
+      const fraction = book.easeInOut(phaseProgress);
+      const dotX = book.linearInterpolate(from.x, to.x, fraction);
+      const dotY = book.linearInterpolate(from.y, to.y, fraction);
+      context.fillStyle = colors.gold;
+      context.beginPath();
+      context.arc(dotX, dotY, layout.isNarrow ? 6 : 8, 0, Math.PI * 2);
+      context.fill();
+      const labelSize = layout.isNarrow ? 9.5 : 12;
+      context.font = "700 " + labelSize + "px " + colors.mono;
+      const labelWidth = context.measureText(phase.label).width + 10;
+      const labelX = book.clamp(dotX, labelWidth / 2 + 2, width - labelWidth / 2 - 2);
+      const labelY = Math.max(12, dotY - 18);
+      context.fillStyle = colors.background;
+      book.roundedRectangle(context, labelX - labelWidth / 2, labelY - 9, labelWidth, 18, 5);
+      context.fill();
+      context.strokeStyle = colors.gold;
+      context.lineWidth = 1;
+      context.stroke();
+      book.drawText(context, phase.label, labelX, labelY, { size: labelSize, bold: true, color: colors.gold, align: "center", mono: true });
+    }
+  }
+
+  const canvasController = book.createCanvas(canvas, draw, { aspectRatio: 0.42, minimumHeight: 230, maximumHeight: 330 });
+
+  function totals() {
+    const sums = { memoryMappedAccess: 0, messageWrite: 0, csrAccess: 0 };
+    MODES[modeKey].phases.forEach((phase, index) => {
+      if (index > phaseIndex) return;
+      Object.keys(sums).forEach((name) => { sums[name] += phase.counts[name] || 0; });
+    });
+    return sums;
+  }
+
+  function renderText() {
+    const mode = MODES[modeKey];
+    if (phaseIndex < 0) descriptionElement.innerHTML = "<b>인터럽트 발생</b>을 누르면 장치의 인터럽트 한 번이 하트의 처리기에 닿기까지를 다섯 단계로 보여 준다. <b>한 단계</b>로 천천히 볼 수도 있다.";
+    else descriptionElement.innerHTML = mode.phases[phaseIndex].text;
+    const sums = totals();
+    document.getElementById("interrupt-phase-readout").textContent = (phaseIndex + 1) + " / " + mode.phases.length;
+    document.getElementById("interrupt-mmio-readout").textContent = String(sums.memoryMappedAccess);
+    document.getElementById("interrupt-write-readout").textContent = String(sums.messageWrite);
+    document.getElementById("interrupt-csr-readout").textContent = String(sums.csrAccess);
+  }
+
+  function startPhase(index) {
+    phaseIndex = index;
+    phaseProgress = 0;
+    isPlaying = true;
+    renderText();
+  }
+
+  function reset() {
+    phaseIndex = -1;
+    phaseProgress = 0;
+    isPlaying = false;
+    shouldContinue = false;
+    renderText();
+    canvasController.redraw();
+  }
+
+  book.animationLoop(canvas, (deltaSeconds) => {
+    if (!isPlaying) return;
+    phaseProgress = Math.min(1, phaseProgress + deltaSeconds / SECONDS_PER_PHASE);
+    if (phaseProgress >= 1) {
+      isPlaying = false;
+      const isLastPhase = phaseIndex >= MODES[modeKey].phases.length - 1;
+      if (shouldContinue && !isLastPhase) startPhase(phaseIndex + 1);
+      else shouldContinue = false;
+    }
+    canvasController.redraw();
+  });
+
+  book.segmented("interrupt-mode", (value) => { modeKey = value; reset(); });
+  document.getElementById("interrupt-fire").addEventListener("click", () => {
+    shouldContinue = true;
+    startPhase(0);
+  });
+  document.getElementById("interrupt-step").addEventListener("click", () => {
+    shouldContinue = false;
+    const nextIndex = phaseIndex + 1;
+    if (nextIndex >= MODES[modeKey].phases.length) { reset(); return; }
+    startPhase(nextIndex);
+  });
+  document.getElementById("interrupt-reset").addEventListener("click", reset);
+  reset();
+})();
+
+/* ---------------------------------------------------------------------------
+   Debug Module 시뮬레이터: 디버거가 DMI 로 DM 레지스터를 읽고 쓰며
+   하트를 멈추고, 추상 명령(Access Register)으로 레지스터를 읽고 쓰고, 다시 재개한다.
+   레지스터 번호와 비트 위치는 RISC-V Debug Specification v1.0 을 따른다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const DMI_ADDRESS = { data0: 0x04, data1: 0x05, dmcontrol: 0x10, dmstatus: 0x11, abstractcs: 0x16, command: 0x17 };
+  const HALT_REQUEST_BIT = 0x80000000;
+  const RESUME_REQUEST_BIT = 0x40000000;
+  const DEBUG_MODULE_ACTIVE_BIT = 0x1;
+  const DMSTATUS_RUNNING = 0x00000c83;   // allrunning·anyrunning·authenticated, version=3(1.0)
+  const DMSTATUS_HALTED = 0x00000383;    // allhalted·anyhalted·authenticated, version=3
+  const DMSTATUS_RESUMED = 0x00030c83;   // 위 실행 상태 + allresumeack·anyresumeack
+  const ABSTRACTCS_IDLE = 0x02000002;    // progbufsize=2, datacount=2, busy=0, cmderr=0
+  const COMMAND_ERROR_SHIFT = 8;
+  const COMMAND_ERROR_HALT_RESUME = 4;
+  const COMMAND_ERROR_CLEAR_VALUE = 0x00000700; // cmderr 는 1을 써서 지우는(W1C) 필드다
+  const ACCESS_REGISTER_SIZE_SHIFT = 20;
+  const ACCESS_REGISTER_TRANSFER_BIT = 1 << 17;
+  const ACCESS_REGISTER_WRITE_BIT = 1 << 16;
+  const SIZE_32_BITS = 2;
+  const SIZE_64_BITS = 3;
+  const GENERAL_REGISTER_BASE = 0x1000;
+  const DCSR_DEBUG_VERSION_1_0 = 4 << 28;
+  const DCSR_CAUSE_SHIFT = 6;
+  const DCSR_CAUSE_HALT_REQUEST = 3;
+  const PRIVILEGE_SUPERVISOR = 1;
+  const PROGRAM_ADDRESSES = [0x80200100, 0x80200104, 0x80200108];
+  const INSTRUCTIONS_PER_SECOND = 2;
+  const WRITE_VALUE = 42n;
+  const LOW_WORD_MASK = 0xffffffffn;
+  const LINK_HIGHLIGHT_MILLISECONDS = 900;
+  const MAXIMUM_LOG_LINES = 16;
+
+  const REGISTER_CHOICES = {
+    a0: { regno: GENERAL_REGISTER_BASE + 10, size: SIZE_64_BITS, label: "a0 (x10)" },
+    sp: { regno: GENERAL_REGISTER_BASE + 2, size: SIZE_64_BITS, label: "sp (x2)" },
+    ra: { regno: GENERAL_REGISTER_BASE + 1, size: SIZE_64_BITS, label: "ra (x1)" },
+    dpc: { regno: 0x7b1, size: SIZE_64_BITS, label: "dpc (CSR 0x7b1)" },
+    dcsr: { regno: 0x7b0, size: SIZE_32_BITS, label: "dcsr (CSR 0x7b0)" },
+  };
+
+  const logElement = document.getElementById("debug-log");
+  const commandFieldElement = document.getElementById("debug-command-field");
+  let state = null;
+  let selectedRegister = "a0";
+  let instructionTimer = 0;
+  const highlightTimers = {};
+
+  function freshState() {
+    return {
+      isHalted: false, programIndex: 0,
+      registers: { a0: 0n, sp: 0x3fffffe9d0n, ra: 0x80200040n },
+      dpc: null, dcsr: null,
+      dmcontrol: DEBUG_MODULE_ACTIVE_BIT, dmstatus: DMSTATUS_RUNNING, abstractcs: ABSTRACTCS_IDLE,
+      command: null, data0: 0, data1: 0, transactionCount: 0, logLines: [],
+    };
+  }
+
+  function hex32(value) {
+    return "0x" + (value >>> 0).toString(16).padStart(8, "0");
+  }
+  function hex64(value) {
+    return "0x" + BigInt.asUintN(64, value).toString(16).padStart(16, "0");
+  }
+
+  function highlight(elementIds) {
+    elementIds.forEach((id) => {
+      const element = document.getElementById(id);
+      if (!element) return;
+      element.classList.add("is-active");
+      clearTimeout(highlightTimers[id]);
+      highlightTimers[id] = setTimeout(() => element.classList.remove("is-active"), LINK_HIGHLIGHT_MILLISECONDS);
+    });
+  }
+
+  function addLog(text) {
+    state.logLines.push(text);
+    if (state.logLines.length > MAXIMUM_LOG_LINES) state.logLines.shift();
+  }
+  // DMI 쓰기/읽기 한 건을 기록하고 연결선을 잠깐 빛나게 한다
+  function dmiWrite(registerName, value, note) {
+    state.transactionCount += 1;
+    state[registerName] = value;
+    addLog("→ DMI 쓰기 " + registerName.padEnd(10) + "(0x" + DMI_ADDRESS[registerName].toString(16).padStart(2, "0") + ") ← " + hex32(value) + (note ? "   " + note : ""));
+    highlight(["debug-sim-link-jtag", "debug-sim-link-dmi", "debug-sim-dtm", "debug-sim-module"]);
+  }
+  function dmiRead(registerName, note) {
+    state.transactionCount += 1;
+    const value = state[registerName];
+    addLog("← DMI 읽기 " + registerName.padEnd(10) + "(0x" + DMI_ADDRESS[registerName].toString(16).padStart(2, "0") + ") → " + hex32(value) + (note ? "   " + note : ""));
+    highlight(["debug-sim-link-jtag", "debug-sim-link-dmi", "debug-sim-dtm", "debug-sim-module"]);
+    return value;
+  }
+
+  function commandWord(regno, size, isWrite) {
+    let word = (size << ACCESS_REGISTER_SIZE_SHIFT) | ACCESS_REGISTER_TRANSFER_BIT | regno;
+    if (isWrite) word |= ACCESS_REGISTER_WRITE_BIT;
+    return word >>> 0;
+  }
+
+  function readRegisterValue(name) {
+    if (name === "dpc") return state.dpc;
+    if (name === "dcsr") return BigInt(state.dcsr);
+    return state.registers[name];
+  }
+
+  function halt() {
+    if (state.isHalted) { addLog("# 하트는 이미 멈춰 있다"); render(); return; }
+    dmiWrite("dmcontrol", (HALT_REQUEST_BIT | DEBUG_MODULE_ACTIVE_BIT) >>> 0, "haltreq=1, dmactive=1");
+    state.isHalted = true;
+    state.dpc = BigInt(PROGRAM_ADDRESSES[state.programIndex]);
+    state.dcsr = (DCSR_DEBUG_VERSION_1_0 | (DCSR_CAUSE_HALT_REQUEST << DCSR_CAUSE_SHIFT) | PRIVILEGE_SUPERVISOR) >>> 0;
+    state.dmstatus = DMSTATUS_HALTED;
+    highlight(["debug-sim-link-hart", "debug-sim-hart"]);
+    dmiRead("dmstatus", "allhalted=1 → 멈춤 확인");
+    dmiWrite("dmcontrol", DEBUG_MODULE_ACTIVE_BIT, "haltreq=0 (요청 내림)");
+    addLog("# 하트가 Debug 모드에 들어감: dpc=" + hex64(state.dpc) + ", dcsr.cause=3(haltreq), prv=1(S)");
+    render();
+  }
+
+  function resume() {
+    if (!state.isHalted) { addLog("# 하트는 이미 실행 중이다"); render(); return; }
+    dmiWrite("dmcontrol", (RESUME_REQUEST_BIT | DEBUG_MODULE_ACTIVE_BIT) >>> 0, "resumereq=1, dmactive=1");
+    state.isHalted = false;
+    state.programIndex = PROGRAM_ADDRESSES.indexOf(Number(state.dpc));
+    state.dmstatus = DMSTATUS_RESUMED;
+    highlight(["debug-sim-link-hart", "debug-sim-hart"]);
+    dmiRead("dmstatus", "allresumeack=1, allrunning=1");
+    addLog("# dpc 주소에서 실행을 이어 간다");
+    render();
+  }
+
+  function clearCommandErrorIfNeeded() {
+    const commandError = (state.abstractcs >>> COMMAND_ERROR_SHIFT) & 0x7;
+    if (commandError === 0) return;
+    dmiWrite("abstractcs", COMMAND_ERROR_CLEAR_VALUE, "cmderr 지우기 (W1C)");
+    state.abstractcs = ABSTRACTCS_IDLE;
+  }
+
+  function readSelectedRegister() {
+    clearCommandErrorIfNeeded();
+    const choice = REGISTER_CHOICES[selectedRegister];
+    const word = commandWord(choice.regno, choice.size, false);
+    dmiWrite("command", word, "Access Register: " + choice.label + " 읽기");
+    if (!state.isHalted) {
+      // 이 DM 은 실행 중인 하트의 레지스터 접근을 지원하지 않는다고 가정한다(규격상 선택 기능)
+      state.abstractcs = (ABSTRACTCS_IDLE | (COMMAND_ERROR_HALT_RESUME << COMMAND_ERROR_SHIFT)) >>> 0;
+      dmiRead("abstractcs", "busy=0, cmderr=4 (halt/resume) — 먼저 멈춰야 한다");
+      render();
+      return;
+    }
+    highlight(["debug-sim-link-hart"]);
+    const value = readRegisterValue(selectedRegister);
+    state.data0 = Number(value & LOW_WORD_MASK);
+    state.data1 = choice.size === SIZE_64_BITS ? Number((BigInt.asUintN(64, value) >> 32n) & LOW_WORD_MASK) : state.data1;
+    dmiRead("abstractcs", "busy=0, cmderr=0 → 성공");
+    dmiRead("data0", "하위 32비트");
+    if (choice.size === SIZE_64_BITS) dmiRead("data1", "상위 32비트");
+    const shownValue = choice.size === SIZE_64_BITS ? hex64(value) : hex32(Number(value));
+    let note = "";
+    if (selectedRegister === "dcsr") note = " (debugver=4, cause=" + ((state.dcsr >>> DCSR_CAUSE_SHIFT) & 0x7) + ", prv=" + (state.dcsr & 0x3) + ")";
+    addLog("# " + choice.label + " = " + shownValue + note);
+    render();
+  }
+
+  function writeArgumentRegister() {
+    clearCommandErrorIfNeeded();
+    const choice = REGISTER_CHOICES.a0;
+    dmiWrite("data0", Number(WRITE_VALUE), "쓸 값 하위");
+    dmiWrite("data1", 0, "쓸 값 상위");
+    const word = commandWord(choice.regno, choice.size, true);
+    dmiWrite("command", word, "Access Register: a0 쓰기 (write=1)");
+    if (!state.isHalted) {
+      state.abstractcs = (ABSTRACTCS_IDLE | (COMMAND_ERROR_HALT_RESUME << COMMAND_ERROR_SHIFT)) >>> 0;
+      dmiRead("abstractcs", "busy=0, cmderr=4 (halt/resume) — 먼저 멈춰야 한다");
+      render();
+      return;
+    }
+    highlight(["debug-sim-link-hart"]);
+    state.registers.a0 = WRITE_VALUE;
+    dmiRead("abstractcs", "busy=0, cmderr=0 → a0 = 42");
+    render();
+  }
+
+  function renderCommandField() {
+    if (state.command === null) {
+      commandFieldElement.innerHTML = '<div class="sim-note plain" style="border:0;background:none;padding:6px 0 0">아직 추상 명령을 쓰지 않았다. 레지스터 읽기나 쓰기를 누르면 <code>command</code> 레지스터에 쓴 32비트 값을 필드별로 풀어 보여 준다.</div>';
+      return;
+    }
+    const word = state.command >>> 0;
+    const fields = [
+      { name: "cmdtype", high: 31, low: 24, className: "function" },
+      { name: "0", high: 23, low: 23, className: "plain" },
+      { name: "aarsize", high: 22, low: 20, className: "immediate" },
+      { name: "aarpostincrement", high: 19, low: 19, className: "plain" },
+      { name: "postexec", high: 18, low: 18, className: "plain" },
+      { name: "transfer", high: 17, low: 17, className: "immediate" },
+      { name: "write", high: 16, low: 16, className: "immediate" },
+      { name: "regno", high: 15, low: 0, className: "register" },
+    ];
+    const html = fields.map((field) => {
+      const width = field.high - field.low + 1;
+      const value = (word >>> field.low) & ((2 ** width) - 1);
+      let valueText = String(value);
+      if (field.name === "regno") valueText = "0x" + value.toString(16);
+      const rangeText = field.high === field.low ? "<span>" + field.high + "</span>" : "<span>" + field.high + "</span><span>" + field.low + "</span>";
+      return '<div class="field ' + field.className + '" style="flex-grow:' + width + '" title="' + field.name + '"><div class="range">' + rangeText + '</div><div class="name">' + field.name + '</div><div class="value">' + valueText + "</div></div>";
+    }).join("");
+    commandFieldElement.innerHTML = '<div style="font-size:13px;color:var(--text-dim);margin-top:10px">마지막 command 값 <code>' + hex32(word) + "</code></div><div class=\"bitfield\">" + html + "</div>";
+  }
+
+  function render() {
+    const setText = (id, text) => { document.getElementById(id).textContent = text; };
+    setText("debug-sim-dmcontrol", "dmcontrol  " + hex32(state.dmcontrol));
+    setText("debug-sim-dmstatus", "dmstatus   " + hex32(state.dmstatus));
+    setText("debug-sim-abstractcs", "abstractcs " + hex32(state.abstractcs));
+    setText("debug-sim-command", "command    " + (state.command === null ? "—" : hex32(state.command)));
+    setText("debug-sim-data0", "data0      " + hex32(state.data0));
+    setText("debug-sim-data1", "data1      " + hex32(state.data1));
+    const stateElement = document.getElementById("debug-sim-hart-state");
+    stateElement.textContent = state.isHalted ? "Debug 모드" : "실행 중";
+    stateElement.setAttribute("class", state.isHalted ? "t-warn" : "t-ok");
+    setText("debug-sim-hart-pc", state.isHalted ? "pc 정지" : "pc " + hex32(PROGRAM_ADDRESSES[state.programIndex]));
+    setText("debug-sim-hart-a0", "a0 = " + state.registers.a0.toString());
+    setText("debug-sim-hart-dpc", "dpc " + (state.dpc === null ? "—" : hex32(Number(state.dpc))));
+    setText("debug-sim-hart-dcsr", "dcsr.cause " + (state.dcsr === null ? "—" : String((state.dcsr >>> DCSR_CAUSE_SHIFT) & 0x7)));
+    setText("debug-state-readout", state.isHalted ? "멈춤" : "실행 중");
+    setText("debug-halted-readout", String((state.dmstatus >>> 9) & 1));
+    setText("debug-cmderr-readout", String((state.abstractcs >>> COMMAND_ERROR_SHIFT) & 0x7));
+    setText("debug-transaction-readout", String(state.transactionCount));
+    logElement.textContent = state.logLines.join("\n");
+    logElement.scrollTop = logElement.scrollHeight;
+    renderCommandField();
+  }
+
+  function initialize() {
+    state = freshState();
+    addLog("# 디버거 연결: DM 을 활성화하고 상태를 확인한다");
+    dmiWrite("dmcontrol", DEBUG_MODULE_ACTIVE_BIT, "dmactive=1");
+    dmiRead("dmstatus", "version=3(1.0), authenticated=1, allrunning=1");
+    render();
+  }
+
+  // 하트가 실행 중이면 작은 반복문(addi a0, a0, 1 → nop → j)을 천천히 돈다
+  book.animationLoop(document.getElementById("debug-sim"), (deltaSeconds) => {
+    if (!state || state.isHalted) return;
+    instructionTimer += deltaSeconds;
+    if (instructionTimer < 1 / INSTRUCTIONS_PER_SECOND) return;
+    instructionTimer = 0;
+    if (state.programIndex === 0) state.registers.a0 += 1n;
+    state.programIndex = (state.programIndex + 1) % PROGRAM_ADDRESSES.length;
+    document.getElementById("debug-sim-hart-pc").textContent = "pc " + hex32(PROGRAM_ADDRESSES[state.programIndex]);
+    document.getElementById("debug-sim-hart-a0").textContent = "a0 = " + state.registers.a0.toString();
+  });
+
+  book.segmented("debug-register", (value) => { selectedRegister = value; });
+  document.getElementById("debug-halt").addEventListener("click", halt);
+  document.getElementById("debug-resume").addEventListener("click", resume);
+  document.getElementById("debug-read").addEventListener("click", readSelectedRegister);
+  document.getElementById("debug-write").addEventListener("click", writeArgumentRegister);
+  document.getElementById("debug-reset").addEventListener("click", initialize);
+  initialize();
+})();
+</script>
+</body>
+</html>

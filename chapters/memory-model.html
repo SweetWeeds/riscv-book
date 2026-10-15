@@ -1,0 +1,1457 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>11 RVWMO 메모리 모델 · RISC-V Book</title>
+<meta name="description" content="다른 하트에게 내 쓰기는 언제, 어떤 순서로 보이는가. 저장 버퍼, SC·TSO·RVWMO, 보존 프로그램 순서 13규칙, 세 공리, FENCE 인코딩, 리트머스 테스트, C/C++ 매핑과 Ztso를 시뮬레이터로 익힌다.">
+<link rel="icon" href="../assets/img/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/style.css">
+<script src="../assets/js/book.js"></script>
+<script src="../assets/js/riscv.js"></script>
+<style>
+  /* Pretendard 의 합자(ligature)가 "0x" 를 "0×" 로 바꿔 16진수가 곱셈처럼 보이지 않게 한다 */
+  .chapter, .chapter svg text { font-variant-ligatures: none; }
+  .litmus-code { display: grid; gap: 12px; grid-template-columns: minmax(0, 1fr); }
+  @media (min-width: 640px) { .litmus-code { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
+  .litmus-code .codebox { margin: 0; font-size: 13px; padding: 12px 14px; }
+  .litmus-controls { display: grid; gap: 12px; grid-template-columns: minmax(0, 1fr); margin-top: 12px; }
+  @media (min-width: 640px) { .litmus-controls { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
+  .litmus-controls select { width: 100%; }
+  .outcome-table td, .outcome-table th { text-align: center; }
+  .outcome-table td:first-child, .outcome-table th:first-child { text-align: left; font-family: var(--mono); }
+  .outcome-table .allowed { color: var(--ok); font-weight: 800; }
+  .outcome-table .forbidden { color: var(--text-faint); }
+  .outcome-table tr.interesting td { background: var(--accent-2-soft); }
+  .outcome-table th.selected-model { color: var(--accent); background: var(--accent-soft); }
+  .outcome-table td.selected-model { background: var(--accent-soft); }
+  .outcome-table tr.interesting td.selected-model { background: var(--accent-2-soft); box-shadow: inset 0 0 0 2px var(--accent-2); }
+  .witness { font-family: var(--mono); font-size: 13px; line-height: 1.7; padding: 10px 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--canvas-bg); overflow-x: auto; white-space: pre; }
+  .fence-bits { display: grid; gap: 14px; grid-template-columns: minmax(0, 1fr); }
+  @media (min-width: 640px) { .fence-bits { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
+  .fence-bits .group-title { font-size: 13px; font-weight: 700; color: var(--text-dim); margin-bottom: 6px; }
+  .fence-bits .bit { width: 44px; }
+  .fence-word { font-family: var(--mono); font-size: 20px; font-weight: 800; color: var(--accent); }
+  .fence-mnemonic { font-family: var(--mono); font-size: 16px; font-weight: 700; }
+  .fence-diagram { margin-top: 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--canvas-bg); padding: 8px; }
+</style>
+</head>
+<body data-chapter="memory-model">
+<main class="chapter">
+  <header class="chapter-hero">
+    <div class="eyebrow">Chapter 11</div>
+    <h1>RVWMO 메모리 모델</h1>
+    <p class="lead">하트 0이 <code>x = 1</code>을 쓰고 이어서 <code>y = 1</code>을 썼다. 하트 1이 <code>y</code>에서 1을 읽었다면 <code>x</code>도 당연히 1일까? RISC-V에서는 <strong>아니다.</strong> 서로 다른 주소에 대한 메모리 접근은 다른 하트가 보기에 순서가 바뀔 수 있다. 어떤 순서 바뀜이 허용되고 어떤 것은 금지되는지를 정한 규칙이 <strong>메모리 일관성 모델</strong>이고, RISC-V의 모델 이름이 <strong>RVWMO</strong>(RISC-V Weak Memory Ordering)다. 이 장에서는 저장 버퍼에서 시작해 RVWMO의 정의, FENCE, 리트머스 테스트, 그리고 C/C++ 원자 연산이 어떻게 번역되는지까지 따라간다.</p>
+    <ul class="objectives">
+      <li>저장 버퍼·캐시·비순차 실행 때문에 다른 하트가 순서 바뀐 결과를 볼 수 있음을 설명한다.</li>
+      <li>순차 일관성(SC), TSO, RVWMO가 허용하는 재배치를 비교한다.</li>
+      <li>프로그램 순서, 전역 메모리 순서, 보존 프로그램 순서(PPO)를 구별한다.</li>
+      <li>PPO 13개 규칙을 네 무리(주소 겹침·명시적 동기화·구문 의존성·파이프라인 의존성)로 정리한다.</li>
+      <li>Load Value·Atomicity·Progress 세 공리를 안다.</li>
+      <li>FENCE의 fm·pred·succ 필드를 인코딩하고 <code>fence.tso</code>의 뜻을 안다.</li>
+      <li>MP·SB·LB·2+2W 리트머스 테스트의 결과를 모델별로 예측하고 C/C++ 매핑을 읽는다.</li>
+    </ul>
+    <div class="spec-meta">
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/unpriv/rvwmo.html" target="_blank" rel="noopener">RVWMO v2.0</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/unpriv/mm-eplan.html" target="_blank" rel="noopener">Explanatory Material</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/unpriv/ztso-st-ext.html" target="_blank" rel="noopener">Ztso v1.0</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html" target="_blank" rel="noopener">FENCE (RV32I)</a>
+    </div>
+  </header>
+
+  <!-- ============================================================ -->
+  <section id="why">
+    <h2>왜 메모리 모델이 필요한가</h2>
+    <p>하트 하나만 보면 모든 것이 프로그램 순서대로 일어나는 것처럼 보인다. 그런데 하드웨어 내부는 그렇지 않다. 성능을 위해 거의 모든 코어가 다음과 같은 장치를 쓴다.</p>
+    <ul>
+      <li><b>저장 버퍼</b><span class="english">(store buffer)</span> — store는 캐시에 바로 쓰지 않고 버퍼에 넣어 둔 뒤 나중에 내보낸다. 그동안 뒤의 load는 기다리지 않고 먼저 메모리로 간다.</li>
+      <li><b>비순차 실행</b> — 주소가 먼저 계산된 load부터 실행한다. 캐시 미스가 난 load 뒤의 load가 먼저 값을 받아 올 수 있다.</li>
+      <li><b>캐시와 연결망</b> — 여러 코어의 쓰기가 서로 다른 경로로 퍼져 나가 도착 순서가 달라질 수 있다.</li>
+    </ul>
+    <p>내 하트 안에서는 이런 재배치가 감춰진다(내가 쓴 값은 내가 곧바로 다시 읽을 수 있다). 하지만 <b>다른 하트</b>는 그 효과를 다른 순서로 볼 수 있다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 300" role="img" aria-label="저장 버퍼 때문에 store보다 뒤의 load가 먼저 메모리에 닿는 모습">
+        <defs>
+          <path id="store-buffer-store-path" d="M170 110 H350"/>
+          <path id="store-buffer-drain-path" d="M520 110 H700"/>
+          <path id="store-buffer-load-path" d="M170 200 H700"/>
+          <marker id="store-buffer-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--text-faint)"/></marker>
+        </defs>
+        <g transform="translate(20,60)"><rect width="150" height="180" rx="14" class="f-accent-soft"/><text x="75" y="30" text-anchor="middle" class="t t-bold">하트 0 코어</text><text x="75" y="60" text-anchor="middle" class="t-mono">① sw x ← 1</text><text x="75" y="84" text-anchor="middle" class="t-mono">② lw r1 ← y</text><text x="75" y="160" text-anchor="middle" class="t-faint">프로그램 순서: ① → ②</text></g>
+        <g transform="translate(350,70)">
+          <rect width="170" height="80" rx="12" class="f-gold-soft"/>
+          <text x="85" y="22" text-anchor="middle" class="t t-bold">저장 버퍼 (FIFO)</text>
+          <rect x="16" y="34" width="44" height="34" rx="6" class="f-elev"/><rect x="64" y="34" width="44" height="34" rx="6" class="f-elev"/><rect x="112" y="34" width="44" height="34" rx="6" class="f-gold-soft blink-highlight"/>
+          <text x="134" y="56" text-anchor="middle" class="t-mono" style="font-size:11px">x=1</text>
+        </g>
+        <g transform="translate(700,50)"><rect width="140" height="200" rx="14" class="f-surface"/><text x="70" y="30" text-anchor="middle" class="t t-bold">캐시 · 메모리</text><text x="70" y="60" text-anchor="middle" class="t-faint">다른 하트가 보는 곳</text><rect x="20" y="80" width="100" height="36" rx="8" class="f-elev"/><text x="70" y="103" text-anchor="middle" class="t-mono">x = 0</text><rect x="20" y="130" width="100" height="36" rx="8" class="f-elev"/><text x="70" y="153" text-anchor="middle" class="t-mono">y = 0</text></g>
+        <use href="#store-buffer-store-path" class="s-gold flow-dash" marker-end="url(#store-buffer-arrow)"/>
+        <use href="#store-buffer-drain-path" class="s-line s-dashed" marker-end="url(#store-buffer-arrow)"/>
+        <use href="#store-buffer-load-path" class="s-accent flow-dash" marker-end="url(#store-buffer-arrow)"/>
+        <text x="260" y="100" text-anchor="middle" class="t-gold" style="font-size:12.5px">① store: 버퍼에 들어가 대기</text>
+        <text x="610" y="100" text-anchor="middle" class="t-faint">나중에 내보냄</text>
+        <text x="435" y="226" text-anchor="middle" class="t-accent" style="font-size:12.5px">② load: 버퍼에 y가 없으니 곧장 메모리로 → 먼저 도착</text>
+        <circle r="6" fill="var(--accent-2)"><animateMotion dur="3s" begin="-0.5s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;0.4;1" calcMode="linear"><mpath href="#store-buffer-store-path"/></animateMotion></circle>
+        <circle r="6" fill="var(--accent)"><animateMotion dur="3s" begin="-0.5s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;0.3;0.7;1" calcMode="linear"><mpath href="#store-buffer-load-path"/></animateMotion></circle>
+        <circle r="6" fill="var(--accent-2)" opacity="0.6"><animateMotion dur="3s" begin="-0.5s" repeatCount="indefinite" keyPoints="0;0;1" keyTimes="0;0.8;1" calcMode="linear"><mpath href="#store-buffer-drain-path"/></animateMotion></circle>
+        <text x="430" y="280" text-anchor="middle" class="t-dim">메모리 쪽에서 보면 ② 가 ① 보다 먼저 일어났다 — store→load 순서가 뒤바뀌었다</text>
+      </svg></div>
+      <figcaption><b>그림 11-1.</b> 저장 버퍼가 만드는 재배치. 금색 점(store)은 버퍼에 들어가 한참 기다리고, 파란 점(load)은 그 사이 곧장 메모리에 가서 값을 읽어 온다. 하트 0 자신은 이 차이를 느끼지 못하지만, 메모리를 함께 보는 다른 하트에게는 순서가 바뀐 것으로 보인다.</figcaption>
+    </figure>
+
+    <p>이 효과가 실제로 어떤 결과를 낳는지 아래 애니메이션에서 단계별로 확인해 보자. 두 하트가 각자 자기 변수에 1을 쓰고 상대 변수를 읽는다. 사람이 생각하는 “한 번에 하나씩” 실행이라면 둘 다 0을 읽는 일은 불가능하다. 적어도 한쪽의 쓰기가 먼저 끝났을 테니까.</p>
+
+    <div class="sim" id="store-buffer-sim">
+      <div class="sim-head"><span class="sim-tag animation">ANIMATION</span><h3>저장 버퍼가 만드는 r1 = r2 = 0</h3></div>
+      <div class="sim-view"><canvas id="store-buffer-canvas" aria-label="두 코어, 저장 버퍼, 공유 메모리가 있는 단계별 애니메이션"></canvas></div>
+      <div class="step-description" id="store-buffer-description"></div>
+      <div class="sim-controls">
+        <div class="control"><span>각 하트의 store와 load 사이</span>
+          <div class="segmented" id="store-buffer-fence">
+            <button data-value="none" class="on">아무것도 없음</button>
+            <button data-value="fence">fence rw,rw</button>
+          </div>
+        </div>
+        <div class="control"><span>진행</span>
+          <div class="button-row">
+            <button class="button primary" id="store-buffer-step">한 단계</button>
+            <button class="button" id="store-buffer-play">자동 재생</button>
+            <button class="button" id="store-buffer-reset">처음으로</button>
+          </div>
+        </div>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">단계</span><span class="value" id="store-buffer-step-count">0 / 6</span></div>
+        <div class="stat"><span class="key">r1 (하트 0)</span><span class="value" id="store-buffer-r1">?</span></div>
+        <div class="stat"><span class="key">r2 (하트 1)</span><span class="value" id="store-buffer-r2">?</span></div>
+        <div class="stat"><span class="key">메모리 x, y</span><span class="value" id="store-buffer-memory">0, 0</span></div>
+      </div>
+      <div class="sim-note">“아무것도 없음”에서 끝까지 진행하면 r1 = r2 = 0이 나온다. 두 load가 모두 상대의 store가 버퍼에 갇혀 있는 동안 메모리를 읽었기 때문이다. “fence rw,rw”로 바꾸면 FENCE가 앞선 store를 먼저 내보내야 통과할 수 있어서 결과가 1, 1로 바뀐다.</div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="models">
+    <h2>SC, TSO, 그리고 RVWMO</h2>
+    <p>메모리 모델은 “다른 하트가 볼 수 있는 결과의 집합”을 정한다. 강한 모델일수록 프로그래머가 생각하기 쉽고, 약한 모델일수록 하드웨어가 빨라질 여지가 크다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 330" role="img" aria-label="순차 일관성, TSO, RVWMO의 직관적 모형">
+        <defs><marker id="models-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--text-faint)"/></marker></defs>
+        <!-- SC -->
+        <g transform="translate(10,10)">
+          <rect width="270" height="310" rx="14" class="f-elev"/>
+          <text x="135" y="28" text-anchor="middle" class="t-accent">순차 일관성 (SC)</text>
+          <rect x="30" y="50" width="90" height="44" rx="8" class="f-accent-soft"/><text x="75" y="77" text-anchor="middle" class="t">하트 0</text>
+          <rect x="150" y="50" width="90" height="44" rx="8" class="f-violet-soft"/><text x="195" y="77" text-anchor="middle" class="t">하트 1</text>
+          <path d="M75 96 L135 160" class="s-accent"/><path d="M195 96 L135 160" class="s-line s-dashed"/>
+          <circle cx="135" cy="164" r="8" class="f-gold"/>
+          <text x="152" y="160" class="t-faint">한 번에 하나</text>
+          <path d="M135 172 V206" class="s-line" marker-end="url(#models-arrow)"/>
+          <rect x="45" y="210" width="180" height="44" rx="8" class="f-surface"/><text x="135" y="237" text-anchor="middle" class="t">메모리</text>
+          <text x="135" y="282" text-anchor="middle" class="t-dim">모든 접근이 한 줄로 선다</text>
+          <text x="135" y="300" text-anchor="middle" class="t-faint">각 하트의 순서 그대로</text>
+        </g>
+        <!-- TSO -->
+        <g transform="translate(295,10)">
+          <rect width="270" height="310" rx="14" class="f-elev"/>
+          <text x="135" y="28" text-anchor="middle" class="t-accent">TSO (x86, Ztso)</text>
+          <rect x="30" y="50" width="90" height="44" rx="8" class="f-accent-soft"/><text x="75" y="77" text-anchor="middle" class="t">하트 0</text>
+          <rect x="150" y="50" width="90" height="44" rx="8" class="f-violet-soft"/><text x="195" y="77" text-anchor="middle" class="t">하트 1</text>
+          <rect x="35" y="112" width="80" height="34" rx="6" class="f-gold-soft"/><text x="75" y="134" text-anchor="middle" class="t-mono" style="font-size:11px">FIFO 버퍼</text>
+          <rect x="155" y="112" width="80" height="34" rx="6" class="f-gold-soft"/><text x="195" y="134" text-anchor="middle" class="t-mono" style="font-size:11px">FIFO 버퍼</text>
+          <path d="M75 96 V110" class="s-line"/><path d="M195 96 V110" class="s-line"/>
+          <path d="M75 148 L135 206" class="s-line" marker-end="url(#models-arrow)"/><path d="M195 148 L135 206" class="s-line" marker-end="url(#models-arrow)"/>
+          <rect x="45" y="210" width="180" height="44" rx="8" class="f-surface"/><text x="135" y="237" text-anchor="middle" class="t">메모리</text>
+          <text x="135" y="282" text-anchor="middle" class="t-dim">store → load 만 뒤바뀔 수 있다</text>
+          <text x="135" y="300" text-anchor="middle" class="t-faint">store 끼리는 순서 유지</text>
+        </g>
+        <!-- RVWMO -->
+        <g transform="translate(580,10)">
+          <rect width="270" height="310" rx="14" class="f-elev"/>
+          <text x="135" y="28" text-anchor="middle" class="t-accent">RVWMO (RISC-V 기본)</text>
+          <rect x="30" y="50" width="90" height="44" rx="8" class="f-accent-soft"/><text x="75" y="77" text-anchor="middle" class="t">하트 0</text>
+          <rect x="150" y="50" width="90" height="44" rx="8" class="f-violet-soft"/><text x="195" y="77" text-anchor="middle" class="t">하트 1</text>
+          <g transform="translate(40,108)"><rect width="70" height="20" rx="5" class="f-surface"/><text x="35" y="15" text-anchor="middle" class="t-mono" style="font-size:11px">b</text><rect y="24" width="70" height="20" rx="5" class="f-surface"/><text x="35" y="39" text-anchor="middle" class="t-mono" style="font-size:11px">a</text></g>
+          <g transform="translate(160,108)"><rect width="70" height="20" rx="5" class="f-surface"/><text x="35" y="15" text-anchor="middle" class="t-mono" style="font-size:11px">d</text><rect y="24" width="70" height="20" rx="5" class="f-surface"/><text x="35" y="39" text-anchor="middle" class="t-mono" style="font-size:11px">c</text></g>
+          <path d="M75 154 L135 206" class="s-line" marker-end="url(#models-arrow)"/><path d="M195 154 L135 206" class="s-line" marker-end="url(#models-arrow)"/>
+          <rect x="45" y="210" width="180" height="44" rx="8" class="f-surface"/><text x="135" y="237" text-anchor="middle" class="t">메모리 (전역 순서 하나)</text>
+          <text x="135" y="282" text-anchor="middle" class="t-dim">PPO 로 묶이지 않은 쌍은 모두</text>
+          <text x="135" y="300" text-anchor="middle" class="t-faint">재배치될 수 있다</text>
+        </g>
+      </svg></div>
+      <figcaption><b>그림 11-2.</b> 세 모델의 직관적 모형. SC는 스위치 하나가 하트들을 번갈아 메모리에 연결한다. TSO는 하트마다 FIFO 저장 버퍼가 있다. RVWMO는 하트마다 자기 접근의 순서를 (규칙이 허락하는 한) 섞을 수 있지만, 모든 하트가 <b>하나의 전역 메모리 순서</b>에 동의한다는 점(multi-copy atomicity)은 지킨다.</figcaption>
+    </figure>
+    <div class="table-wrap"><table>
+      <thead><tr><th>서로 다른 주소에 대한 재배치</th><th>SC</th><th>TSO / Ztso</th><th>RVWMO</th></tr></thead>
+      <tbody>
+        <tr><td>store → 뒤의 load</td><td>금지</td><td><b>허용</b> (저장 버퍼)</td><td><b>허용</b></td></tr>
+        <tr><td>store → 뒤의 store</td><td>금지</td><td>금지</td><td><b>허용</b></td></tr>
+        <tr><td>load → 뒤의 load</td><td>금지</td><td>금지</td><td><b>허용</b></td></tr>
+        <tr><td>load → 뒤의 store</td><td>금지</td><td>금지</td><td><b>허용</b> (의존성 없을 때)</td></tr>
+        <tr><td>자기 store 값을 먼저 읽기 (전달)</td><td>—</td><td>허용</td><td>허용</td></tr>
+      </tbody>
+    </table></div>
+    <div class="callout spec"><strong>규격 원문에서</strong>
+      <blockquote>“Under RVWMO, code running on a single hart appears to execute in order from the perspective of other memory instructions in the same hart, but memory instructions from another hart may observe the memory instructions from the first hart being executed in a different order.”</blockquote>
+      <p><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/rvwmo.html" target="_blank" rel="noopener">RVWMO Memory Consistency Model, Version 2.0</a> — 그래서 여러 하트가 함께 쓰는 코드는 FENCE나 원자 명령으로 순서를 명시해야 한다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="definitions">
+    <h2>RVWMO의 뼈대: 프로그램 순서, 전역 메모리 순서, PPO</h2>
+    <p>RVWMO는 세 가지 순서로 정의된다.</p>
+    <ul>
+      <li><span class="term">프로그램 순서</span><span class="english">(program order)</span> — 한 하트의 동적 명령 흐름에서 메모리 연산이 놓인 순서. 단순한 순차 프로세서가 실행할 순서다.</li>
+      <li><span class="term">전역 메모리 순서</span><span class="english">(global memory order)</span> — <b>모든 하트</b>의 메모리 연산을 한 줄로 세운 전체 순서. 실행마다 하나씩 있다.</li>
+      <li><span class="term">보존 프로그램 순서</span><span class="english">(preserved program order, PPO)</span> — 프로그램 순서 가운데 전역 메모리 순서가 <b>반드시 지켜야 하는</b> 부분 집합.</li>
+    </ul>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 300" role="img" aria-label="두 하트의 프로그램 순서가 하나의 전역 메모리 순서로 합쳐지는 모습">
+        <defs><marker id="order-merge-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--text-faint)"/></marker></defs>
+        <text x="20" y="40" class="t t-bold">하트 0</text>
+        <text x="20" y="110" class="t t-bold">하트 1</text>
+        <rect x="100" y="18" width="130" height="36" rx="8" class="f-surface"/><text x="165" y="41" text-anchor="middle" class="t-mono">(a) x = 1</text>
+        <rect x="270" y="18" width="130" height="36" rx="8" class="f-surface"/><text x="335" y="41" text-anchor="middle" class="t-mono">(b) y = 1</text>
+        <path d="M232 36 H266" class="s-line" marker-end="url(#order-merge-arrow)"/>
+        <rect x="100" y="88" width="130" height="36" rx="8" class="f-surface"/><text x="165" y="111" text-anchor="middle" class="t-mono">(c) r1 = y</text>
+        <rect x="270" y="88" width="130" height="36" rx="8" class="f-surface"/><text x="335" y="111" text-anchor="middle" class="t-mono">(d) r2 = x</text>
+        <path d="M232 106 H266" class="s-line" marker-end="url(#order-merge-arrow)"/>
+        <text x="420" y="41" class="t-faint">프로그램 순서 (화살표)</text>
+        <text x="420" y="111" class="t-faint">PPO 없음 → 섞일 수 있다</text>
+        <text x="20" y="232" class="t t-bold">전역</text>
+        <text x="20" y="250" class="t t-bold">메모리 순서</text>
+        <rect x="120" y="210" width="720" height="54" rx="12" fill="none" stroke="var(--border)" stroke-dasharray="6 5"/>
+        <!-- 목적지 칸 -->
+        <g class="t-faint" font-size="11"><text x="200" y="282" text-anchor="middle">1번째</text><text x="370" y="282" text-anchor="middle">2번째</text><text x="540" y="282" text-anchor="middle">3번째</text><text x="710" y="282" text-anchor="middle">4번째</text></g>
+        <!-- 움직이는 연산: b, c, d, a 순서로 자리 잡는다 -->
+        <g><rect x="-65" y="-18" width="130" height="36" rx="8" class="f-accent-soft"/><text y="5" text-anchor="middle" class="t-mono">(b) y = 1</text>
+          <animateMotion dur="8s" begin="-0.01s" repeatCount="indefinite" path="M335 36 L200 237" keyPoints="0;0;1;1" keyTimes="0;0.05;0.2;1" calcMode="linear"/></g>
+        <g><rect x="-65" y="-18" width="130" height="36" rx="8" class="f-violet-soft"/><text y="5" text-anchor="middle" class="t-mono">(c) r1 = y</text>
+          <animateMotion dur="8s" begin="-0.01s" repeatCount="indefinite" path="M165 106 L370 237" keyPoints="0;0;1;1" keyTimes="0;0.25;0.4;1" calcMode="linear"/></g>
+        <g><rect x="-65" y="-18" width="130" height="36" rx="8" class="f-violet-soft"/><text y="5" text-anchor="middle" class="t-mono">(d) r2 = x</text>
+          <animateMotion dur="8s" begin="-0.01s" repeatCount="indefinite" path="M335 106 L540 237" keyPoints="0;0;1;1" keyTimes="0;0.45;0.6;1" calcMode="linear"/></g>
+        <g><rect x="-65" y="-18" width="130" height="36" rx="8" class="f-accent-soft"/><text y="5" text-anchor="middle" class="t-mono">(a) x = 1</text>
+          <animateMotion dur="8s" begin="-0.01s" repeatCount="indefinite" path="M165 36 L710 237" keyPoints="0;0;1;1" keyTimes="0;0.65;0.8;1" calcMode="linear"/></g>
+        <text x="610" y="180" class="t-gold" style="font-size:13px">결과: r1 = 1, r2 = 0</text>
+      </svg></div>
+      <figcaption><b>그림 11-3.</b> 전역 메모리 순서 만들기. 하트 0의 (a)·(b)는 서로 다른 주소에 쓰는 store이고, 하트 1의 (c)·(d)도 서로 다른 주소를 읽는다. 어느 쌍도 PPO로 묶여 있지 않으므로 RVWMO는 (b)→(c)→(d)→(a) 같은 전역 순서를 허용한다. 그 결과 하트 1은 y의 새 값과 x의 옛 값을 함께 본다.</figcaption>
+    </figure>
+    <p>RVWMO의 정의는 한 문장으로 요약된다. <b>“PPO를 지키고 세 공리(Load Value, Atomicity, Progress)를 만족하는 전역 메모리 순서가 하나라도 존재하는 실행은 합법이다.”</b> 그러니 PPO에 무엇이 들어 있는지가 곧 “무엇이 재배치되지 않는가”의 목록이다.</p>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="ppo">
+    <h2>보존 프로그램 순서(PPO) 13가지 규칙</h2>
+    <p>메모리 연산 a가 프로그램 순서상 b보다 앞에 있고, 둘 다 일반 메인 메모리(I/O 영역이 아님)에 접근하며, 아래 중 하나라도 성립하면 a는 전역 메모리 순서에서도 반드시 b보다 앞에 온다. AMO는 load이자 store라는 점에 주의하자.</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>무리</th><th>규칙</th><th>조건 (a가 프로그램 순서상 b보다 앞)</th></tr></thead>
+      <tbody>
+        <tr><td rowspan="3"><b>주소 겹침</b></td><td>1</td><td>b가 store이고, a와 b가 겹치는 주소에 접근한다</td></tr>
+        <tr><td>2</td><td>a·b가 모두 load이고, 둘 다 읽는 바이트 x가 있으며, 둘 사이에 x로의 store가 없고, a·b가 x에 대해 <b>서로 다른</b> 메모리 연산이 쓴 값을 돌려준다</td></tr>
+        <tr><td>3</td><td>a가 AMO 또는 SC로 생긴 연산이고, b가 load이며, b가 a가 쓴 값을 돌려준다</td></tr>
+        <tr><td rowspan="5"><b>명시적 동기화</b></td><td>4</td><td>a를 b 앞에 두는 FENCE가 있다</td></tr>
+        <tr><td>5</td><td>a에 acquire 표시가 있다</td></tr>
+        <tr><td>6</td><td>b에 release 표시가 있다</td></tr>
+        <tr><td>7</td><td>a와 b 모두 RCsc 표시가 있다</td></tr>
+        <tr><td>8</td><td>a가 b와 짝(paired)이다 (LR과 짝인 SC)</td></tr>
+        <tr><td rowspan="3"><b>구문 의존성</b></td><td>9</td><td>b가 a에 <b>주소 의존성</b>을 가진다</td></tr>
+        <tr><td>10</td><td>b가 a에 <b>데이터 의존성</b>을 가진다</td></tr>
+        <tr><td>11</td><td>b가 store이고, a에 <b>제어 의존성</b>을 가진다</td></tr>
+        <tr><td rowspan="2"><b>파이프라인 의존성</b></td><td>12</td><td>b가 load이고, 둘 사이의 어떤 store m이 a에 주소·데이터 의존성을 가지며, b가 m이 쓴 값을 돌려준다</td></tr>
+        <tr><td>13</td><td>b가 store이고, 둘 사이의 어떤 명령 m이 a에 주소 의존성을 가진다</td></tr>
+      </tbody>
+    </table></div>
+    <p>규칙 5–7의 표시(annotation)는 원자 명령의 aq/rl 비트(<a href="atomic.html">10장</a>)나 Zalasr 명령이 붙인다. aq나 rl이 붙은 AMO·LR·SC는 RCsc 표시를 갖는다. 규칙 12·13은 실제 파이프라인이 투기적으로 값을 전달하거나 주소를 모르는 store를 지나쳐 갈 수 없다는 현실을 모델에 반영한 것이다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 260" role="img" aria-label="주소, 데이터, 제어 의존성의 예">
+        <defs><marker id="dependency-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent-2)"/></marker></defs>
+        <g transform="translate(10,10)">
+          <rect width="270" height="240" rx="14" class="f-elev"/>
+          <text x="135" y="28" text-anchor="middle" class="t-accent">주소 의존성 (규칙 9)</text>
+          <text x="20" y="70" class="t-mono">lw  a0, 0(s0)</text>
+          <text x="20" y="110" class="t-mono">add a1, s1, a0</text>
+          <text x="20" y="150" class="t-mono">lw  a2, 0(a1)</text>
+          <path d="M150 74 C190 80 190 96 160 102" class="s-gold" marker-end="url(#dependency-arrow)"/>
+          <path d="M150 114 C190 120 190 136 160 142" class="s-gold" marker-end="url(#dependency-arrow)"/>
+          <text x="20" y="190" class="t-dim">a0 이 다음 load 의</text>
+          <text x="20" y="210" class="t-dim">주소 계산에 쓰인다</text>
+          <text x="20" y="230" class="t-faint">(포인터 따라가기)</text>
+        </g>
+        <g transform="translate(295,10)">
+          <rect width="270" height="240" rx="14" class="f-elev"/>
+          <text x="135" y="28" text-anchor="middle" class="t-accent">데이터 의존성 (규칙 10)</text>
+          <text x="20" y="70" class="t-mono">lw   a0, 0(s0)</text>
+          <text x="20" y="110" class="t-mono">addi a0, a0, 1</text>
+          <text x="20" y="150" class="t-mono">sw   a0, 0(s1)</text>
+          <path d="M150 74 C190 80 190 96 160 102" class="s-gold" marker-end="url(#dependency-arrow)"/>
+          <path d="M150 114 C190 120 190 136 160 142" class="s-gold" marker-end="url(#dependency-arrow)"/>
+          <text x="20" y="190" class="t-dim">a0 이 store 가 쓰는</text>
+          <text x="20" y="210" class="t-dim">값(데이터)으로 흐른다</text>
+          <text x="20" y="230" class="t-faint">(xor a0,a0,a0 도 구문상 의존)</text>
+        </g>
+        <g transform="translate(580,10)">
+          <rect width="270" height="240" rx="14" class="f-elev"/>
+          <text x="135" y="28" text-anchor="middle" class="t-accent">제어 의존성 (규칙 11)</text>
+          <text x="20" y="70" class="t-mono">lw   a0, 0(s0)</text>
+          <text x="20" y="110" class="t-mono">beqz a0, skip</text>
+          <text x="20" y="150" class="t-mono">sw   t1, 0(s1)</text>
+          <path d="M150 74 C190 80 190 96 160 102" class="s-gold" marker-end="url(#dependency-arrow)"/>
+          <path d="M150 114 C190 120 190 136 160 142" class="s-gold s-dashed" marker-end="url(#dependency-arrow)"/>
+          <text x="20" y="190" class="t-dim">분기를 지나는 store 만</text>
+          <text x="20" y="210" class="t-dim">순서가 보장된다</text>
+          <text x="20" y="230" class="t-bad" style="font-size:12px">뒤의 load 는 보장 안 됨!</text>
+        </g>
+      </svg></div>
+      <figcaption><b>그림 11-4.</b> 세 가지 구문 의존성. 의존성은 값이 아니라 <b>레지스터 이름</b>을 따라 정의된다(syntactic). 그래서 <code>xor t0, a0, a0</code>처럼 결과가 늘 0인 계산을 거쳐도 의존성은 남는다. 제어 의존성은 store에만 순서를 준다. 분기 예측으로 뒤의 load를 미리 실행하는 것은 막지 않는다.</figcaption>
+    </figure>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="axioms">
+    <h2>세 공리: Load Value, Atomicity, Progress</h2>
+    <p>PPO를 지키는 전역 메모리 순서가 있다고 해서 아무 값이나 읽을 수 있는 것은 아니다. load가 무엇을 돌려주는지, LR/SC가 언제 원자적인지, 연산이 영원히 미뤄질 수 있는지를 세 공리가 정한다.</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>공리</th><th>내용 (요약)</th></tr></thead>
+      <tbody>
+        <tr><td><b>Load Value</b></td><td>load의 각 바이트는, 그 바이트를 쓰는 store 가운데 ① 전역 메모리 순서상 load보다 앞선 것과 ② <b>프로그램 순서상</b> load보다 앞선 것을 모두 모아, 그중 전역 메모리 순서가 가장 늦은 store의 값을 돌려준다.</td></tr>
+        <tr><td><b>Atomicity</b></td><td>짝을 이룬 LR(r)과 SC(w)에서, r이 store s의 값을 읽었다면 s는 w보다 앞서고, s와 w 사이에 <b>다른 하트</b>가 그 바이트에 쓴 store가 끼어들 수 없다.</td></tr>
+        <tr><td><b>Progress</b></td><td>어떤 메모리 연산도 무한히 많은 다른 연산 뒤로 밀릴 수 없다. (쓴 값은 결국 다른 하트에게 보인다)</td></tr>
+      </tbody>
+    </table></div>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 240" role="img" aria-label="Load Value 공리가 허용하는 저장 버퍼 전달">
+        <defs>
+          <marker id="load-value-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent-2)"/></marker>
+          <marker id="load-value-arrow-faint" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--text-faint)"/></marker>
+        </defs>
+        <text x="20" y="44" class="t t-bold">하트 0 프로그램</text>
+        <rect x="170" y="22" width="150" height="36" rx="8" class="f-gold-soft"/><text x="245" y="45" text-anchor="middle" class="t-mono">(a) sw x ← 1</text>
+        <rect x="350" y="22" width="150" height="36" rx="8" class="f-accent-soft"/><text x="425" y="45" text-anchor="middle" class="t-mono">(b) lw r1 ← x</text>
+        <path d="M322 40 H346" class="s-line" marker-end="url(#load-value-arrow-faint)"/>
+        <text x="20" y="164" class="t t-bold">전역 메모리 순서</text>
+        <rect x="170" y="142" width="150" height="36" rx="8" class="f-accent-soft"/><text x="245" y="165" text-anchor="middle" class="t-mono">(b) lw → 1</text>
+        <rect x="350" y="142" width="160" height="36" rx="8" class="f-violet-soft"/><text x="430" y="165" text-anchor="middle" class="t-mono">(c) 하트 1 lw x→0</text>
+        <rect x="540" y="142" width="150" height="36" rx="8" class="f-gold-soft"/><text x="615" y="165" text-anchor="middle" class="t-mono">(a) sw x ← 1</text>
+        <path d="M260 60 C300 100 560 100 610 138" class="s-line s-dashed" marker-end="url(#load-value-arrow-faint)"/>
+        <path d="M250 60 C250 90 250 110 248 138" class="s-gold flow-dash" marker-end="url(#load-value-arrow)"/>
+        <text x="40" y="108" class="t-gold" style="font-size:12.5px">값 1 은 프로그램 순서로 전달</text>
+        <text x="720" y="160" class="t-faint">← 전역 순서상</text>
+        <text x="720" y="176" class="t-faint">store 가 더 늦다</text>
+        <text x="430" y="222" text-anchor="middle" class="t-dim">하트 0은 자기 store를 먼저 보고(1), 같은 시점에 하트 1은 아직 옛 값(0)을 본다</text>
+      </svg></div>
+      <figcaption><b>그림 11-5.</b> Load Value 공리의 “프로그램 순서상 앞선 store” 조항. (b)는 전역 순서에서 (a)보다 앞에 놓였지만 (a)의 값 1을 읽을 수 있다. 저장 버퍼에서 값을 가져오는 <b>저장 버퍼 전달</b>(store forwarding)을 허용하기 위한 조항이다. Ztso 규격도 “TSO에서 저장 버퍼 전달을 허용하는 것도 Load Value 공리”라고 설명한다.</figcaption>
+    </figure>
+    <div class="callout deep"><strong>RVWMO는 multi-copy atomic이다</strong><p>전역 메모리 순서가 <b>하나</b>라는 것은, 어떤 store가 한 다른 하트에게 보였다면 모든 다른 하트에게도 같은 순서로 보인다는 뜻이다(자기 하트의 저장 버퍼 전달만 예외). Power나 옛 Arm처럼 하트마다 다른 순서로 store를 볼 수 있는 non-multi-copy-atomic 모델보다 추론하기 쉽다. 규격 부록에는 이 모델을 Alloy·Herd 형식으로 쓴 공리적 정의와, 동등한 동작(operational) 모델이 함께 실려 있다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="fence">
+    <h2>FENCE: 순서를 명시하는 명령</h2>
+    <p>PPO 규칙 4가 말하는 FENCE는 기본 정수 ISA(<a href="rv32i.html">5장</a>)의 일부다. FENCE 앞의 <b>선행 집합</b><span class="english">(predecessor set)</span>에 속한 연산을, 뒤의 <b>후행 집합</b><span class="english">(successor set)</span>에 속한 연산보다 먼저 일어난 것으로 모든 하트와 외부 장치가 보게 만든다. 집합은 네 종류를 조합한다: 장치 입력(I), 장치 출력(O), 메모리 읽기(R), 메모리 쓰기(W).</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 220" role="img" aria-label="FENCE 명령의 32비트 인코딩">
+        <g class="t-faint" font-size="11">
+          <text x="30" y="34">31</text><text x="128" y="34" text-anchor="end">28</text>
+          <text x="140" y="34">27</text><text x="190" y="34">26</text><text x="240" y="34">25</text><text x="290" y="34">24</text>
+          <text x="340" y="34">23</text><text x="390" y="34">22</text><text x="440" y="34">21</text><text x="490" y="34">20</text>
+          <text x="540" y="34">19</text><text x="616" y="34" text-anchor="end">15</text>
+          <text x="626" y="34">14</text><text x="676" y="34" text-anchor="end">12</text>
+          <text x="688" y="34">11</text><text x="752" y="34" text-anchor="end">7</text>
+          <text x="764" y="34">6</text><text x="840" y="34" text-anchor="end">0</text>
+        </g>
+        <rect x="26" y="42" width="110" height="56" class="f-violet-soft"/><text x="81" y="66" text-anchor="middle" class="t t-bold">fm</text><text x="81" y="86" text-anchor="middle" class="t-faint">모드</text>
+        <g class="t-mono">
+          <rect x="136" y="42" width="50" height="56" class="f-gold-soft"/><text x="161" y="76" text-anchor="middle" class="t t-bold">PI</text>
+          <rect x="186" y="42" width="50" height="56" class="f-gold-soft"/><text x="211" y="76" text-anchor="middle" class="t t-bold">PO</text>
+          <rect x="236" y="42" width="50" height="56" class="f-gold-soft"/><text x="261" y="76" text-anchor="middle" class="t t-bold">PR</text>
+          <rect x="286" y="42" width="50" height="56" class="f-gold-soft"/><text x="311" y="76" text-anchor="middle" class="t t-bold">PW</text>
+          <rect x="336" y="42" width="50" height="56" class="f-teal-soft"/><text x="361" y="76" text-anchor="middle" class="t t-bold">SI</text>
+          <rect x="386" y="42" width="50" height="56" class="f-teal-soft"/><text x="411" y="76" text-anchor="middle" class="t t-bold">SO</text>
+          <rect x="436" y="42" width="50" height="56" class="f-teal-soft"/><text x="461" y="76" text-anchor="middle" class="t t-bold">SR</text>
+          <rect x="486" y="42" width="50" height="56" class="f-teal-soft"/><text x="511" y="76" text-anchor="middle" class="t t-bold">SW</text>
+        </g>
+        <rect x="536" y="42" width="84" height="56" class="f-surface"/><text x="578" y="66" text-anchor="middle" class="t t-bold">rs1</text><text x="578" y="86" text-anchor="middle" class="t-faint">0 (예약)</text>
+        <rect x="620" y="42" width="60" height="56" class="f-surface"/><text x="650" y="66" text-anchor="middle" class="t t-bold">000</text><text x="650" y="86" text-anchor="middle" class="t-faint">funct3</text>
+        <rect x="680" y="42" width="78" height="56" class="f-surface"/><text x="719" y="66" text-anchor="middle" class="t t-bold">rd</text><text x="719" y="86" text-anchor="middle" class="t-faint">0 (예약)</text>
+        <rect x="758" y="42" width="86" height="56" class="f-accent-soft"/><text x="801" y="66" text-anchor="middle" class="t t-bold">0001111</text><text x="801" y="86" text-anchor="middle" class="t-faint">MISC-MEM</text>
+        <text x="236" y="122" text-anchor="middle" class="t-gold">선행 집합 (pred)</text>
+        <text x="436" y="122" text-anchor="middle" class="t-teal">후행 집합 (succ)</text>
+        <text x="26" y="160" class="t-mono">fence rw,rw = 0x0330000f    fence r,rw = 0x0230000f    fence rw,w = 0x0310000f</text>
+        <text x="26" y="186" class="t-mono">fence.tso   = 0x8330000f    pause      = 0x0100000f    fence iorw,iorw = 0x0ff0000f</text>
+        <text x="26" y="210" class="t-faint">fm = 0000: 일반 FENCE · fm = 1000 + RW,RW: FENCE.TSO · 그 밖의 fm 값은 예약</text>
+      </svg></div>
+      <figcaption><b>그림 11-6.</b> FENCE 인코딩. 비트 27–24가 선행 집합(I·O·R·W), 23–20이 후행 집합이다. rs1·rd는 앞으로 더 세밀한 FENCE를 위해 남겨 두었다. 예약된 설정은 기본 구현이 fm = 0000인 일반 FENCE로 취급한다.</figcaption>
+    </figure>
+    <div class="table-wrap"><table>
+      <thead><tr><th>FENCE</th><th>막는 재배치</th><th>대표 용도</th></tr></thead>
+      <tbody>
+        <tr><td><code>fence rw,rw</code></td><td>앞의 모든 읽기·쓰기 → 뒤의 모든 읽기·쓰기</td><td>전체 장벽, C++ <code>seq_cst</code> 펜스, Linux <code>smp_mb()</code></td></tr>
+        <tr><td><code>fence r,rw</code></td><td>앞의 읽기 → 뒤의 모든 접근</td><td><b>acquire</b> (load 뒤에 둔다)</td></tr>
+        <tr><td><code>fence rw,w</code></td><td>앞의 모든 접근 → 뒤의 쓰기</td><td><b>release</b> (store 앞에 둔다)</td></tr>
+        <tr><td><code>fence w,w</code></td><td>쓰기 → 쓰기</td><td>Linux <code>smp_wmb()</code>, 데이터 쓴 뒤 플래그 쓰기</td></tr>
+        <tr><td><code>fence r,r</code></td><td>읽기 → 읽기</td><td>Linux <code>smp_rmb()</code>, 플래그 읽은 뒤 데이터 읽기</td></tr>
+        <tr><td><code>fence.tso</code></td><td>앞의 읽기 → 뒤의 모든 접근, 앞의 쓰기 → 뒤의 쓰기 (<b>쓰기 → 읽기만 빼고</b>)</td><td>C++ <code>acq_rel</code> 펜스, TSO 코드 이식</td></tr>
+        <tr><td><code>fence iorw,iorw</code></td><td>I/O 포함 전부</td><td>Linux <code>mb()</code>, 장치 드라이버</td></tr>
+      </tbody>
+    </table></div>
+
+    <div class="sim" id="fence-builder">
+      <div class="sim-head"><span class="sim-tag">SIMULATOR</span><h3>FENCE 만들기</h3></div>
+      <div class="sim-pad">
+        <div class="fence-bits">
+          <div><div class="group-title">선행 집합 pred (비트 27–24)</div><div class="bit-row" id="fence-predecessor-bits"></div></div>
+          <div><div class="group-title">후행 집합 succ (비트 23–20)</div><div class="bit-row" id="fence-successor-bits"></div></div>
+        </div>
+        <div style="margin-top:14px; display:flex; flex-wrap:wrap; gap:8px 22px; align-items:baseline">
+          <span class="fence-mnemonic" id="fence-mnemonic">fence rw,rw</span>
+          <span class="fence-word" id="fence-word">0x0330000f</span>
+        </div>
+        <div class="bitfield" id="fence-bitfield"></div>
+        <div class="fence-diagram"><svg viewBox="0 0 640 300" id="fence-diagram-svg" role="img" aria-label="FENCE가 순서를 정하는 연산 쌍"></svg></div>
+      </div>
+      <div class="step-description" id="fence-description"></div>
+      <div class="sim-controls">
+        <div class="control"><span>fm (비트 31–28)</span>
+          <div class="segmented" id="fence-mode"><button data-value="0" class="on">0000 일반</button><button data-value="8">1000 TSO</button></div>
+        </div>
+        <div class="control"><span>미리 정한 설정</span>
+          <div class="button-row">
+            <button class="button" data-fence-preset="0|3|3">rw,rw</button>
+            <button class="button" data-fence-preset="0|2|3">r,rw</button>
+            <button class="button" data-fence-preset="0|3|1">rw,w</button>
+            <button class="button" data-fence-preset="8|3|3">fence.tso</button>
+            <button class="button" data-fence-preset="0|1|0">pause</button>
+          </div>
+        </div>
+      </div>
+      <div class="sim-note">비트를 눌러 집합을 바꾸면 아래 그림의 화살표(“앞의 이 연산은 뒤의 이 연산보다 먼저 보인다”)가 바뀐다. <b>fence.tso</b>를 고르면 쓰기→읽기 화살표만 빠지는 것을 확인하자. <b>pause</b>는 pred = W, succ = 0인 FENCE로, 아무 순서도 강제하지 않는 HINT 인코딩을 Zihintpause가 빌려 쓴 것이다.</div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="litmus">
+    <h2>리트머스 테스트로 모델 시험하기</h2>
+    <p>메모리 모델은 <span class="term">리트머스 테스트</span><span class="english">(litmus test)</span>라는 아주 짧은 다중 하트 프로그램으로 이야기한다. 각 테스트에는 “이 결과가 나올 수 있는가?”라는 질문이 하나 붙는다. 규격 부록(Explanatory Material)도 수십 개의 리트머스 테스트로 RVWMO의 미묘한 부분을 설명한다. 가장 유명한 네 가지를 보자. 모든 변수는 0에서 시작한다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 300" role="img" aria-label="MP, SB, LB, 2+2W 리트머스 테스트">
+        <defs>
+          <marker id="litmus-figure-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--text-faint)"/></marker>
+          <marker id="litmus-figure-arrow-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--bad)"/></marker>
+        </defs>
+        <!-- MP -->
+        <g transform="translate(5,10)">
+          <rect width="205" height="280" rx="12" class="f-elev"/>
+          <text x="102" y="24" text-anchor="middle" class="t-accent">MP</text>
+          <text x="20" y="54" class="t-faint">하트 0</text><text x="115" y="54" class="t-faint">하트 1</text>
+          <text x="20" y="84" class="t-mono">x = 1</text><text x="115" y="84" class="t-mono">r1 = y</text>
+          <text x="20" y="154" class="t-mono">y = 1</text><text x="115" y="154" class="t-mono">r2 = x</text>
+          <path d="M40 92 V138" class="s-line" marker-end="url(#litmus-figure-arrow)"/><path d="M135 92 V138" class="s-line" marker-end="url(#litmus-figure-arrow)"/>
+          <path d="M66 150 L112 92" class="s-bad s-dashed" marker-end="url(#litmus-figure-arrow-red)"/>
+          <text x="102" y="196" text-anchor="middle" class="t-gold">r1 = 1, r2 = 0 ?</text>
+          <text x="102" y="222" text-anchor="middle" class="t-dim">플래그는 봤는데</text>
+          <text x="102" y="240" class="t-dim" text-anchor="middle">데이터는 옛 값</text>
+          <text x="102" y="266" text-anchor="middle" class="t-faint">SC ✕ · TSO ✕ · RVWMO ✓</text>
+        </g>
+        <!-- SB -->
+        <g transform="translate(220,10)">
+          <rect width="205" height="280" rx="12" class="f-elev"/>
+          <text x="102" y="24" text-anchor="middle" class="t-accent">SB</text>
+          <text x="20" y="54" class="t-faint">하트 0</text><text x="115" y="54" class="t-faint">하트 1</text>
+          <text x="20" y="84" class="t-mono">x = 1</text><text x="115" y="84" class="t-mono">y = 1</text>
+          <text x="20" y="154" class="t-mono">r1 = y</text><text x="115" y="154" class="t-mono">r2 = x</text>
+          <path d="M40 92 V138" class="s-line" marker-end="url(#litmus-figure-arrow)"/><path d="M135 92 V138" class="s-line" marker-end="url(#litmus-figure-arrow)"/>
+          <text x="102" y="196" text-anchor="middle" class="t-gold">r1 = 0, r2 = 0 ?</text>
+          <text x="102" y="222" text-anchor="middle" class="t-dim">둘 다 상대의</text>
+          <text x="102" y="240" text-anchor="middle" class="t-dim">쓰기를 못 봄</text>
+          <text x="102" y="266" text-anchor="middle" class="t-faint">SC ✕ · TSO ✓ · RVWMO ✓</text>
+        </g>
+        <!-- LB -->
+        <g transform="translate(435,10)">
+          <rect width="205" height="280" rx="12" class="f-elev"/>
+          <text x="102" y="24" text-anchor="middle" class="t-accent">LB</text>
+          <text x="20" y="54" class="t-faint">하트 0</text><text x="115" y="54" class="t-faint">하트 1</text>
+          <text x="20" y="84" class="t-mono">r1 = x</text><text x="115" y="84" class="t-mono">r2 = y</text>
+          <text x="20" y="154" class="t-mono">y = 1</text><text x="115" y="154" class="t-mono">x = 1</text>
+          <path d="M40 92 V138" class="s-line" marker-end="url(#litmus-figure-arrow)"/><path d="M135 92 V138" class="s-line" marker-end="url(#litmus-figure-arrow)"/>
+          <text x="102" y="196" text-anchor="middle" class="t-gold">r1 = 1, r2 = 1 ?</text>
+          <text x="102" y="222" text-anchor="middle" class="t-dim">둘 다 “미래의”</text>
+          <text x="102" y="240" text-anchor="middle" class="t-dim">쓰기를 읽음</text>
+          <text x="102" y="266" text-anchor="middle" class="t-faint">SC ✕ · TSO ✕ · RVWMO ✓</text>
+        </g>
+        <!-- 2+2W -->
+        <g transform="translate(650,10)">
+          <rect width="205" height="280" rx="12" class="f-elev"/>
+          <text x="102" y="24" text-anchor="middle" class="t-accent">2+2W</text>
+          <text x="20" y="54" class="t-faint">하트 0</text><text x="115" y="54" class="t-faint">하트 1</text>
+          <text x="20" y="84" class="t-mono">x = 1</text><text x="115" y="84" class="t-mono">y = 1</text>
+          <text x="20" y="154" class="t-mono">y = 2</text><text x="115" y="154" class="t-mono">x = 2</text>
+          <path d="M40 92 V138" class="s-line" marker-end="url(#litmus-figure-arrow)"/><path d="M135 92 V138" class="s-line" marker-end="url(#litmus-figure-arrow)"/>
+          <text x="102" y="196" text-anchor="middle" class="t-gold">최종 x = 1, y = 1 ?</text>
+          <text x="102" y="222" text-anchor="middle" class="t-dim">각자의 첫 쓰기가</text>
+          <text x="102" y="240" text-anchor="middle" class="t-dim">마지막에 남음</text>
+          <text x="102" y="266" text-anchor="middle" class="t-faint">SC ✕ · TSO ✕ · RVWMO ✓</text>
+        </g>
+      </svg></div>
+      <figcaption><b>그림 11-7.</b> 네 가지 고전 리트머스 테스트(FENCE 없음). 세로 화살표는 프로그램 순서, MP의 빨간 점선은 “y의 새 값을 읽었는데 x는 옛 값”이라는 문제의 관계다. 아래 줄은 각 결과가 모델별로 허용(✓)되는지를 보여 준다.</figcaption>
+    </figure>
+
+    <div class="sim" id="litmus-sim">
+      <div class="sim-head"><span class="sim-tag">EXPLORER</span><h3>리트머스 테스트 탐색기</h3></div>
+      <div class="sim-pad">
+        <div class="litmus-code">
+          <div class="codebox" id="litmus-code-0" data-title="하트 0"></div>
+          <div class="codebox" id="litmus-code-1" data-title="하트 1"></div>
+        </div>
+        <div class="litmus-controls">
+          <label class="control"><span>하트 0의 두 연산 사이</span><select id="litmus-option-0"></select></label>
+          <label class="control"><span>하트 1의 두 연산 사이</span><select id="litmus-option-1"></select></label>
+        </div>
+        <div class="table-wrap"><table class="outcome-table compact" id="litmus-table"></table></div>
+        <div class="control"><span id="litmus-witness-title">증거 실행</span></div>
+        <div class="witness" id="litmus-witness"></div>
+      </div>
+      <div class="sim-controls">
+        <div class="control"><span>테스트</span>
+          <div class="segmented" id="litmus-test">
+            <button data-value="mp" class="on">MP</button><button data-value="sb">SB</button><button data-value="lb">LB</button><button data-value="twoPlusTwoWrites">2+2W</button>
+          </div>
+        </div>
+        <div class="control"><span>증거를 보여 줄 모델</span>
+          <div class="segmented" id="litmus-model">
+            <button data-value="sc">SC</button><button data-value="tso">TSO</button><button data-value="rvwmo" class="on">RVWMO</button>
+          </div>
+        </div>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">관심 결과</span><span class="value" id="litmus-interesting">—</span></div>
+        <div class="stat"><span class="key">SC</span><span class="value" id="litmus-verdict-sc">—</span></div>
+        <div class="stat"><span class="key">TSO</span><span class="value" id="litmus-verdict-tso">—</span></div>
+        <div class="stat"><span class="key">RVWMO</span><span class="value" id="litmus-verdict-rvwmo">—</span></div>
+      </div>
+      <div class="sim-note">MP에서 하트 0에 <b>fence w,w</b>만 넣으면 아직 허용, 하트 1에도 <b>fence r,r</b>을 넣어야 금지된다. 하트 1에 <b>주소 의존성</b>을 넣어도 막히지만 <b>제어 의존성</b>은 load를 묶지 못한다. SB에서는 <b>fence.tso</b>로는 부족하고 <b>fence rw,rw</b>(또는 fence w,r)가 두 하트 모두에 필요하다.</div>
+    </div>
+    <div class="callout warn"><strong>이 탐색기가 하는 일과 하지 않는 일</strong><p>SC는 모든 끼워 넣기를, TSO는 하트별 FIFO 저장 버퍼 동작 모델(전달 포함, W를 pred에·R을 succ에 가진 FENCE만 버퍼를 비우게 함)을 전부 탐색한다. RVWMO는 각 하트의 두 연산이 PPO 규칙 1, 4–6, 9–11로 묶이는지 판단한 뒤, 그 제약을 지키는 <b>모든 전역 메모리 순서</b>를 나열하고 Load Value 공리로 load 값을 정한다. 이 네 테스트에는 같은 주소 load 쌍, AMO, LR/SC가 없어서 규칙 2·3·7·8·12·13과 Atomicity 공리가 관여하지 않는다. 더 복잡한 프로그램은 규격 부록이 소개하는 herd·rmem 같은 공식 도구로 확인해야 한다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="mapping">
+    <h2>언어 원자 연산의 번역과 Ztso</h2>
+    <p>프로그래머는 보통 FENCE를 직접 쓰지 않는다. C/C++의 <code>std::atomic</code>이나 Linux 커널의 동기화 함수가 메모리 모델을 감싸 준다. 규격 부록은 이 연산들을 RISC-V 명령으로 바꾸는 권장 매핑을 표로 싣고 있다. 아래는 그중 C/C++ 표(Table 16)의 핵심이다.</p>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>C/C++ 구문</th><th>RVWMO 매핑</th></tr></thead>
+      <tbody>
+        <tr><td><code>atomic_load(relaxed)</code></td><td><code>l{b|h|w|d}</code></td></tr>
+        <tr><td><code>atomic_load(acquire)</code></td><td><code>l{b|h|w|d}; fence r,rw</code></td></tr>
+        <tr><td><code>atomic_load(seq_cst)</code></td><td><code>fence rw,rw; l{b|h|w|d}; fence r,rw</code></td></tr>
+        <tr><td><code>atomic_store(relaxed)</code></td><td><code>s{b|h|w|d}</code></td></tr>
+        <tr><td><code>atomic_store(release)</code></td><td><code>fence rw,w; s{b|h|w|d}</code></td></tr>
+        <tr><td><code>atomic_store(seq_cst)</code></td><td><code>fence rw,w; s{b|h|w|d}</code></td></tr>
+        <tr><td><code>atomic_thread_fence(acquire)</code></td><td><code>fence r,rw</code></td></tr>
+        <tr><td><code>atomic_thread_fence(release)</code></td><td><code>fence rw,w</code></td></tr>
+        <tr><td><code>atomic_thread_fence(acq_rel)</code></td><td><code>fence.tso</code></td></tr>
+        <tr><td><code>atomic_thread_fence(seq_cst)</code></td><td><code>fence rw,rw</code></td></tr>
+        <tr><td><code>atomic_&lt;op&gt;(acquire / release / acq_rel / seq_cst)</code></td><td><code>amo&lt;op&gt;.{w|d}.aq / .rl / .aqrl / .aqrl</code></td></tr>
+        <tr><td><code>atomic_&lt;op&gt;(seq_cst)</code>, LR/SC로</td><td><code>loop: lr.{w|d}.aqrl; &lt;op&gt;; sc.{w|d}.rl; bnez loop</code></td></tr>
+      </tbody>
+    </table></div>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 280" role="img" aria-label="acquire load와 release store를 FENCE로 만든 모습">
+        <defs>
+          <marker id="mapping-arrow-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--bad)"/></marker>
+        </defs>
+        <g transform="translate(20,10)">
+          <text x="190" y="20" text-anchor="middle" class="t-accent">acquire load = lw; fence r,rw</text>
+          <rect x="60" y="40" width="260" height="38" rx="8" class="f-accent-soft"/><text x="190" y="64" text-anchor="middle" class="t-mono">lw  a0, 0(s1)   # 플래그</text>
+          <rect x="40" y="92" width="300" height="12" rx="4" class="f-gold"/>
+          <text x="350" y="103" class="t-gold" style="font-size:12px">fence r,rw</text>
+          <rect x="60" y="118" width="260" height="38" rx="8" class="f-surface"/><text x="190" y="142" text-anchor="middle" class="t-mono">lw  a1, 0(s0)   # 데이터</text>
+          <rect x="60" y="166" width="260" height="38" rx="8" class="f-surface"/><text x="190" y="190" text-anchor="middle" class="t-mono">sw  a2, 0(s2)</text>
+          <path d="M300 150 C330 140 330 100 300 84" class="s-bad" marker-end="url(#mapping-arrow-bad)"/>
+          <text x="190" y="236" text-anchor="middle" class="t-dim">뒤의 읽기·쓰기는 플래그 읽기보다</text>
+          <text x="190" y="256" text-anchor="middle" class="t-dim">앞으로 못 올라온다</text>
+        </g>
+        <g transform="translate(440,10)">
+          <text x="190" y="20" text-anchor="middle" class="t-accent">release store = fence rw,w; sw</text>
+          <rect x="60" y="40" width="260" height="38" rx="8" class="f-surface"/><text x="190" y="64" text-anchor="middle" class="t-mono">sw  t1, 0(s0)   # 데이터</text>
+          <rect x="60" y="88" width="260" height="38" rx="8" class="f-surface"/><text x="190" y="112" text-anchor="middle" class="t-mono">lw  t2, 0(s3)</text>
+          <rect x="40" y="140" width="300" height="12" rx="4" class="f-gold"/>
+          <text x="350" y="151" class="t-gold" style="font-size:12px">fence rw,w</text>
+          <rect x="60" y="166" width="260" height="38" rx="8" class="f-accent-soft"/><text x="190" y="190" text-anchor="middle" class="t-mono">sw  t3, 0(s1)   # 플래그</text>
+          <path d="M300 74 C340 90 340 160 304 178" class="s-bad" marker-end="url(#mapping-arrow-bad)"/>
+          <text x="190" y="236" text-anchor="middle" class="t-dim">앞의 읽기·쓰기는 플래그 쓰기보다</text>
+          <text x="190" y="256" text-anchor="middle" class="t-dim">뒤로 못 내려간다</text>
+        </g>
+      </svg></div>
+      <figcaption><b>그림 11-8.</b> FENCE로 만든 acquire와 release. 빨간 화살표가 막히는 방향이다. Zalasr가 있으면 이 두 쌍은 각각 <code>lw.aq</code> 하나, <code>sw.rl</code> 하나로 줄어든다(규격 부록 Table 17이 이 “native load-acquire/store-release” 매핑을 제시한다).</figcaption>
+    </figure>
+    <div class="callout tip"><strong>섞어 쓸 때의 함정</strong><p>부록의 LR/SC 매핑 표에는 별표 주석이 붙어 있다. load-acquire/store-release 명령을 쓰는 매핑(Table 17)에서 <code>seq_cst</code> RMW의 LR은 <code>lr.aq</code>로 충분해 보이지만, 기존 FENCE 기반 매핑(Table 16)으로 컴파일한 코드와 함께 돌아가려면 <code>lr.{w|d}.aqrl</code>이어야 한다. 매핑은 프로그램 전체가 같은 약속을 따라야 안전하다.</p></div>
+
+    <h3>Ztso: TSO를 약속하는 확장</h3>
+    <p>x86이나 SPARC용 코드는 TSO를 가정하고 FENCE 없이 쓰인 경우가 많다. <b>Ztso</b>(v1.0)는 새 명령 없이 “이 구현은 RVTSO를 따른다”는 약속만 추가한다. 규격의 정의는 RVWMO에서의 차이로 주어진다.</p>
+    <ul>
+      <li>모든 load는 acquire-RCpc 표시가 있는 것처럼 동작한다.</li>
+      <li>모든 store는 release-RCpc 표시가 있는 것처럼 동작한다.</li>
+      <li>모든 AMO는 acquire-RCsc와 release-RCsc 표시가 모두 있는 것처럼 동작한다.</li>
+    </ul>
+    <p>이 때문에 PPO 규칙 4–7을 뺀 나머지는 모두 중복이 되고, PW와 SR을 모두 갖지 않은(메모리) FENCE도 중복이 된다. 남는 재배치는 store → 뒤의 load 하나뿐이다. V 확장의 벡터 메모리 명령도 명령 단위로는 RVTSO를 따르지만, 한 명령 안의 원소 접근 순서까지 강해지지는 않는다.</p>
+    <div class="callout spec"><strong>규격 원문에서</strong>
+      <blockquote>“In spite of the fact that Ztso adds no new instructions to the ISA, code written assuming RVTSO will not run correctly on implementations not supporting Ztso.”</blockquote>
+      <p><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/ztso-st-ext.html" target="_blank" rel="noopener">"Ztso" Extension for Total Store Ordering, Version 1.0</a> — 그래서 Ztso 전용으로 컴파일한 바이너리는 그 사실을 표시해, Ztso가 없는 플랫폼이 실행을 거부할 수 있게 해야 한다.</p></div>
+  </section>
+
+  <section class="keypoints" id="summary">
+    <h2>핵심 정리</h2>
+    <ol>
+      <li>저장 버퍼·비순차 실행·캐시 때문에 다른 하트는 내 메모리 접근을 다른 순서로 볼 수 있다. 메모리 모델은 허용되는 결과의 집합을 정한다.</li>
+      <li>RISC-V 기본 모델 <b>RVWMO</b>(v2.0)는 서로 다른 주소에 대한 네 종류(W→R, W→W, R→R, R→W) 재배치를 모두 허용하는 약한 모델이지만, 전역 메모리 순서가 하나인 multi-copy atomic 모델이다.</li>
+      <li>실행은 <b>PPO를 지키고</b> Load Value·Atomicity·Progress 공리를 만족하는 전역 메모리 순서가 있으면 합법이다.</li>
+      <li>PPO 13규칙은 주소 겹침(1–3), 명시적 동기화(4–8: FENCE, acquire, release, RCsc, LR/SC 짝), 구문 의존성(9–11: 주소, 데이터, store로의 제어), 파이프라인 의존성(12–13)으로 나뉜다.</li>
+      <li>FENCE는 <b>fm</b>[31:28], <b>pred</b>[27:24] = PI PO PR PW, <b>succ</b>[23:20] = SI SO SR SW로 인코딩한다. <code>fence.tso</code>(fm = 1000, RW,RW)는 쓰기→읽기만 빼고 순서를 정한다.</li>
+      <li>MP·LB·2+2W의 문제 결과는 RVWMO에서만, SB의 0/0은 TSO와 RVWMO 모두에서 허용된다. MP는 fence w,w + fence r,r, SB는 양쪽 fence rw,rw로 막는다.</li>
+      <li>C/C++ acquire load는 <code>l; fence r,rw</code>, release store는 <code>fence rw,w; s</code>로 번역한다. <b>Ztso</b>는 모든 load·store에 RCpc acquire/release를 부여해 TSO를 약속한다.</li>
+    </ol>
+  </section>
+
+  <section id="quiz">
+    <h2>확인 퀴즈</h2>
+    <div class="quiz">
+      <div class="quiz-question"><p>TSO에서도 허용되는 재배치는?</p><div class="options">
+        <button class="option" data-correct>store → 뒤의 load (다른 주소)</button>
+        <button class="option">store → 뒤의 store</button>
+        <button class="option">load → 뒤의 load</button>
+        <button class="option">load → 뒤의 store</button>
+      </div><div class="quiz-explanation">TSO의 유일한 완화는 저장 버퍼 때문에 생기는 store→load 재배치다. RVWMO는 네 가지 모두 허용한다.</div></div>
+      <div class="quiz-question"><p>MP 테스트에서 r1 = 1, r2 = 0을 RVWMO에서 막는 가장 가벼운 조합은?</p><div class="options">
+        <button class="option">하트 0에만 fence rw,rw</button>
+        <button class="option" data-correct>하트 0에 fence w,w, 하트 1에 fence r,r</button>
+        <button class="option">하트 1에 제어 의존성</button>
+        <button class="option">양쪽에 fence.tso를 넣어도 막을 수 없다</button>
+      </div><div class="quiz-explanation">쓰는 쪽은 데이터→플래그 쓰기 순서를, 읽는 쪽은 플래그→데이터 읽기 순서를 지켜야 한다. 제어 의존성은 load를 묶지 못한다. fence.tso는 W→W와 R→R을 모두 묶으므로 양쪽에 넣으면 막힌다.</div></div>
+      <div class="quiz-question"><p>PPO 규칙 11(제어 의존성)이 순서를 보장하는 경우는?</p><div class="options">
+        <button class="option">b가 load일 때</button>
+        <button class="option" data-correct>b가 store일 때</button>
+        <button class="option">a가 store일 때</button>
+        <button class="option">항상</button>
+      </div><div class="quiz-explanation">분기에 의존하는 store만 순서가 보장된다. 투기적 실행으로 분기 뒤의 load를 미리 실행하는 것은 허용된다.</div></div>
+      <div class="quiz-question"><p><code>fence.tso</code>의 인코딩으로 옳은 것은?</p><div class="options">
+        <button class="option">0x0330000f</button>
+        <button class="option" data-correct>0x8330000f</button>
+        <button class="option">0x0100000f</button>
+        <button class="option">0x0ff0000f</button>
+      </div><div class="quiz-explanation">fm = 1000, pred = RW(0011), succ = RW(0011)이다. 0x0330000f는 fence rw,rw, 0x0100000f는 pause, 0x0ff0000f는 fence iorw,iorw다.</div></div>
+      <div class="quiz-question"><p>하트가 자기 저장 버퍼의 값을 먼저 읽어 오는 것(전달)을 허용하는 RVWMO의 조항은?</p><div class="options">
+        <button class="option">Progress 공리</button>
+        <button class="option">Atomicity 공리</button>
+        <button class="option" data-correct>Load Value 공리의 “프로그램 순서상 앞선 store” 조항</button>
+        <button class="option">PPO 규칙 1</button>
+      </div><div class="quiz-explanation">Load Value 공리는 전역 순서상 앞선 store뿐 아니라 프로그램 순서상 앞선 같은 하트의 store도 후보로 삼는다. 그래서 load가 전역 순서에서 자기 store보다 앞에 있어도 그 값을 읽을 수 있다.</div></div>
+      <div class="quiz-question"><p>C/C++ <code>atomic_store(memory_order_release)</code>의 RVWMO 권장 매핑은?</p><div class="options">
+        <button class="option"><code>sw; fence rw,w</code></button>
+        <button class="option" data-correct><code>fence rw,w; sw</code></button>
+        <button class="option"><code>fence r,rw; sw</code></button>
+        <button class="option"><code>sw; fence r,rw</code></button>
+      </div><div class="quiz-explanation">release는 “앞의 모든 접근이 이 store보다 먼저 보이게” 해야 하므로 FENCE를 store 앞에 두고 pred = RW, succ = W를 쓴다.</div></div>
+      <div class="quiz-question"><p>Ztso에 대한 설명으로 옳은 것은?</p><div class="options">
+        <button class="option">새 load/store 명령을 추가한다</button>
+        <button class="option">모든 FENCE를 무시해도 되게 만든다</button>
+        <button class="option" data-correct>새 명령 없이 모든 load에 acquire-RCpc, store에 release-RCpc 의미를 부여한다</button>
+        <button class="option">Ztso용 바이너리는 Ztso가 없는 칩에서도 똑같이 동작한다</button>
+      </div><div class="quiz-explanation">Ztso는 명령을 추가하지 않는다. 그 대신 TSO를 가정한 코드는 Ztso가 없는 구현에서 틀리게 동작할 수 있으므로 바이너리에 표시해야 한다. 쓰기→읽기 순서가 필요하면 여전히 FENCE가 필요하다.</div></div>
+    </div>
+  </section>
+
+  <section id="references">
+    <h2>더 읽을거리</h2>
+    <ul class="references">
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/rvwmo.html" target="_blank" rel="noopener">RVWMO Memory Consistency Model, Version 2.0</a> (Unprivileged ISA v20260120)</li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/mm-eplan.html" target="_blank" rel="noopener">RVWMO Explanatory Material</a> — 리트머스 테스트, 매핑 표(Table 12–17), 설계 근거</li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/ztso-st-ext.html" target="_blank" rel="noopener">"Ztso" Extension for Total Store Ordering, Version 1.0</a></li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html" target="_blank" rel="noopener">RV32I Base Integer Instruction Set — Memory Ordering Instructions (FENCE)</a></li>
+      <li>Sarita V. Adve, Kourosh Gharachorloo, “Shared Memory Consistency Models: A Tutorial” (IEEE Computer, 1996) — SC·TSO·약한 모델 입문의 고전</li>
+      <li>Daniel Lustig 외, RISC-V Memory Model Task Group의 공리적(Alloy/herd) 모델 — 규격 부록 “Formal Memory Model Specifications”</li>
+    </ul>
+  </section>
+</main>
+
+<script>
+/* ---------------------------------------------------------------------------
+   저장 버퍼 애니메이션: SB 리트머스 테스트를 한 단계씩 보여 준다.
+   단계마다 "꾸러미"가 출발지에서 목적지로 날아간 뒤 상태가 바뀐다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const TRAVEL_SECONDS = 0.9;
+  const AUTOPLAY_PAUSE_SECONDS = 0.7;
+  const UNKNOWN_VALUE = "?";
+
+  const canvasElement = document.getElementById("store-buffer-canvas");
+  const descriptionElement = document.getElementById("store-buffer-description");
+  let isFenceInserted = false;
+  let steps = [];
+  let stepIndex = 0;
+  let state = null;
+  let movingToken = null;
+  let isAutoplay = false;
+  let autoplayTimer = 0;
+
+  function createState() {
+    return { registers: [UNKNOWN_VALUE, UNKNOWN_VALUE], buffers: [[], []], memory: { x: 0, y: 0 }, currentLine: [0, 0] };
+  }
+
+  function programFor(coreIndex) {
+    const storeAddress = coreIndex === 0 ? "x" : "y";
+    const loadAddress = coreIndex === 0 ? "y" : "x";
+    const registerName = coreIndex === 0 ? "r1" : "r2";
+    const lines = ["sw " + storeAddress + " ← 1"];
+    if (isFenceInserted) lines.push("fence rw,rw");
+    lines.push("lw " + registerName + " ← " + loadAddress);
+    return lines;
+  }
+
+  // 각 단계: 어느 줄을 실행하는지, 꾸러미가 어디서 어디로 가는지, 도착하면 무엇이 바뀌는지
+  function buildSteps() {
+    const storeStep = (coreIndex) => {
+      const address = coreIndex === 0 ? "x" : "y";
+      return {
+        core: coreIndex, line: 0, from: "core" + coreIndex, to: "buffer" + coreIndex, label: address + "=1",
+        text: "하트 " + coreIndex + "가 <code>sw " + address + " ← 1</code> 실행. 값은 메모리가 아니라 <b>자기 저장 버퍼</b>에 들어간다. 다른 하트에게는 아직 보이지 않는다.",
+        apply: () => { state.buffers[coreIndex].push({ address, value: 1 }); },
+      };
+    };
+    const loadStep = (coreIndex) => {
+      const address = coreIndex === 0 ? "y" : "x";
+      const registerName = coreIndex === 0 ? "r1" : "r2";
+      return {
+        core: coreIndex, line: isFenceInserted ? 2 : 1, from: "memory-" + address, to: "core" + coreIndex, labelFunction: () => address + "=" + state.memory[address],
+        textFunction: () => "하트 " + coreIndex + "가 <code>lw " + registerName + " ← " + address + "</code> 실행. 자기 버퍼에 " + address + "가 없으니 메모리에서 읽는다: <b>" + registerName + " = " + state.memory[address] + "</b>" +
+          (state.memory[address] === 0 ? " (상대의 store는 아직 상대 버퍼 안에 있다)" : ""),
+        apply: () => { state.registers[coreIndex] = state.memory[address]; },
+      };
+    };
+    const drainStep = (coreIndex, reason) => {
+      const address = coreIndex === 0 ? "x" : "y";
+      return {
+        core: coreIndex, line: reason === "fence" ? 1 : -1, from: "buffer" + coreIndex, to: "memory-" + address, label: address + "=1",
+        text: reason === "fence"
+          ? "하트 " + coreIndex + "의 <code>fence rw,rw</code>: 앞선 store(W)가 뒤의 load(R)보다 먼저 보여야 하므로, 버퍼를 <b>먼저 비워야</b> 통과한다. " + address + " = 1이 메모리에 쓰인다."
+          : "하트 " + coreIndex + "의 저장 버퍼가 나중에야 비워져 " + address + " = 1이 메모리에 쓰인다.",
+        apply: () => { state.buffers[coreIndex].shift(); state.memory[address] = 1; },
+      };
+    };
+    if (isFenceInserted) return [storeStep(0), storeStep(1), drainStep(0, "fence"), drainStep(1, "fence"), loadStep(0), loadStep(1)];
+    return [storeStep(0), storeStep(1), loadStep(0), loadStep(1), drainStep(0, "later"), drainStep(1, "later")];
+  }
+
+  function reset() {
+    state = createState();
+    steps = buildSteps();
+    stepIndex = 0;
+    movingToken = null;
+    isAutoplay = false;
+    document.getElementById("store-buffer-play").textContent = "자동 재생";
+    descriptionElement.innerHTML = "처음 상태: x = y = 0, 두 저장 버퍼는 비어 있다. <b>한 단계</b>를 눌러 시작하자.";
+    updateReadouts();
+    canvas.redraw();
+  }
+
+  function startStep() {
+    if (movingToken || stepIndex >= steps.length) return;
+    const step = steps[stepIndex];
+    if (step.line >= 0) state.currentLine[step.core] = step.line;
+    const label = step.labelFunction ? step.labelFunction() : step.label;
+    descriptionElement.innerHTML = step.textFunction ? step.textFunction() : step.text;
+    movingToken = { from: step.from, to: step.to, label, progress: 0, step };
+  }
+
+  function finishStep() {
+    movingToken.step.apply();
+    movingToken = null;
+    stepIndex += 1;
+    if (stepIndex >= steps.length) {
+      const resultText = "r1 = " + state.registers[0] + ", r2 = " + state.registers[1];
+      const isBothZero = state.registers[0] === 0 && state.registers[1] === 0;
+      descriptionElement.innerHTML += "<br><b>끝: " + resultText + "</b> — " + (isBothZero
+        ? "순차 일관성(SC)에서는 나올 수 없는 결과다. TSO와 RVWMO는 이것을 허용한다."
+        : "FENCE가 store를 load보다 먼저 보이게 만들어, 둘 다 상대의 쓰기를 보았다.");
+      isAutoplay = false;
+      document.getElementById("store-buffer-play").textContent = "자동 재생";
+    }
+    updateReadouts();
+  }
+
+  function updateReadouts() {
+    document.getElementById("store-buffer-step-count").textContent = stepIndex + " / " + steps.length;
+    document.getElementById("store-buffer-r1").textContent = state.registers[0];
+    document.getElementById("store-buffer-r2").textContent = state.registers[1];
+    document.getElementById("store-buffer-memory").textContent = state.memory.x + ", " + state.memory.y;
+  }
+
+  // 화면 크기에 맞춘 상자 위치를 계산한다
+  function layout(width, height) {
+    const margin = 14;
+    const columnWidth = (width - margin * 3) / 2;
+    const coreHeight = 96;
+    const bufferHeight = 54;
+    const memoryWidth = Math.min(320, width - margin * 2);
+    const anchors = {};
+    const boxes = {};
+    for (let coreIndex = 0; coreIndex < 2; coreIndex += 1) {
+      const boxX = margin + coreIndex * (columnWidth + margin);
+      boxes["core" + coreIndex] = { x: boxX, y: margin, width: columnWidth, height: coreHeight };
+      boxes["buffer" + coreIndex] = { x: boxX + columnWidth * 0.12, y: margin + coreHeight + 26, width: columnWidth * 0.76, height: bufferHeight };
+      anchors["core" + coreIndex] = { x: boxX + columnWidth / 2, y: margin + coreHeight - 6 };
+      anchors["buffer" + coreIndex] = { x: boxX + columnWidth / 2, y: margin + coreHeight + 26 + bufferHeight / 2 };
+    }
+    const memoryY = height - 70;
+    boxes.memory = { x: width / 2 - memoryWidth / 2, y: memoryY, width: memoryWidth, height: 56 };
+    anchors["memory-x"] = { x: width / 2 - memoryWidth / 4, y: memoryY + 28 };
+    anchors["memory-y"] = { x: width / 2 + memoryWidth / 4, y: memoryY + 28 };
+    return { boxes, anchors };
+  }
+
+  function drawBox(context, box, fill, stroke) {
+    book.roundedRectangle(context, box.x, box.y, box.width, box.height, 10);
+    context.fillStyle = fill;
+    context.fill();
+    context.lineWidth = 1.3;
+    context.strokeStyle = stroke;
+    context.stroke();
+  }
+
+  function draw(context, width, height, colors) {
+    if (!state) return;
+    const { boxes, anchors } = layout(width, height);
+    const isNarrow = width < 480;
+    const smallSize = isNarrow ? 11 : 12.5;
+    for (let coreIndex = 0; coreIndex < 2; coreIndex += 1) {
+      const coreBox = boxes["core" + coreIndex];
+      drawBox(context, coreBox, coreIndex === 0 ? colors.accentSoft : colors.violetSoft, coreIndex === 0 ? colors.accent : colors.violet);
+      book.drawText(context, "하트 " + coreIndex, coreBox.x + 10, coreBox.y + 16, { size: 13, bold: true, color: colors.text });
+      book.drawText(context, (coreIndex === 0 ? "r1" : "r2") + " = " + state.registers[coreIndex], coreBox.x + coreBox.width - 10, coreBox.y + 16, { size: 13, bold: true, mono: true, color: colors.gold, align: "right" });
+      programFor(coreIndex).forEach((line, lineIndex) => {
+        const lineY = coreBox.y + 38 + lineIndex * 18;
+        const isCurrent = movingToken ? state.currentLine[coreIndex] === lineIndex && movingToken.step.core === coreIndex : false;
+        if (isCurrent) {
+          context.fillStyle = colors.goldSoft;
+          context.fillRect(coreBox.x + 4, lineY - 9, coreBox.width - 8, 18);
+        }
+        book.drawText(context, line, coreBox.x + 12, lineY, { size: smallSize, mono: true, color: isCurrent ? colors.text : colors.dim });
+      });
+      const bufferBox = boxes["buffer" + coreIndex];
+      drawBox(context, bufferBox, colors.goldSoft, colors.gold);
+      book.drawText(context, "저장 버퍼", bufferBox.x + bufferBox.width / 2, bufferBox.y - 9, { size: 11.5, color: colors.dim, align: "center" });
+      const entries = state.buffers[coreIndex];
+      if (entries.length === 0) book.drawText(context, "(비어 있음)", bufferBox.x + bufferBox.width / 2, bufferBox.y + bufferBox.height / 2, { size: smallSize, color: colors.faint, align: "center" });
+      entries.forEach((entry, entryIndex) => {
+        book.drawText(context, entry.address + " = " + entry.value, bufferBox.x + bufferBox.width / 2, bufferBox.y + bufferBox.height / 2 + entryIndex * 16, { size: 14, bold: true, mono: true, color: colors.gold, align: "center" });
+      });
+      // 버퍼에서 메모리로 가는 길
+      context.save();
+      context.setLineDash([4, 5]);
+      context.strokeStyle = colors.border;
+      context.beginPath();
+      context.moveTo(anchors["buffer" + coreIndex].x, bufferBox.y + bufferBox.height);
+      context.lineTo(anchors[coreIndex === 0 ? "memory-x" : "memory-y"].x, boxes.memory.y);
+      context.stroke();
+      context.restore();
+    }
+    drawBox(context, boxes.memory, colors.surface, colors.border);
+    book.drawText(context, "공유 메모리", boxes.memory.x + boxes.memory.width / 2, boxes.memory.y - 9, { size: 11.5, color: colors.dim, align: "center" });
+    ["x", "y"].forEach((address) => {
+      const anchor = anchors["memory-" + address];
+      book.drawText(context, address + " = " + state.memory[address], anchor.x, anchor.y, { size: 17, bold: true, mono: true, color: state.memory[address] ? colors.ok : colors.text, align: "center" });
+    });
+    if (movingToken) {
+      const fraction = book.easeInOut(Math.min(1, movingToken.progress));
+      const from = anchors[movingToken.from];
+      const to = anchors[movingToken.to];
+      const tokenX = book.linearInterpolate(from.x, to.x, fraction);
+      const tokenY = book.linearInterpolate(from.y, to.y, fraction);
+      book.roundedRectangle(context, tokenX - 28, tokenY - 12, 56, 24, 7);
+      context.fillStyle = colors.gold;
+      context.fill();
+      book.drawText(context, movingToken.label, tokenX, tokenY + 1, { size: 12.5, bold: true, mono: true, color: colors.background, align: "center" });
+    }
+  }
+
+  const canvas = book.createCanvas(canvasElement, draw, { aspectRatio: 0.42, minimumHeight: 320, maximumHeight: 350 });
+  book.animationLoop(canvasElement, (deltaSeconds) => {
+    if (movingToken) {
+      movingToken.progress += deltaSeconds / TRAVEL_SECONDS;
+      if (movingToken.progress >= 1) finishStep();
+      canvas.redraw();
+    } else if (isAutoplay) {
+      autoplayTimer -= deltaSeconds;
+      if (autoplayTimer <= 0) {
+        autoplayTimer = AUTOPLAY_PAUSE_SECONDS;
+        startStep();
+      }
+    }
+  });
+  document.getElementById("store-buffer-step").addEventListener("click", () => {
+    // 움직이는 중이면 바로 끝내고 다음 단계로 넘어간다
+    if (movingToken) finishStep();
+    startStep();
+    canvas.redraw();
+  });
+  document.getElementById("store-buffer-play").addEventListener("click", (event) => {
+    if (stepIndex >= steps.length) reset();
+    isAutoplay = !isAutoplay;
+    autoplayTimer = 0;
+    event.currentTarget.textContent = isAutoplay ? "멈춤" : "자동 재생";
+  });
+  document.getElementById("store-buffer-reset").addEventListener("click", reset);
+  book.segmented("store-buffer-fence", (value) => { isFenceInserted = value === "fence"; reset(); });
+})();
+
+/* ---------------------------------------------------------------------------
+   FENCE 만들기: pred/succ 비트와 fm 으로 인코딩과 순서 그림을 만든다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const SET_LETTERS = ["I", "O", "R", "W"]; // 니블의 비트 3..0 순서
+  const SET_NAMES = { I: "장치 입력", O: "장치 출력", R: "메모리 읽기", W: "메모리 쓰기" };
+  const MISC_MEM_OPCODE = 0b0001111;
+  const FM_SHIFT = 28;
+  const PREDECESSOR_SHIFT = 24;
+  const SUCCESSOR_SHIFT = 20;
+  const TSO_FENCE_MODE = 8;
+  const READ_WRITE_SET = 0b0011;
+  const WRITE_ONLY_SET = 0b0001;
+  const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
+
+  let fenceMode = 0;
+  let predecessorSet = READ_WRITE_SET;
+  let successorSet = READ_WRITE_SET;
+  const predecessorRow = document.getElementById("fence-predecessor-bits");
+  const successorRow = document.getElementById("fence-successor-bits");
+  const svg = document.getElementById("fence-diagram-svg");
+
+  function buildBitRow(rowElement, prefix, isPredecessor) {
+    SET_LETTERS.forEach((letter, index) => {
+      const bitElement = document.createElement("span");
+      bitElement.className = "bit";
+      bitElement.textContent = prefix + letter;
+      bitElement.setAttribute("role", "button");
+      bitElement.setAttribute("tabindex", "0");
+      const bitMask = 1 << (3 - index);
+      const toggle = () => {
+        if (isPredecessor) predecessorSet ^= bitMask;
+        else successorSet ^= bitMask;
+        render();
+      };
+      bitElement.addEventListener("click", toggle);
+      bitElement.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); toggle(); } });
+      bitElement.dataset.mask = bitMask;
+      rowElement.appendChild(bitElement);
+    });
+  }
+  buildBitRow(predecessorRow, "P", true);
+  buildBitRow(successorRow, "S", false);
+
+  const setText = (set) => SET_LETTERS.filter((letter, index) => set & (1 << (3 - index))).join("").toLowerCase();
+  const hasLetter = (set, letter) => Boolean(set & (1 << (3 - SET_LETTERS.indexOf(letter))));
+
+  function classify() {
+    const isTsoMode = fenceMode === TSO_FENCE_MODE;
+    if (isTsoMode && predecessorSet === READ_WRITE_SET && successorSet === READ_WRITE_SET) {
+      return { mnemonic: "fence.tso", kind: "tso", note: "<b>FENCE.TSO</b>: 앞의 load → 뒤의 모든 접근, 앞의 store → 뒤의 store를 묶는다. 앞의 store와 뒤의 load 사이만 풀어 둔다. fm을 무시하고 fence rw,rw로 구현해도 맞다(더 강하므로)." };
+    }
+    if (isTsoMode) {
+      return { mnemonic: "fence " + (setText(predecessorSet) || "0") + "," + (setText(successorSet) || "0") + " (fm=1000)", kind: "reserved", note: "fm = 1000은 pred·succ가 모두 RW일 때만 정의되어 있다. 나머지는 <b>예약</b>이며, 기본 구현은 fm = 0000인 일반 FENCE로 취급한다." };
+    }
+    if (predecessorSet === WRITE_ONLY_SET && successorSet === 0) {
+      return { mnemonic: "pause", kind: "pause", note: "<b>PAUSE</b> (Zihintpause): pred = W, succ = 0, fm = 0, rd = rs1 = 0. 후행 집합이 비어 있으므로 아무 순서도 강제하지 않는 HINT이고, 스핀 루프에서 잠깐 쉬라는 신호로 쓴다." };
+    }
+    if (predecessorSet === 0 || successorSet === 0) {
+      return { mnemonic: "fence " + (setText(predecessorSet) || "0") + "," + (setText(successorSet) || "0"), kind: "hint", note: "선행 또는 후행 집합이 비어 있으면 순서를 정할 쌍이 없다. 규격은 이런 인코딩을 <b>HINT</b>로 지정해 두었다(아키텍처상 효과 없음)." };
+    }
+    let note = "일반 FENCE: 선행 집합의 연산이 후행 집합의 연산보다 먼저 일어난 것으로 모든 하트·장치에게 보인다.";
+    if (predecessorSet === 0b0010 && successorSet === READ_WRITE_SET) note += " 이 조합은 <b>acquire</b> 용도다 (load 뒤에 둔다).";
+    if (predecessorSet === READ_WRITE_SET && successorSet === WRITE_ONLY_SET) note += " 이 조합은 <b>release</b> 용도다 (store 앞에 둔다).";
+    if (predecessorSet === READ_WRITE_SET && successorSet === READ_WRITE_SET) note += " 메모리에 대한 <b>전체 장벽</b>이다.";
+    if ((predecessorSet | successorSet) & 0b1100) note += " I/O 비트가 켜져 있어 장치 레지스터 접근도 함께 묶는다.";
+    return { mnemonic: "fence " + setText(predecessorSet) + "," + setText(successorSet), kind: "normal", note };
+  }
+
+  // fence.tso 는 W→R 쌍만 빠진다. 그 밖에는 pred × succ 의 모든 쌍.
+  function isPairOrdered(earlierLetter, laterLetter, classification) {
+    if (classification.kind === "hint" || classification.kind === "pause") return false;
+    if (!hasLetter(predecessorSet, earlierLetter) || !hasLetter(successorSet, laterLetter)) return false;
+    if (classification.kind === "tso" && earlierLetter === "W" && laterLetter === "R") return false;
+    return true;
+  }
+
+  function createSvgElement(name, attributes, text) {
+    const element = document.createElementNS(SVG_NAMESPACE, name);
+    Object.entries(attributes).forEach(([key, value]) => element.setAttribute(key, value));
+    if (text !== undefined) element.textContent = text;
+    return element;
+  }
+
+  function drawDiagram(classification) {
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    const definitions = createSvgElement("defs", {});
+    const marker = createSvgElement("marker", { id: "fence-builder-arrow", viewBox: "0 0 10 10", refX: "9", refY: "5", markerWidth: "6", markerHeight: "6", orient: "auto" });
+    marker.appendChild(createSvgElement("path", { d: "M0,0 L10,5 L0,10 z", fill: "var(--accent)" }));
+    definitions.appendChild(marker);
+    svg.appendChild(definitions);
+    const columnX = (index) => 20 + index * 152;
+    const boxWidth = 140;
+    const topY = 18;
+    const bottomY = 222;
+    SET_LETTERS.forEach((letter, index) => {
+      const isEarlierActive = hasLetter(predecessorSet, letter);
+      const isLaterActive = hasLetter(successorSet, letter);
+      svg.appendChild(createSvgElement("rect", { x: columnX(index), y: topY, width: boxWidth, height: 56, rx: 9, class: isEarlierActive ? "f-gold-soft" : "f-surface" }));
+      svg.appendChild(createSvgElement("text", { x: columnX(index) + boxWidth / 2, y: topY + 24, "text-anchor": "middle", class: "t-faint" }, "FENCE 앞"));
+      svg.appendChild(createSvgElement("text", { x: columnX(index) + boxWidth / 2, y: topY + 44, "text-anchor": "middle", class: isEarlierActive ? "t t-bold" : "t-dim" }, letter + " · " + SET_NAMES[letter]));
+      svg.appendChild(createSvgElement("rect", { x: columnX(index), y: bottomY, width: boxWidth, height: 56, rx: 9, class: isLaterActive ? "f-teal-soft" : "f-surface" }));
+      svg.appendChild(createSvgElement("text", { x: columnX(index) + boxWidth / 2, y: bottomY + 24, "text-anchor": "middle", class: "t-faint" }, "FENCE 뒤"));
+      svg.appendChild(createSvgElement("text", { x: columnX(index) + boxWidth / 2, y: bottomY + 44, "text-anchor": "middle", class: isLaterActive ? "t t-bold" : "t-dim" }, letter + " · " + SET_NAMES[letter]));
+    });
+    svg.appendChild(createSvgElement("rect", { x: 14, y: 138, width: 606, height: 14, rx: 5, class: "f-gold" }));
+    svg.appendChild(createSvgElement("text", { x: 316, y: 130, "text-anchor": "middle", class: "t-gold" }, classification.mnemonic));
+    let pairCount = 0;
+    SET_LETTERS.forEach((earlierLetter, earlierIndex) => {
+      SET_LETTERS.forEach((laterLetter, laterIndex) => {
+        if (!isPairOrdered(earlierLetter, laterLetter, classification)) return;
+        pairCount += 1;
+        const startX = columnX(earlierIndex) + boxWidth / 2 + (laterIndex - 1.5) * 10;
+        const endX = columnX(laterIndex) + boxWidth / 2 + (earlierIndex - 1.5) * 10;
+        svg.appendChild(createSvgElement("path", { d: "M" + startX + " " + (topY + 58) + " C" + startX + " 150 " + endX + " 140 " + endX + " " + (bottomY - 4), class: "s-accent flow-dash", "stroke-width": 1.6, "marker-end": "url(#fence-builder-arrow)" }));
+      });
+    });
+    if (pairCount === 0) svg.appendChild(createSvgElement("text", { x: 316, y: 186, "text-anchor": "middle", class: "t-faint" }, "묶이는 쌍이 없다"));
+  }
+
+  function render() {
+    [...predecessorRow.children].forEach((bitElement) => bitElement.classList.toggle("on", Boolean(predecessorSet & Number(bitElement.dataset.mask))));
+    [...successorRow.children].forEach((bitElement) => bitElement.classList.toggle("on", Boolean(successorSet & Number(bitElement.dataset.mask))));
+    const word = ((fenceMode << FM_SHIFT) | (predecessorSet << PREDECESSOR_SHIFT) | (successorSet << SUCCESSOR_SHIFT) | MISC_MEM_OPCODE) >>> 0;
+    const classification = classify();
+    document.getElementById("fence-mnemonic").textContent = classification.mnemonic;
+    document.getElementById("fence-word").textContent = book.toHex(word, 32);
+    document.getElementById("fence-description").innerHTML = classification.note;
+    const fields = [
+      { name: "fm", bits: 4, value: book.toBinary(fenceMode, 4), style: "function", range: [31, 28] },
+      { name: "pred", bits: 4, value: book.toBinary(predecessorSet, 4), style: "immediate", range: [27, 24] },
+      { name: "succ", bits: 4, value: book.toBinary(successorSet, 4), style: "register", range: [23, 20] },
+      { name: "rs1", bits: 5, value: "00000", style: "plain", range: [19, 15] },
+      { name: "f3", bits: 3, value: "000", style: "plain", range: [14, 12] },
+      { name: "rd", bits: 5, value: "00000", style: "plain", range: [11, 7] },
+      { name: "opcode", bits: 7, value: "0001111", style: "opcode", range: [6, 0] },
+    ];
+    document.getElementById("fence-bitfield").innerHTML = fields.map((field) =>
+      '<div class="field ' + field.style + '" style="flex-grow:' + field.bits + '"><div class="range"><span>' + field.range[0] + "</span><span>" + field.range[1] + '</span></div><div class="name">' + field.name + '</div><div class="value">' + field.value + "</div></div>").join("");
+    drawDiagram(classification);
+  }
+
+  const modeControl = book.segmented("fence-mode", (value) => { fenceMode = Number(value); render(); });
+  document.querySelectorAll("[data-fence-preset]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const parts = button.dataset.fencePreset.split("|").map(Number);
+      predecessorSet = parts[1];
+      successorSet = parts[2];
+      modeControl.set(String(parts[0]));
+    });
+  });
+  render();
+})();
+
+/* ---------------------------------------------------------------------------
+   리트머스 테스트 탐색기
+   - SC: 모든 끼워 넣기를 나열한다.
+   - TSO: 하트마다 FIFO 저장 버퍼를 둔 동작 모델의 모든 상태를 탐색한다.
+   - RVWMO: 하트 안의 두 연산이 PPO 로 묶이는지 판단하고, 그 제약을 지키는
+     모든 전역 메모리 순서를 나열한 뒤 Load Value 공리로 load 값을 정한다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const Riscv = window.Riscv;
+
+  const LITMUS_TESTS = {
+    mp: {
+      title: "MP",
+      harts: [
+        [{ kind: "store", address: "x", value: 1, label: "a" }, { kind: "store", address: "y", value: 1, label: "b" }],
+        [{ kind: "load", address: "y", register: "r1", label: "c" }, { kind: "load", address: "x", register: "r2", label: "d" }],
+      ],
+      observed: [{ name: "r1", domain: [0, 1] }, { name: "r2", domain: [0, 1] }],
+      interesting: { r1: 1, r2: 0 },
+      defaults: ["none", "none"],
+    },
+    sb: {
+      title: "SB",
+      harts: [
+        [{ kind: "store", address: "x", value: 1, label: "a" }, { kind: "load", address: "y", register: "r1", label: "b" }],
+        [{ kind: "store", address: "y", value: 1, label: "c" }, { kind: "load", address: "x", register: "r2", label: "d" }],
+      ],
+      observed: [{ name: "r1", domain: [0, 1] }, { name: "r2", domain: [0, 1] }],
+      interesting: { r1: 0, r2: 0 },
+      defaults: ["none", "none"],
+    },
+    lb: {
+      title: "LB",
+      harts: [
+        [{ kind: "load", address: "x", register: "r1", label: "a" }, { kind: "store", address: "y", value: 1, label: "b" }],
+        [{ kind: "load", address: "y", register: "r2", label: "c" }, { kind: "store", address: "x", value: 1, label: "d" }],
+      ],
+      observed: [{ name: "r1", domain: [0, 1] }, { name: "r2", domain: [0, 1] }],
+      interesting: { r1: 1, r2: 1 },
+      defaults: ["none", "none"],
+    },
+    twoPlusTwoWrites: {
+      title: "2+2W",
+      harts: [
+        [{ kind: "store", address: "x", value: 1, label: "a" }, { kind: "store", address: "y", value: 2, label: "b" }],
+        [{ kind: "store", address: "y", value: 1, label: "c" }, { kind: "store", address: "x", value: 2, label: "d" }],
+      ],
+      observed: [{ name: "x", domain: [1, 2] }, { name: "y", domain: [1, 2] }],
+      interesting: { x: 1, y: 1 },
+      defaults: ["none", "none"],
+    },
+  };
+
+  // 각 하트의 두 연산 사이에 넣을 수 있는 것. pred/succ 는 "R"/"W" 의 조합.
+  const ORDERING_OPTIONS = {
+    none: { label: "없음" },
+    fenceRwRw: { label: "fence rw,rw", pred: "RW", succ: "RW" },
+    fenceRRw: { label: "fence r,rw", pred: "R", succ: "RW" },
+    fenceRwW: { label: "fence rw,w", pred: "RW", succ: "W" },
+    fenceWW: { label: "fence w,w", pred: "W", succ: "W" },
+    fenceRR: { label: "fence r,r", pred: "R", succ: "R" },
+    fenceWR: { label: "fence w,r", pred: "W", succ: "R" },
+    fenceTso: { label: "fence.tso", isTso: true },
+    addressDependency: { label: "주소 의존성 (addr)", needsFirstLoad: true },
+    dataDependency: { label: "데이터 의존성 (data)", needsFirstLoad: true, needsSecondStore: true },
+    controlDependency: { label: "제어 의존성 (ctrl)", needsFirstLoad: true },
+    acquire: { label: "첫 load 에 .aq (Zalasr)", needsFirstLoad: true },
+    release: { label: "둘째 store 에 .rl (Zalasr)", needsSecondStore: true },
+  };
+  const ADDRESS_REGISTERS = { x: "s0", y: "s1" };
+  const LOAD_DESTINATIONS = { r1: "a0", r2: "a1" };
+  const VALUE_REGISTERS = { 1: "t1", 2: "t3" };
+  const INITIAL_MEMORY = { x: 0, y: 0 };
+
+  const kindLetter = (operation) => (operation.kind === "load" ? "R" : "W");
+
+  function optionsForHart(hartOperations) {
+    const isFirstLoad = hartOperations[0].kind === "load";
+    const isSecondStore = hartOperations[1].kind === "store";
+    return Object.keys(ORDERING_OPTIONS).filter((key) => {
+      const option = ORDERING_OPTIONS[key];
+      if (option.needsFirstLoad && !isFirstLoad) return false;
+      if (option.needsSecondStore && !isSecondStore) return false;
+      return true;
+    });
+  }
+
+  /* RVWMO: first → second 가 PPO 규칙(1, 4, 5, 6, 9, 10, 11)으로 묶이는가 */
+  function isPreservedUnderRvwmo(first, second, optionKey) {
+    const option = ORDERING_OPTIONS[optionKey];
+    if (second.kind === "store" && first.address === second.address) return true; // 규칙 1
+    if (option.pred && option.pred.includes(kindLetter(first)) && option.succ.includes(kindLetter(second))) return true; // 규칙 4
+    if (option.isTso) {
+      if (first.kind === "load") return true;
+      if (first.kind === "store" && second.kind === "store") return true;
+    }
+    if (optionKey === "acquire" || optionKey === "release") return true; // 규칙 5·6
+    if (optionKey === "addressDependency" || optionKey === "dataDependency") return true; // 규칙 9·10
+    if (optionKey === "controlDependency" && second.kind === "store") return true; // 규칙 11
+    return false;
+  }
+
+  /* TSO 에서 store → load 를 막는 것은 W 를 pred 에, R 을 succ 에 가진 FENCE 뿐이다 */
+  function drainsStoreBufferUnderTso(optionKey) {
+    const option = ORDERING_OPTIONS[optionKey];
+    return Boolean(option.pred && option.pred.includes("W") && option.succ.includes("R"));
+  }
+
+  const outcomeKey = (test, values) => test.observed.map((variable) => variable.name + "=" + values[variable.name]).join(", ");
+  function recordOutcome(test, outcomes, values, trace) {
+    const key = outcomeKey(test, values);
+    if (!outcomes.has(key)) outcomes.set(key, trace);
+  }
+
+  function enumerateSequential(test) {
+    const outcomes = new Map();
+    function explore(positions, memory, registers, trace) {
+      let isFinished = true;
+      test.harts.forEach((operations, hartIndex) => {
+        const position = positions[hartIndex];
+        if (position >= operations.length) return;
+        isFinished = false;
+        const operation = operations[position];
+        const nextPositions = positions.slice();
+        nextPositions[hartIndex] += 1;
+        const nextMemory = Object.assign({}, memory);
+        const nextRegisters = Object.assign({}, registers);
+        let event;
+        if (operation.kind === "store") {
+          nextMemory[operation.address] = operation.value;
+          event = "하트 " + hartIndex + "  (" + operation.label + ") " + operation.address + " = " + operation.value + "  → 메모리";
+        } else {
+          nextRegisters[operation.register] = memory[operation.address];
+          event = "하트 " + hartIndex + "  (" + operation.label + ") " + operation.register + " = " + operation.address + "  → " + memory[operation.address];
+        }
+        explore(nextPositions, nextMemory, nextRegisters, trace.concat([event]));
+      });
+      if (isFinished) recordOutcome(test, outcomes, Object.assign({}, registers, memory), trace);
+    }
+    explore(test.harts.map(() => 0), Object.assign({}, INITIAL_MEMORY), {}, []);
+    return outcomes;
+  }
+
+  function cloneState(state) {
+    return {
+      positions: state.positions.slice(),
+      buffers: state.buffers.map((buffer) => buffer.map((entry) => Object.assign({}, entry))),
+      memory: Object.assign({}, state.memory),
+      registers: Object.assign({}, state.registers),
+    };
+  }
+  function newestBufferedValue(buffer, address) {
+    for (let index = buffer.length - 1; index >= 0; index -= 1) {
+      if (buffer[index].address === address) return buffer[index].value;
+    }
+    return null;
+  }
+
+  function enumerateTso(test, optionKeys) {
+    const outcomes = new Map();
+    const programs = test.harts.map((operations, hartIndex) => {
+      const program = [operations[0]];
+      if (drainsStoreBufferUnderTso(optionKeys[hartIndex])) program.push({ kind: "fence", label: ORDERING_OPTIONS[optionKeys[hartIndex]].label });
+      program.push(operations[1]);
+      return program;
+    });
+    function explore(state, trace) {
+      let isFinished = true;
+      programs.forEach((program, hartIndex) => {
+        const position = state.positions[hartIndex];
+        const buffer = state.buffers[hartIndex];
+        if (position < program.length) {
+          isFinished = false;
+          const operation = program[position];
+          // FENCE(W→R)는 자기 저장 버퍼가 비어야 지나갈 수 있다
+          const canExecute = operation.kind !== "fence" || buffer.length === 0;
+          if (canExecute) {
+            const next = cloneState(state);
+            next.positions[hartIndex] += 1;
+            let event;
+            if (operation.kind === "store") {
+              next.buffers[hartIndex].push({ address: operation.address, value: operation.value });
+              event = "하트 " + hartIndex + "  (" + operation.label + ") " + operation.address + " = " + operation.value + "  → 저장 버퍼";
+            } else if (operation.kind === "load") {
+              const forwarded = newestBufferedValue(buffer, operation.address);
+              const value = forwarded !== null ? forwarded : state.memory[operation.address];
+              next.registers[operation.register] = value;
+              event = "하트 " + hartIndex + "  (" + operation.label + ") " + operation.register + " = " + operation.address + "  → " + value + (forwarded !== null ? " (버퍼에서 전달)" : "");
+            } else {
+              event = "하트 " + hartIndex + "  " + operation.label + " 통과 (버퍼 비어 있음)";
+            }
+            explore(next, trace.concat([event]));
+          }
+        }
+        if (buffer.length > 0) {
+          isFinished = false;
+          const next = cloneState(state);
+          const drained = next.buffers[hartIndex].shift();
+          next.memory[drained.address] = drained.value;
+          explore(next, trace.concat(["하트 " + hartIndex + "  버퍼 → 메모리: " + drained.address + " = " + drained.value]));
+        }
+      });
+      if (isFinished) recordOutcome(test, outcomes, Object.assign({}, state.registers, state.memory), trace);
+    }
+    explore({ positions: test.harts.map(() => 0), buffers: test.harts.map(() => []), memory: Object.assign({}, INITIAL_MEMORY), registers: {} }, []);
+    return outcomes;
+  }
+
+  function enumerateRvwmo(test, optionKeys) {
+    const outcomes = new Map();
+    const operations = [];
+    test.harts.forEach((hartOperations, hartIndex) => {
+      hartOperations.forEach((operation, programIndex) => operations.push(Object.assign({ hart: hartIndex, programIndex }, operation)));
+    });
+    const mustPrecede = operations.map(() => []);
+    operations.forEach((first, firstIndex) => {
+      operations.forEach((second, secondIndex) => {
+        if (first.hart !== second.hart || first.programIndex >= second.programIndex) return;
+        if (isPreservedUnderRvwmo(first, second, optionKeys[first.hart])) mustPrecede[secondIndex].push(firstIndex);
+      });
+    });
+    function evaluate(order) {
+      const values = {};
+      const position = {};
+      order.forEach((operationIndex, orderIndex) => { position[operationIndex] = orderIndex; });
+      const trace = [];
+      order.forEach((operationIndex, orderIndex) => {
+        const operation = operations[operationIndex];
+        const prefix = (orderIndex + 1) + ". 하트 " + operation.hart + "  (" + operation.label + ") ";
+        if (operation.kind === "store") {
+          trace.push(prefix + operation.address + " = " + operation.value);
+          return;
+        }
+        // Load Value 공리: 전역 순서상 앞선 store ∪ 프로그램 순서상 앞선 store 가운데 전역 순서가 가장 늦은 것
+        let chosenIndex = -1;
+        operations.forEach((candidate, candidateIndex) => {
+          if (candidate.kind !== "store" || candidate.address !== operation.address) return;
+          const isBeforeGlobally = position[candidateIndex] < position[operationIndex];
+          const isBeforeInProgram = candidate.hart === operation.hart && candidate.programIndex < operation.programIndex;
+          if (!isBeforeGlobally && !isBeforeInProgram) return;
+          if (chosenIndex < 0 || position[candidateIndex] > position[chosenIndex]) chosenIndex = candidateIndex;
+        });
+        const value = chosenIndex < 0 ? INITIAL_MEMORY[operation.address] : operations[chosenIndex].value;
+        values[operation.register] = value;
+        trace.push(prefix + operation.register + " = " + operation.address + "  → " + value);
+      });
+      Object.keys(INITIAL_MEMORY).forEach((address) => {
+        let finalValue = INITIAL_MEMORY[address];
+        order.forEach((operationIndex) => {
+          const operation = operations[operationIndex];
+          if (operation.kind === "store" && operation.address === address) finalValue = operation.value;
+        });
+        values[address] = finalValue;
+      });
+      recordOutcome(test, outcomes, values, trace);
+    }
+    function explore(order, used) {
+      if (order.length === operations.length) { evaluate(order); return; }
+      operations.forEach((operation, index) => {
+        if (used[index]) return;
+        if (!mustPrecede[index].every((required) => used[required])) return;
+        used[index] = true;
+        explore(order.concat([index]), used);
+        used[index] = false;
+      });
+    }
+    explore([], operations.map(() => false));
+    return outcomes;
+  }
+
+  function allOutcomeRows(test) {
+    let rows = [{}];
+    test.observed.forEach((variable) => {
+      const nextRows = [];
+      rows.forEach((row) => variable.domain.forEach((value) => nextRows.push(Object.assign({}, row, { [variable.name]: value }))));
+      rows = nextRows;
+    });
+    return rows;
+  }
+
+  /* ---------- 어셈블리 코드 만들기 ---------- */
+  function operationAssembly(operation, optionKey, isSecond, dependencyRegister) {
+    const comment = "# (" + operation.label + ") ";
+    if (operation.kind === "store") {
+      const valueRegister = optionKey === "dataDependency" && isSecond ? "t2" : VALUE_REGISTERS[operation.value];
+      const mnemonic = optionKey === "release" && isSecond ? "sw.rl " + valueRegister + ", (" + ADDRESS_REGISTERS[operation.address] + ")" : "sw   " + valueRegister + ", 0(" + ADDRESS_REGISTERS[operation.address] + ")";
+      return mnemonic.padEnd(20, " ") + comment + operation.address + " = " + operation.value;
+    }
+    const destination = LOAD_DESTINATIONS[operation.register];
+    let mnemonic = "lw   " + destination + ", 0(" + ADDRESS_REGISTERS[operation.address] + ")";
+    if (optionKey === "acquire" && !isSecond) mnemonic = "lw.aq " + destination + ", (" + ADDRESS_REGISTERS[operation.address] + ")";
+    if (optionKey === "addressDependency" && isSecond) mnemonic = "lw   " + destination + ", 0(" + dependencyRegister + ")";
+    return mnemonic.padEnd(20, " ") + comment + operation.register + " = " + operation.address;
+  }
+
+  function hartAssembly(operations, optionKey) {
+    const lines = [];
+    const values = new Set(operations.filter((operation) => operation.kind === "store").map((operation) => operation.value));
+    values.forEach((value) => lines.push(("li   " + VALUE_REGISTERS[value] + ", " + value).padEnd(20, " ") + "# 쓸 값"));
+    lines.push(operationAssembly(operations[0], optionKey, false));
+    const firstDestination = operations[0].kind === "load" ? LOAD_DESTINATIONS[operations[0].register] : null;
+    const option = ORDERING_OPTIONS[optionKey];
+    if (option.pred || option.isTso) lines.push(option.label);
+    if (optionKey === "addressDependency") {
+      lines.push(("xor  t2, " + firstDestination + ", " + firstDestination).padEnd(20, " ") + "# 늘 0이지만 의존성");
+      lines.push(("add  t2, " + ADDRESS_REGISTERS[operations[1].address] + ", t2").padEnd(20, " ") + "# 주소 = 기준 + 0");
+    }
+    if (optionKey === "dataDependency") {
+      lines.push(("xor  t2, " + firstDestination + ", " + firstDestination).padEnd(20, " ") + "# 늘 0이지만 의존성");
+      lines.push(("addi t2, t2, " + operations[1].value).padEnd(20, " ") + "# 쓸 값 = 0 + " + operations[1].value);
+    }
+    if (optionKey === "controlDependency") {
+      lines.push(("bnez " + firstDestination + ", next").padEnd(20, " ") + "# 어느 쪽이든 next");
+      lines.push("next:");
+    }
+    lines.push(operationAssembly(operations[1], optionKey, true, "t2"));
+    return lines.join("\n");
+  }
+
+  /* ---------- 화면 ---------- */
+  let testKey = "mp";
+  let modelKey = "rvwmo";
+  let optionKeys = ["none", "none"];
+  const selects = [document.getElementById("litmus-option-0"), document.getElementById("litmus-option-1")];
+  const MODEL_NAMES = { sc: "SC", tso: "TSO", rvwmo: "RVWMO" };
+
+  function fillSelects() {
+    const test = LITMUS_TESTS[testKey];
+    selects.forEach((select, hartIndex) => {
+      select.innerHTML = optionsForHart(test.harts[hartIndex]).map((key) => '<option value="' + key + '">' + ORDERING_OPTIONS[key].label + "</option>").join("");
+      select.value = test.defaults[hartIndex];
+    });
+    optionKeys = test.defaults.slice();
+  }
+
+  function render() {
+    const test = LITMUS_TESTS[testKey];
+    test.harts.forEach((operations, hartIndex) => {
+      document.getElementById("litmus-code-" + hartIndex).innerHTML = Riscv.highlightAssembly(hartAssembly(operations, optionKeys[hartIndex]));
+    });
+    const results = {
+      sc: enumerateSequential(test),
+      tso: enumerateTso(test, optionKeys),
+      rvwmo: enumerateRvwmo(test, optionKeys),
+    };
+    const interestingKey = outcomeKey(test, test.interesting);
+    const rows = allOutcomeRows(test);
+    let tableHtml = "<thead><tr><th>결과</th>" + Object.keys(MODEL_NAMES).map((key) =>
+      '<th class="' + (key === modelKey ? "selected-model" : "") + '">' + MODEL_NAMES[key] + "</th>").join("") + "</tr></thead><tbody>";
+    rows.forEach((row) => {
+      const key = outcomeKey(test, row);
+      tableHtml += '<tr class="' + (key === interestingKey ? "interesting" : "") + '"><td>' + key + (key === interestingKey ? " ★" : "") + "</td>";
+      Object.keys(MODEL_NAMES).forEach((model) => {
+        const isAllowed = results[model].has(key);
+        tableHtml += '<td class="' + (isAllowed ? "allowed" : "forbidden") + (model === modelKey ? " selected-model" : "") + '">' + (isAllowed ? "✓ 허용" : "✕") + "</td>";
+      });
+      tableHtml += "</tr>";
+    });
+    document.getElementById("litmus-table").innerHTML = tableHtml + "</tbody>";
+    document.getElementById("litmus-interesting").textContent = interestingKey;
+    Object.keys(MODEL_NAMES).forEach((model) => {
+      document.getElementById("litmus-verdict-" + model).textContent = results[model].has(interestingKey) ? "✓ 허용" : "✕ 금지";
+    });
+    const witness = results[modelKey].get(interestingKey);
+    const witnessTitle = document.getElementById("litmus-witness-title");
+    const witnessBox = document.getElementById("litmus-witness");
+    if (witness) {
+      witnessTitle.textContent = MODEL_NAMES[modelKey] + "에서 ★ 결과(" + interestingKey + ")가 나오는 실행의 예" + (modelKey === "rvwmo" ? " — 전역 메모리 순서" : " — 사건 순서");
+      witnessBox.textContent = witness.join("\n");
+    } else {
+      witnessTitle.textContent = MODEL_NAMES[modelKey] + "에서 ★ 결과(" + interestingKey + ")는 불가능하다";
+      let reason = "가능한 모든 실행을 나열했지만 이 결과를 만드는 실행이 없다.";
+      if (modelKey === "rvwmo") reason += "\n각 하트에서 PPO 로 묶인 쌍:";
+      if (modelKey === "rvwmo") {
+        test.harts.forEach((operations, hartIndex) => {
+          const isOrdered = isPreservedUnderRvwmo(operations[0], operations[1], optionKeys[hartIndex]);
+          reason += "\n  하트 " + hartIndex + ": (" + operations[0].label + ") → (" + operations[1].label + ") " + (isOrdered ? "묶임" : "묶이지 않음");
+        });
+      }
+      witnessBox.textContent = reason;
+    }
+  }
+
+  selects.forEach((select, hartIndex) => select.addEventListener("change", () => { optionKeys[hartIndex] = select.value; render(); }));
+  book.segmented("litmus-test", (value) => { testKey = value; fillSelects(); render(); });
+  book.segmented("litmus-model", (value) => { modelKey = value; render(); });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,1826 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>14 B 확장과 스칼라 암호 · RISC-V Book</title>
+<meta name="description" content="B 확장(Zba·Zbb·Zbs)과 Zbc의 비트 조작 명령, orc.b를 이용한 strlen, 캐리 없는 곱셈, 그리고 AES·SHA-2·SM4·SM3·엔트로피 소스·상수 시간 보장을 담은 Zk 스칼라 암호 확장을 그림과 시뮬레이터로 살펴본다.">
+<link rel="icon" href="../assets/img/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/style.css">
+<script src="../assets/js/book.js"></script>
+<style>
+  /* ---------- 비트 놀이터 ---------- */
+  .playground-operand { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; margin: 0 0 14px; }
+  .playground-operand .operand-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; font-size: 14px; color: var(--text-dim); }
+  .playground-operand .operand-head b { color: var(--text); font-family: var(--mono); }
+  .playground-operand .operand-head input { font-family: var(--mono); font-size: 14px; width: 9.5em; color: var(--text); background: var(--canvas-bg); border: 1px solid var(--border); border-radius: 8px; padding: 4px 8px; }
+  .playground-operand.is-unused { opacity: 0.4; }
+  .byte-groups { display: flex; flex-wrap: wrap; gap: 6px 12px; justify-content: center; }
+  .byte-group { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+  .byte-group .byte-range { font-family: var(--mono); font-size: 10.5px; color: var(--text-faint); }
+  .byte-group .bit-row { gap: 2px; flex-wrap: nowrap; }
+  .byte-group .bit { width: 19px; height: 26px; font-size: 12.5px; border-radius: 5px; }
+  @media (max-width: 520px) {
+    .byte-groups { gap: 6px 8px; }
+    .byte-group .bit { width: 16px; height: 24px; font-size: 11px; border-radius: 4px; }
+  }
+  .bit.result-bit { cursor: default; }
+  .bit.result-bit.differs { box-shadow: inset 0 0 0 2px var(--accent-2); }
+  .bit.flip { animation: bit-flip 0.42s ease both; }
+  @keyframes bit-flip { 0% { transform: rotateX(90deg); opacity: 0.2; } 100% { transform: none; opacity: 1; } }
+  @media (prefers-reduced-motion: reduce) { .bit.flip { animation: none; } }
+  .operation-formula { font-family: var(--mono); font-size: 14px; padding: 8px 12px; margin: 4px 0 14px; border-radius: 8px; background: var(--accent-soft); color: var(--accent); text-align: center; overflow-wrap: anywhere; }
+  .control select { max-width: 100%; }
+
+  /* ---------- Zba 비교 ---------- */
+  .zba-layout { display: grid; gap: 12px; grid-template-columns: minmax(0, 1fr); }
+  @media (min-width: 700px) { .zba-layout { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
+  .zba-layout h4 { margin: 0 0 4px; font-size: 14px; color: var(--text-dim); }
+  .zba-layout .codebox { margin: 0; font-size: 13px; min-height: 120px; }
+  .zba-memory { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 4px; margin: 6px 0 6px; }
+  @media (max-width: 520px) { .zba-memory { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+  .zba-memory-title { font-size: 12.5px; color: var(--text-faint); margin: 16px 0 0; }
+  .zba-memory .cell { text-align: center; padding: 5px 2px; }
+  .zba-memory .cell .cell-name { justify-content: center; font-size: 10px; }
+  .zba-memory .cell .cell-value { font-size: 12px; }
+  .zba-bars { display: grid; gap: 8px; margin-top: 12px; }
+  .zba-bar { display: grid; grid-template-columns: 92px minmax(0, 1fr); align-items: center; gap: 8px; font-size: 13px; color: var(--text-dim); }
+  .zba-bar .track { height: 22px; border-radius: 6px; background: var(--surface); overflow: hidden; }
+  .zba-bar .fill { height: 100%; border-radius: 6px; transition: width 0.5s ease; display: flex; align-items: center; padding-left: 8px; font-family: var(--mono); font-size: 12px; color: var(--on-accent); white-space: nowrap; }
+  .zba-bar .fill.base { background: var(--text-faint); }
+  .zba-bar .fill.fast { background: var(--accent); }
+
+  /* ---------- 캐리 없는 곱셈 ---------- */
+  .multiply-panels { display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr); }
+  @media (min-width: 760px) { .multiply-panels { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
+  .multiply-panel h4 { margin: 0 0 6px; font-size: 14.5px; }
+  .multiply-grid { display: grid; grid-template-columns: 58px repeat(16, minmax(0, 1fr)); font-family: var(--mono); font-size: 12px; row-gap: 2px; }
+  .multiply-grid span { text-align: center; padding: 2px 0; border-radius: 3px; }
+  .multiply-grid .row-label { text-align: right; padding-right: 6px; color: var(--text-faint); font-size: 10.5px; white-space: nowrap; overflow: hidden; }
+  .multiply-grid .one { color: var(--text); font-weight: 700; }
+  .multiply-grid .zero { color: var(--text-faint); }
+  .multiply-grid .blank { color: transparent; }
+  .multiply-grid .faded { opacity: 0.3; }
+  .multiply-grid .rule { grid-column: 1 / -1; height: 1px; background: var(--border); margin: 3px 0; padding: 0; }
+  .multiply-grid .result { background: var(--surface); }
+  .multiply-grid .result.carry-differs { background: var(--accent-2-soft); color: var(--accent-2); }
+  .multiply-grid .latest { background: var(--accent-soft); }
+  .operand-bits { display: flex; flex-wrap: wrap; gap: 14px 24px; justify-content: center; margin-bottom: 14px; }
+  .operand-bits .label { font-size: 13px; color: var(--text-dim); text-align: center; margin-bottom: 4px; }
+  .operand-bits .bit { width: 24px; height: 30px; }
+</style>
+</head>
+<body data-chapter="bit-manipulation">
+<main class="chapter">
+  <header class="chapter-hero">
+    <div class="eyebrow">Chapter 14</div>
+    <h1>B 확장과 스칼라 암호</h1>
+    <p class="lead">기본 정수 ISA만으로도 모든 계산을 할 수 있다. 하지만 “비트를 한 칸 돌리기”, “1인 비트 세기”, “바이트 순서 뒤집기”처럼 흔한 일에 명령이 네다섯 개씩 들고, 앞쪽 0의 개수 세기는 루프까지 돌아야 한다. <strong>B 확장은 이런 자잘한 비트 작업을 명령 하나로 줄인다.</strong> 그 위에 <strong>스칼라 암호 확장(Zk*)</strong>은 AES·SHA-2·SM4·SM3의 핵심 단계를 하드웨어로 옮기고, 실행 시간이 비밀 데이터에 따라 달라지지 않는다는 약속까지 규격에 담았다. 이 장에서는 비트를 직접 눌러 보며 이 명령들을 하나씩 익힌다.</p>
+    <ul class="objectives">
+      <li>B = Zba + Zbb + Zbs 라는 구성과, B에 들어가지 않는 Zbc·Zbk* 의 관계를 안다.</li>
+      <li><code>sh2add</code>·<code>add.uw</code> 같은 Zba 명령이 배열 주소 계산을 어떻게 줄이는지 명령 수로 비교한다.</li>
+      <li>Zbb 의 clz·ctz·cpop·rol·ror·rev8·orc.b·min·max 와 Zbs 의 단일 비트 명령을 비트 단위로 계산한다.</li>
+      <li><code>orc.b</code>로 문자열의 끝(NUL 바이트)을 한 번에 여러 바이트씩 찾는 원리를 따라간다.</li>
+      <li>캐리 없는 곱셈(clmul)이 보통 곱셈과 어떻게 다르고 CRC·GCM에 왜 쓰이는지 설명한다.</li>
+      <li>Zkn·Zks·Zk 묶음, AES·SHA-2 보조 명령, <code>seed</code> CSR(Zkr), 상수 시간 보장(Zkt)의 뜻을 안다.</li>
+    </ul>
+    <div class="spec-meta">
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/unpriv/b-st-ext.html" target="_blank" rel="noopener">Unprivileged · Bit Manipulation (B)</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/unpriv/bitmanip-examples.html" target="_blank" rel="noopener">Bitmanip Code Examples</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/unpriv/scalar-crypto.html" target="_blank" rel="noopener">Scalar Cryptography (Zk*)</a>
+    </div>
+  </header>
+
+  <!-- ============================================================ -->
+  <section id="why-bitmanip">
+    <h2>왜 비트 조작 명령이 따로 필요한가</h2>
+    <p>RV32I 에는 AND·OR·XOR 과 세 가지 시프트가 있다. 이것만 있으면 원리상 어떤 비트 연산이든 만들 수 있다. 문제는 <b>비용</b>이다. 32비트 값을 오른쪽으로 회전하려면 “반대 방향 시프트 양 구하기 → 왼쪽 시프트 → 오른쪽 시프트 → OR” 네 명령이 필요하고, 맨 위에서부터 0이 몇 개인지 세려면 루프를 돌거나 수십 개의 명령을 써야 한다. 컴파일러, 표준 라이브러리, 압축·암호·해시 코드, 운영체제의 비트맵 할당기에서 이런 패턴은 끝없이 반복된다.</p>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>하고 싶은 일</th><th>기본 정수 ISA로는</th><th>비트 조작 확장으로는</th></tr></thead>
+      <tbody>
+        <tr><td>a AND (NOT b)</td><td><code>not</code> + <code>and</code> (2개)</td><td><code>andn</code> (1개, Zbb)</td></tr>
+        <tr><td>32비트 오른쪽 회전</td><td><code>neg</code> + <code>sll</code> + <code>srl</code> + <code>or</code> (4개)</td><td><code>ror</code> (1개, Zbb)</td></tr>
+        <tr><td>16비트 값 0 확장</td><td><code>slli</code> + <code>srli</code> (2개)</td><td><code>zext.h</code> (1개, Zbb)</td></tr>
+        <tr><td>앞쪽 0 개수 세기</td><td>루프 또는 이분 탐색 (10개 이상)</td><td><code>clz</code> (1개, Zbb)</td></tr>
+        <tr><td>1인 비트 개수</td><td>비트 트릭 10여 개 + 상수 적재</td><td><code>cpop</code> (1개, Zbb)</td></tr>
+        <tr><td>배열 주소 base + i×4</td><td><code>slli</code> + <code>add</code> (2개)</td><td><code>sh2add</code> (1개, Zba)</td></tr>
+        <tr><td>k번째 비트 세우기</td><td><code>li</code> + <code>sll</code> + <code>or</code> (3개)</td><td><code>bset</code> (1개, Zbs)</td></tr>
+        <tr><td>GF(2) 다항식 곱셈</td><td>비트마다 시프트·XOR 루프 (100개 안팎)</td><td><code>clmul</code> + <code>clmulh</code> (Zbc)</td></tr>
+      </tbody>
+    </table></div>
+    <p>그래서 RISC-V 는 비트 조작 명령을 용도별로 작은 확장 여러 개로 나눴다. 하나의 거대한 “B”를 만들려던 초안은 여러 해 논의 끝에 2021년, 꼭 필요한 것만 추린 네 확장(Zba·Zbb·Zbc·Zbs)으로 비준되었다. 같은 시기에 암호용 확장(Zbkb·Zbkc·Zbkx·Zk*)도 비준되었는데, 일부 명령은 두 쪽에 동시에 들어 있다. 명령의 인코딩은 어느 확장에서 오든 하나뿐이어서, 두 확장을 함께 구현해도 하드웨어가 겹치지 않는다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 400" role="img" aria-label="비트 조작 확장과 스칼라 암호 확장의 지도">
+        <rect x="20" y="20" width="490" height="190" rx="16" class="f-accent-soft"/>
+        <text x="40" y="48" class="t-accent">B 확장 v1.0.0 = Zba + Zbb + Zbs</text>
+        <g>
+          <rect x="40" y="66" width="140" height="124" rx="12" class="f-elev"/>
+          <text x="110" y="92" text-anchor="middle" class="t t-bold" style="font-size:16px">Zba</text>
+          <text x="110" y="114" text-anchor="middle" class="t-dim">주소 계산</text>
+          <text x="110" y="140" text-anchor="middle" class="t-mono" style="font-size:12px">sh1add · sh2add</text>
+          <text x="110" y="158" text-anchor="middle" class="t-mono" style="font-size:12px">sh3add · add.uw</text>
+          <text x="110" y="176" text-anchor="middle" class="t-faint">slli.uw (RV64)</text>
+        </g>
+        <g>
+          <rect x="196" y="66" width="150" height="124" rx="12" class="f-elev"/>
+          <text x="271" y="92" text-anchor="middle" class="t t-bold" style="font-size:16px">Zbb</text>
+          <text x="271" y="114" text-anchor="middle" class="t-dim">기본 비트 조작</text>
+          <text x="271" y="140" text-anchor="middle" class="t-mono" style="font-size:12px">clz · ctz · cpop</text>
+          <text x="271" y="158" text-anchor="middle" class="t-mono" style="font-size:12px">rol · ror · rev8</text>
+          <text x="271" y="176" text-anchor="middle" class="t-mono" style="font-size:12px">orc.b · min · max</text>
+        </g>
+        <g>
+          <rect x="362" y="66" width="130" height="124" rx="12" class="f-elev"/>
+          <text x="427" y="92" text-anchor="middle" class="t t-bold" style="font-size:16px">Zbs</text>
+          <text x="427" y="114" text-anchor="middle" class="t-dim">단일 비트</text>
+          <text x="427" y="140" text-anchor="middle" class="t-mono" style="font-size:12px">bset · bclr</text>
+          <text x="427" y="158" text-anchor="middle" class="t-mono" style="font-size:12px">binv · bext</text>
+          <text x="427" y="176" text-anchor="middle" class="t-faint">+ 즉시값 형식</text>
+        </g>
+        <g>
+          <rect x="540" y="66" width="150" height="124" rx="12" class="f-teal-soft"/>
+          <text x="615" y="92" text-anchor="middle" class="t t-bold" style="font-size:16px">Zbc</text>
+          <text x="615" y="114" text-anchor="middle" class="t-dim">캐리 없는 곱셈</text>
+          <text x="615" y="140" text-anchor="middle" class="t-mono" style="font-size:12px">clmul · clmulh</text>
+          <text x="615" y="158" text-anchor="middle" class="t-mono" style="font-size:12px">clmulr</text>
+          <text x="615" y="176" text-anchor="middle" class="t-faint">B에 포함되지 않음</text>
+        </g>
+        <g>
+          <rect x="710" y="66" width="138" height="124" rx="12" class="f-surface"/>
+          <text x="779" y="92" text-anchor="middle" class="t t-bold">이름 규칙</text>
+          <text x="779" y="120" text-anchor="middle" class="t-dim">Zb* · 비트 조작</text>
+          <text x="779" y="144" text-anchor="middle" class="t-dim">Zk* · 암호</text>
+          <text x="779" y="168" text-anchor="middle" class="t-dim">Zbk* · 암호용 비트</text>
+        </g>
+        <!-- 공유 관계 -->
+        <path d="M271 190 V218 H93 V290" class="s-gold s-dashed"/>
+        <path d="M615 190 V228 H209 V290" class="s-accent s-dashed"/>
+        <text x="430" y="245" text-anchor="middle" class="t-faint">점선: 같은 명령을 공유한다</text>
+        <rect x="20" y="250" width="828" height="136" rx="16" class="f-gold-soft"/>
+        <text x="830" y="274" text-anchor="end" class="t-gold">스칼라 암호 Zk* v1.0.1</text>
+        <g>
+          <rect x="40" y="290" width="106" height="80" rx="10" class="f-elev"/>
+          <text x="93" y="314" text-anchor="middle" class="t t-bold">Zbkb</text>
+          <text x="93" y="336" text-anchor="middle" class="t-mono" style="font-size:12px">pack · zip</text>
+          <text x="93" y="356" text-anchor="middle" class="t-mono" style="font-size:12px">brev8 · ror</text>
+          <rect x="156" y="290" width="106" height="80" rx="10" class="f-elev"/>
+          <text x="209" y="314" text-anchor="middle" class="t t-bold">Zbkc</text>
+          <text x="209" y="336" text-anchor="middle" class="t-mono" style="font-size:12px">clmul</text>
+          <text x="209" y="356" text-anchor="middle" class="t-mono" style="font-size:12px">clmulh</text>
+          <rect x="272" y="290" width="106" height="80" rx="10" class="f-elev"/>
+          <text x="325" y="314" text-anchor="middle" class="t t-bold">Zbkx</text>
+          <text x="325" y="336" text-anchor="middle" class="t-mono" style="font-size:12px">xperm4</text>
+          <text x="325" y="356" text-anchor="middle" class="t-mono" style="font-size:12px">xperm8</text>
+          <rect x="388" y="290" width="120" height="80" rx="10" class="f-elev"/>
+          <text x="448" y="314" text-anchor="middle" class="t t-bold">Zkne · Zknd</text>
+          <text x="448" y="336" text-anchor="middle" class="t-dim">AES 암호화</text>
+          <text x="448" y="356" text-anchor="middle" class="t-dim">AES 복호화</text>
+          <rect x="518" y="290" width="96" height="80" rx="10" class="f-elev"/>
+          <text x="566" y="314" text-anchor="middle" class="t t-bold">Zknh</text>
+          <text x="566" y="336" text-anchor="middle" class="t-dim">SHA-256</text>
+          <text x="566" y="356" text-anchor="middle" class="t-dim">SHA-512</text>
+          <rect x="624" y="290" width="110" height="80" rx="10" class="f-elev"/>
+          <text x="679" y="314" text-anchor="middle" class="t t-bold">Zksed · Zksh</text>
+          <text x="679" y="336" text-anchor="middle" class="t-dim">SM4 블록 암호</text>
+          <text x="679" y="356" text-anchor="middle" class="t-dim">SM3 해시</text>
+          <rect x="744" y="290" width="96" height="80" rx="10" class="f-elev"/>
+          <text x="792" y="314" text-anchor="middle" class="t t-bold">Zkr · Zkt</text>
+          <text x="792" y="336" text-anchor="middle" class="t-dim">seed CSR</text>
+          <text x="792" y="356" text-anchor="middle" class="t-dim">상수 시간</text>
+        </g>
+      </svg></div>
+      <figcaption><b>그림 14-1.</b> 비트 조작과 스칼라 암호 확장의 지도. B 는 Zba·Zbb·Zbs 세 확장의 묶음 이름이고, Zbc 는 따로 골라 넣는다. 암호용 Zbkb 는 Zbb 의 일부(회전, andn/orn/xnor, rev8)에 pack·brev8·zip 등을 더한 것이고, Zbkc 는 Zbc 에서 <code>clmulr</code>을 뺀 것이다.</figcaption>
+    </figure>
+
+    <div class="callout spec"><strong>규격 원문에서</strong>
+      <blockquote>“The B standard extension comprises instructions provided by the Zba, Zbb, and Zbs extensions.” … “The instructions have mnemonics and encodings that are independent of the extensions in which they appear. Thus, when implementing extensions with overlapping instructions, there is no redundancy in logic or encoding.”</blockquote>
+      <p><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/b-st-ext.html" target="_blank" rel="noopener">Volume I, Bit Manipulation Extensions</a> — 확장 이름은 “묶음표”일 뿐이고, 명령 하나하나의 인코딩은 유일하다.</p></div>
+
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>확장</th><th>버전</th><th>내용</th><th>명령 수 (RV32 / RV64)</th></tr></thead>
+      <tbody>
+        <tr><td><b>Zba</b></td><td>1.0.0</td><td>시프트-덧셈 주소 계산, .uw 형</td><td>3 / 8</td></tr>
+        <tr><td><b>Zbb</b></td><td>1.0.0</td><td>부정 논리, 비트 세기, 최소·최대, 부호/0 확장, 회전, orc.b, rev8</td><td>18 / 24</td></tr>
+        <tr><td><b>Zbs</b></td><td>1.0.0</td><td>단일 비트 세우기·지우기·뒤집기·꺼내기</td><td>8 / 8</td></tr>
+        <tr><td><b>Zbc</b></td><td>1.0.0</td><td>캐리 없는 곱셈 (아래·위·뒤집힌 절반)</td><td>3 / 3</td></tr>
+        <tr><td><b>B</b></td><td>1.0.0</td><td>Zba + Zbb + Zbs 의 별칭</td><td>—</td></tr>
+        <tr><td><b>Zbkb · Zbkc · Zbkx</b></td><td>1.0.0</td><td>암호용 비트 조작·캐리 없는 곱셈·크로스바 치환</td><td>—</td></tr>
+      </tbody>
+    </table></div>
+
+    <div class="callout deep"><strong>접미사 읽는 법: w, .uw, .b/.h</strong><p>RV64 에서 점 없는 <code>w</code> 접미사(<code>clzw</code>, <code>rolw</code> …)는 기본 ISA 의 <code>addw</code> 와 같은 규칙을 따른다. 입력의 아래 32비트만 보고, 32비트 결과를 64비트로 <b>부호 확장</b>한다. <code>.uw</code>(unsigned word)는 한 피연산자의 아래 32비트를 <b>0 확장</b>해서 쓰고 나머지는 XLEN 전체로 계산한다. <code>.b</code>·<code>.h</code>·<code>.w</code> 는 아래 8·16·32비트만 보고 XLEN 폭 결과를 만든다는 뜻이다. 이 장의 시뮬레이터는 모두 RV32 기준으로 계산한다.</p></div>
+    <div class="callout history"><strong>프로파일에서의 위치</strong><p>RVA23U64 프로파일은 B 와 Zkt 를 필수로 요구한다(<a href="profiles.html">23장</a>). 반면 스칼라 Zbc 는 “확장 옵션”으로만 남았고, 스칼라 암호(Zkn 등)는 RVA23U64 의 옵션 목록에서 빠졌다. 응용 프로세서에서는 더 빠른 벡터 암호(Zvk*, <a href="vector.html">15장</a>)를 표준으로 삼겠다는 뜻이다. 스칼라 암호는 벡터 유닛이 없는 마이크로컨트롤러·보안 칩에서 주로 쓰인다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="zba">
+    <h2>Zba: 배열 주소를 한 번에</h2>
+    <p>C 의 <code>a[i]</code>는 기계어로 “시작 주소 + i × 원소 크기”다. 원소 크기는 대개 2·4·8바이트이니 곱셈 대신 왼쪽 시프트를 쓴다. 기본 ISA 로는 <code>slli</code>로 i 를 밀고 <code>add</code>로 시작 주소에 더하는 두 명령이 든다. Zba 의 <code>sh1add</code>·<code>sh2add</code>·<code>sh3add</code>는 이 둘을 하나로 합친다.</p>
+    <div class="codebox asm" data-title="sh2add 의 동작 (규격의 Operation 그대로)">sh2add rd, rs1, rs2     # X(rd) = X(rs2) + (X(rs1) &lt;&lt; 2)
+# 쓰는 법: rs1 = 인덱스, rs2 = 배열 시작 주소
+sh2add t0, a1, a0       # t0 = &amp;a[i]   (a0 = a, a1 = i, int 배열)
+lw     t1, 0(t0)        # t1 = a[i]</div>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 300" role="img" aria-label="sh2add 가 인덱스를 두 칸 밀어 시작 주소에 더하는 데이터 흐름">
+        <defs>
+          <path id="zba-path-index" d="M200 75 H250"/>
+          <path id="zba-path-shift" d="M360 75 C390 75 400 112 418 122"/>
+          <path id="zba-path-base" d="M200 195 C300 195 380 168 418 158"/>
+          <path id="zba-path-sum" d="M480 140 H520"/>
+          <path id="zba-path-memory" d="M660 140 C682 140 680 125 700 125"/>
+        </defs>
+        <text x="30" y="42" class="t-dim">a1 · 인덱스 i</text>
+        <rect x="30" y="50" width="170" height="50" rx="10" class="f-elev"/>
+        <text x="115" y="80" text-anchor="middle" class="t-mono">0x00000003</text>
+        <text x="30" y="162" class="t-dim">a0 · 배열 시작 주소</text>
+        <rect x="30" y="170" width="170" height="50" rx="10" class="f-elev"/>
+        <text x="115" y="200" text-anchor="middle" class="t-mono">0x00001000</text>
+        <rect x="250" y="50" width="110" height="50" rx="10" class="f-violet-soft"/>
+        <text x="305" y="72" text-anchor="middle" class="t t-bold">≪ 2 (×4)</text>
+        <text x="305" y="90" text-anchor="middle" class="t-faint">배선만 옮김</text>
+        <rect x="418" y="108" width="62" height="64" rx="32" class="f-accent-soft"/>
+        <text x="449" y="149" text-anchor="middle" class="t-accent" style="font-size:26px">+</text>
+        <text x="520" y="107" class="t-dim">t0 · 원소 주소</text>
+        <rect x="520" y="115" width="140" height="50" rx="10" class="f-gold-soft"/>
+        <text x="590" y="145" text-anchor="middle" class="t-mono">0x0000100c</text>
+        <use href="#zba-path-index" class="s-accent flow-dash"/>
+        <use href="#zba-path-shift" class="s-accent flow-dash"/>
+        <use href="#zba-path-base" class="s-accent flow-dash"/>
+        <use href="#zba-path-sum" class="s-gold flow-dash"/>
+        <use href="#zba-path-memory" class="s-gold flow-dash"/>
+        <circle r="5" fill="var(--accent-2)"><animateMotion dur="1.2s" begin="-0.3s" repeatCount="indefinite"><mpath href="#zba-path-index"/></animateMotion></circle>
+        <circle r="5" fill="var(--accent-2)"><animateMotion dur="1.4s" begin="-0.7s" repeatCount="indefinite"><mpath href="#zba-path-shift"/></animateMotion></circle>
+        <circle r="5" fill="var(--accent-2)"><animateMotion dur="1.8s" begin="-0.9s" repeatCount="indefinite"><mpath href="#zba-path-base"/></animateMotion></circle>
+        <circle r="5" fill="var(--accent-2)"><animateMotion dur="1s" begin="-0.4s" repeatCount="indefinite"><mpath href="#zba-path-sum"/></animateMotion></circle>
+        <circle r="5" fill="var(--accent-2)"><animateMotion dur="1s" begin="-0.2s" repeatCount="indefinite"><mpath href="#zba-path-memory"/></animateMotion></circle>
+        <!-- 메모리 -->
+        <text x="770" y="14" text-anchor="middle" class="t-faint">메모리 (int a[8])</text>
+        <g class="t-mono" style="font-size:12px">
+          <rect x="700" y="20" width="140" height="30" class="f-surface"/><text x="710" y="40" class="t-mono" style="font-size:12px">0x1000</text><text x="830" y="40" text-anchor="end" class="t-faint">a[0]</text>
+          <rect x="700" y="50" width="140" height="30" class="f-surface"/><text x="710" y="70" class="t-mono" style="font-size:12px">0x1004</text><text x="830" y="70" text-anchor="end" class="t-faint">a[1]</text>
+          <rect x="700" y="80" width="140" height="30" class="f-surface"/><text x="710" y="100" class="t-mono" style="font-size:12px">0x1008</text><text x="830" y="100" text-anchor="end" class="t-faint">a[2]</text>
+          <rect x="700" y="110" width="140" height="30" class="f-gold-soft blink-highlight"/><text x="710" y="130" class="t-mono" style="font-size:12px">0x100c</text><text x="830" y="130" text-anchor="end" class="t-gold" style="font-size:12px">a[3]</text>
+          <rect x="700" y="140" width="140" height="30" class="f-surface"/><text x="710" y="160" class="t-mono" style="font-size:12px">0x1010</text><text x="830" y="160" text-anchor="end" class="t-faint">a[4]</text>
+          <rect x="700" y="170" width="140" height="30" class="f-surface"/><text x="710" y="190" class="t-mono" style="font-size:12px">0x1014</text><text x="830" y="190" text-anchor="end" class="t-faint">a[5]</text>
+          <rect x="700" y="200" width="140" height="30" class="f-surface"/><text x="710" y="220" class="t-mono" style="font-size:12px">0x1018</text><text x="830" y="220" text-anchor="end" class="t-faint">a[6]</text>
+          <rect x="700" y="230" width="140" height="30" class="f-surface"/><text x="710" y="250" class="t-mono" style="font-size:12px">0x101c</text><text x="830" y="250" text-anchor="end" class="t-faint">a[7]</text>
+        </g>
+        <text x="30" y="258" class="t-dim">기본 ISA:  slli t0, a1, 2  →  add t0, a0, t0  →  lw   (명령 3개)</text>
+        <text x="30" y="284" class="t-accent">Zba:  sh2add t0, a1, a0  →  lw   (명령 2개)</text>
+      </svg></div>
+      <figcaption><b>그림 14-2.</b> <code>sh2add</code>의 데이터 흐름. 2비트 왼쪽 시프트는 덧셈기 입력의 배선을 두 칸 옮기는 것일 뿐이라 논리가 거의 늘지 않는다. 규격이 시프트 양을 1·2·3으로만 한정한 까닭도 “덧셈기의 임계 경로를 늘리지 않기 위해서”다.</figcaption>
+    </figure>
+
+    <p>세 명령은 인코딩도 가지런하다. 모두 R 형식, opcode 는 OP(<code>0110011</code>), funct7 은 <code>0010000</code>이고, funct3 만 다르다. funct3 의 위 두 비트를 읽으면 그대로 시프트 양이 된다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 248" role="img" aria-label="sh1add, sh2add, sh3add, sh1add.uw 의 인코딩">
+        <g class="t-faint" style="font-size:11px">
+          <text x="124" y="24">31</text><text x="270" y="24" text-anchor="end">25</text>
+          <text x="278" y="24">24</text><text x="380" y="24" text-anchor="end">20</text>
+          <text x="388" y="24">19</text><text x="490" y="24" text-anchor="end">15</text>
+          <text x="498" y="24">14</text><text x="556" y="24" text-anchor="end">12</text>
+          <text x="564" y="24">11</text><text x="666" y="24" text-anchor="end">7</text>
+          <text x="674" y="24">6</text><text x="820" y="24" text-anchor="end">0</text>
+        </g>
+        <g>
+          <rect x="120" y="32" width="154" height="30" class="f-surface"/><text x="197" y="52" text-anchor="middle" class="t-dim">funct7</text>
+          <rect x="274" y="32" width="110" height="30" class="f-surface"/><text x="329" y="52" text-anchor="middle" class="t-dim">rs2 (시작 주소)</text>
+          <rect x="384" y="32" width="110" height="30" class="f-surface"/><text x="439" y="52" text-anchor="middle" class="t-dim">rs1 (인덱스)</text>
+          <rect x="494" y="32" width="66" height="30" class="f-surface"/><text x="527" y="52" text-anchor="middle" class="t-dim">funct3</text>
+          <rect x="560" y="32" width="110" height="30" class="f-surface"/><text x="615" y="52" text-anchor="middle" class="t-dim">rd</text>
+          <rect x="670" y="32" width="154" height="30" class="f-surface"/><text x="747" y="52" text-anchor="middle" class="t-dim">opcode</text>
+        </g>
+        <g>
+          <text x="20" y="91" class="t-mono t-bold">sh1add</text>
+          <rect x="120" y="70" width="154" height="32" class="f-elev"/><text x="197" y="91" text-anchor="middle" class="t-mono">0010000</text>
+          <rect x="274" y="70" width="110" height="32" class="f-elev"/><text x="329" y="91" text-anchor="middle" class="t-faint">rs2</text>
+          <rect x="384" y="70" width="110" height="32" class="f-elev"/><text x="439" y="91" text-anchor="middle" class="t-faint">rs1</text>
+          <rect x="494" y="70" width="66" height="32" class="f-gold-soft"/><text x="527" y="91" text-anchor="middle" class="t-mono t-bold">010</text>
+          <rect x="560" y="70" width="110" height="32" class="f-elev"/><text x="615" y="91" text-anchor="middle" class="t-faint">rd</text>
+          <rect x="670" y="70" width="154" height="32" class="f-elev"/><text x="747" y="91" text-anchor="middle" class="t-mono">0110011</text>
+        </g>
+        <g>
+          <text x="20" y="129" class="t-mono t-bold">sh2add</text>
+          <rect x="120" y="108" width="154" height="32" class="f-elev"/><text x="197" y="129" text-anchor="middle" class="t-mono">0010000</text>
+          <rect x="274" y="108" width="110" height="32" class="f-elev"/><text x="329" y="129" text-anchor="middle" class="t-faint">rs2</text>
+          <rect x="384" y="108" width="110" height="32" class="f-elev"/><text x="439" y="129" text-anchor="middle" class="t-faint">rs1</text>
+          <rect x="494" y="108" width="66" height="32" class="f-gold-soft"/><text x="527" y="129" text-anchor="middle" class="t-mono t-bold">100</text>
+          <rect x="560" y="108" width="110" height="32" class="f-elev"/><text x="615" y="129" text-anchor="middle" class="t-faint">rd</text>
+          <rect x="670" y="108" width="154" height="32" class="f-elev"/><text x="747" y="129" text-anchor="middle" class="t-mono">0110011</text>
+        </g>
+        <g>
+          <text x="20" y="167" class="t-mono t-bold">sh3add</text>
+          <rect x="120" y="146" width="154" height="32" class="f-elev"/><text x="197" y="167" text-anchor="middle" class="t-mono">0010000</text>
+          <rect x="274" y="146" width="110" height="32" class="f-elev"/><text x="329" y="167" text-anchor="middle" class="t-faint">rs2</text>
+          <rect x="384" y="146" width="110" height="32" class="f-elev"/><text x="439" y="167" text-anchor="middle" class="t-faint">rs1</text>
+          <rect x="494" y="146" width="66" height="32" class="f-gold-soft"/><text x="527" y="167" text-anchor="middle" class="t-mono t-bold">110</text>
+          <rect x="560" y="146" width="110" height="32" class="f-elev"/><text x="615" y="167" text-anchor="middle" class="t-faint">rd</text>
+          <rect x="670" y="146" width="154" height="32" class="f-elev"/><text x="747" y="167" text-anchor="middle" class="t-mono">0110011</text>
+        </g>
+        <g>
+          <text x="20" y="205" class="t-mono t-bold">sh1add.uw</text>
+          <rect x="120" y="184" width="154" height="32" class="f-elev"/><text x="197" y="205" text-anchor="middle" class="t-mono">0010000</text>
+          <rect x="274" y="184" width="110" height="32" class="f-elev"/><text x="329" y="205" text-anchor="middle" class="t-faint">rs2</text>
+          <rect x="384" y="184" width="110" height="32" class="f-elev"/><text x="439" y="205" text-anchor="middle" class="t-faint">rs1</text>
+          <rect x="494" y="184" width="66" height="32" class="f-gold-soft"/><text x="527" y="205" text-anchor="middle" class="t-mono t-bold">010</text>
+          <rect x="560" y="184" width="110" height="32" class="f-elev"/><text x="615" y="205" text-anchor="middle" class="t-faint">rd</text>
+          <rect x="670" y="184" width="154" height="32" class="f-teal-soft"/><text x="747" y="205" text-anchor="middle" class="t-mono t-bold">0111011</text>
+        </g>
+        <text x="20" y="238" class="t-dim">funct3 의 위 두 비트(01 · 10 · 11) = 시프트 양 1 · 2 · 3.  .uw 형은 같은 funct 값에 opcode 만 OP-32(0111011)로 바뀐다.</text>
+      </svg></div>
+      <figcaption><b>그림 14-3.</b> Zba 시프트-덧셈 명령의 인코딩(규격 인코딩 그림에서 옮김). <code>sh2add.uw</code>·<code>sh3add.uw</code> 도 같은 방식으로 OP-32 opcode 를 쓴다. OP-32 는 RV64 에만 있는 opcode 이므로 .uw 형은 RV64 전용이다.</figcaption>
+    </figure>
+
+    <h3>.uw 형: RV64 에서 unsigned int 인덱스</h3>
+    <p>RV64 에는 한 가지 함정이 더 있다. psABI 는 32비트 정수를 64비트 레지스터에 담을 때 <b>부호 없는 타입이라도 부호 확장해 둔다</b>고 정한다. 그래서 <code>unsigned int i = 0x80000000</code> 은 레지스터에 <code>0xffffffff80000000</code>으로 들어 있다. 이 값으로 주소를 계산하려면 먼저 위 32비트를 0으로 지워야 하는데, 기본 ISA 로는 <code>slli 32</code> + <code>srli</code> 두 명령이 더 든다. <code>add.uw</code>·<code>sh1add.uw</code>~<code>sh3add.uw</code>·<code>slli.uw</code>는 “rs1 의 아래 32비트를 0 확장한 뒤” 계산하므로 이 정리 작업까지 한 명령에 흡수한다. <code>zext.w rd, rs</code>는 <code>add.uw rd, rs, zero</code>의 의사 명령이다.</p>
+
+    <div class="sim" id="zba-sim">
+      <div class="sim-head"><span class="sim-tag">SIMULATOR</span><h3>Zba 배열 인덱싱: 명령 수 비교</h3></div>
+      <div class="sim-pad">
+        <div class="zba-layout">
+          <div><h4>기본 ISA</h4><div class="codebox" id="zba-base-code"></div></div>
+          <div><h4>Zba 사용</h4><div class="codebox" id="zba-fast-code"></div></div>
+        </div>
+        <div class="zba-memory-title">배열 a 의 원소 주소 (a0 = 0x10000)</div>
+        <div class="zba-memory" id="zba-memory"></div>
+        <div class="zba-bars">
+          <div class="zba-bar"><span>기본 ISA</span><div class="track"><div class="fill base" id="zba-bar-base"></div></div></div>
+          <div class="zba-bar"><span>Zba</span><div class="track"><div class="fill fast" id="zba-bar-fast"></div></div></div>
+        </div>
+      </div>
+      <div class="sim-controls">
+        <div class="control"><span>XLEN</span><div class="segmented" id="zba-xlen"><button data-value="32">RV32</button><button data-value="64" class="on">RV64</button></div></div>
+        <div class="control"><span>원소 크기</span><div class="segmented" id="zba-size"><button data-value="2">2 B</button><button data-value="4" class="on">4 B</button><button data-value="8">8 B</button><button data-value="16">16 B</button></div></div>
+        <div class="control"><span>인덱스 타입</span><div class="segmented" id="zba-index-type"><button data-value="long" class="on">long (XLEN)</button><button data-value="unsigned">unsigned int</button></div></div>
+        <label class="control"><span>인덱스 i <output id="zba-index-output"></output></span><input type="range" id="zba-index" min="0" max="7" value="3"></label>
+        <label class="control"><span>접근 횟수 <output id="zba-count-output"></output></span><input type="range" id="zba-count" min="1" max="10" value="5"></label>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">주소 계산 (기본)</span><span class="value" id="zba-readout-base">2</span></div>
+        <div class="stat"><span class="key">주소 계산 (Zba)</span><span class="value" id="zba-readout-fast">1</span></div>
+        <div class="stat"><span class="key">아낀 명령 수</span><span class="value" id="zba-readout-saved">—</span></div>
+        <div class="stat"><span class="key">&amp;a[i]</span><span class="value" id="zba-readout-address">—</span></div>
+      </div>
+      <div class="sim-note">RV64 에서 <b>unsigned int</b> 인덱스를 고르면 기본 ISA 쪽은 0 확장 때문에 명령이 하나 더 늘지만 Zba 쪽은 그대로 한 개다. 원소 크기를 <b>16 B</b>로 바꾸면 시프트 양 4는 sh*add 범위 밖이라 이득이 사라진다(단, unsigned 인덱스라면 <code>slli.uw</code>가 여전히 한 개를 아낀다).</div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="zbb">
+    <h2>Zbb: 기본 비트 조작</h2>
+    <p>Zbb 는 B 확장의 중심이다. 일곱 무리로 나뉘는데, 대부분이 “기본 ISA 로 2~4개, 많게는 수십 개 걸리던 관용구”를 한 명령으로 줄인 것이다.</p>
+    <div class="table-wrap"><table class="instruction-table compact">
+      <thead><tr><th>명령</th><th>뜻 (RV32 기준)</th><th>대표 쓰임</th></tr></thead>
+      <tbody>
+        <tr><td>andn · orn · xnor</td><td>rs1 &amp; ~rs2 · rs1 | ~rs2 · ~(rs1 ^ rs2)</td><td>마스크로 비트 지우기, 해시·암호의 논리 단계</td></tr>
+        <tr><td>clz · ctz</td><td>위·아래쪽부터 연속된 0의 개수 (입력이 0이면 XLEN)</td><td>log₂, 정규화, 비트맵에서 첫 빈칸 찾기</td></tr>
+        <tr><td>cpop</td><td>1인 비트의 개수 (population count)</td><td>집합 크기, 해밍 거리, 체스 비트보드</td></tr>
+        <tr><td>min · minu · max · maxu</td><td>부호 있는/없는 비교로 작은·큰 값</td><td>분기 없는 범위 제한(clamp)</td></tr>
+        <tr><td>sext.b · sext.h · zext.h</td><td>아래 8·16비트 부호 확장, 16비트 0 확장</td><td>char·short 변환</td></tr>
+        <tr><td>rol · ror · rori</td><td>왼쪽·오른쪽 회전 (rol 의 즉시값형은 없다)</td><td>해시, 암호, 난수 생성기</td></tr>
+        <tr><td>orc.b</td><td>바이트마다 하나라도 1이면 0xff, 아니면 0x00</td><td>문자열의 NUL 바이트 찾기</td></tr>
+        <tr><td>rev8</td><td>레지스터 전체의 바이트 순서 뒤집기</td><td>엔디언 변환, 네트워크 바이트 순서</td></tr>
+      </tbody>
+    </table></div>
+    <div class="callout tip"><strong>왜 rol 의 즉시값 형식은 없을까</strong><p>왼쪽으로 k 칸 회전하는 것은 오른쪽으로 XLEN−k 칸 회전하는 것과 같다. 시프트 양이 상수라면 어셈블러가 <code>rori rd, rs, XLEN−k</code>로 바꿔 쓰면 되므로 인코딩 공간을 아끼려고 <code>roli</code>를 두지 않았다.</p></div>
+
+    <h3>부정 논리: 반전기를 다시 쓴다</h3>
+    <p><code>andn</code>·<code>orn</code>·<code>xnor</code>는 하드웨어 입장에서 거의 공짜다. 뺄셈 <code>sub</code>는 이미 rs2 를 반전해 더하는 회로를 갖고 있으므로, 그 반전기를 AND·OR·XOR 입력 앞에도 놓으면 된다. 인코딩도 <code>sub</code>와 같은 funct7(<code>0100000</code>)을 쓰고, funct3 은 각각 <code>and</code>(111)·<code>or</code>(110)·<code>xor</code>(100)와 같다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 230" role="img" aria-label="andn, orn, xnor 를 위한 rs2 반전기 공유 구조">
+        <defs><marker id="negate-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--text-faint)"/></marker></defs>
+        <rect x="30" y="40" width="110" height="40" rx="8" class="f-elev"/><text x="85" y="65" text-anchor="middle" class="t-mono">rs1</text>
+        <rect x="30" y="140" width="110" height="40" rx="8" class="f-elev"/><text x="85" y="165" text-anchor="middle" class="t-mono">rs2</text>
+        <rect x="190" y="110" width="90" height="40" rx="8" class="f-violet-soft"/><text x="235" y="135" text-anchor="middle" class="t-mono">~rs2</text>
+        <text x="235" y="100" text-anchor="middle" class="t-faint">sub 와 공유</text>
+        <rect x="320" y="110" width="60" height="90" rx="10" class="f-surface"/><text x="350" y="150" text-anchor="middle" class="t t-bold">MUX</text><text x="350" y="170" text-anchor="middle" class="t-faint" style="font-size:11px">반전?</text>
+        <path d="M140 160 H170 V130 H190" class="s-line" marker-end="url(#negate-arrow)"/>
+        <path d="M170 160 V188 H318" class="s-line" marker-end="url(#negate-arrow)"/>
+        <path d="M280 130 H318" class="s-line" marker-end="url(#negate-arrow)"/>
+        <path d="M140 60 H395 V172" class="s-line"/>
+        <path d="M380 155 H410" class="s-accent"/>
+        <path d="M410 58 V188" class="s-accent"/>
+        <path d="M395 42 V60" class="s-line"/>
+        <path d="M395 42 H428" class="s-line" marker-end="url(#negate-arrow)"/>
+        <path d="M395 107 H428" class="s-line" marker-end="url(#negate-arrow)"/>
+        <path d="M395 172 H428" class="s-line" marker-end="url(#negate-arrow)"/>
+        <path d="M410 58 H428" class="s-accent flow-dash"/>
+        <path d="M410 123 H428" class="s-accent flow-dash"/>
+        <path d="M410 188 H428" class="s-accent flow-dash"/>
+        <rect x="430" y="30" width="110" height="40" rx="8" class="f-accent-soft"/><text x="485" y="55" text-anchor="middle" class="t t-bold">AND</text>
+        <rect x="430" y="95" width="110" height="40" rx="8" class="f-accent-soft"/><text x="485" y="120" text-anchor="middle" class="t t-bold">OR</text>
+        <rect x="430" y="160" width="110" height="40" rx="8" class="f-accent-soft"/><text x="485" y="185" text-anchor="middle" class="t t-bold">XOR</text>
+        <path d="M540 50 H588" class="s-line" marker-end="url(#negate-arrow)"/>
+        <path d="M540 115 H588" class="s-line" marker-end="url(#negate-arrow)"/>
+        <path d="M540 180 H588" class="s-line" marker-end="url(#negate-arrow)"/>
+        <rect x="590" y="30" width="60" height="170" rx="10" class="f-surface"/><text x="620" y="120" text-anchor="middle" class="t t-bold">선택</text>
+        <path d="M650 115 H698" class="s-gold flow-dash"/>
+        <rect x="700" y="95" width="130" height="40" rx="8" class="f-gold-soft"/><text x="765" y="120" text-anchor="middle" class="t-mono">rd</text>
+        <text x="700" y="160" class="t-faint">and · or · xor</text>
+        <text x="700" y="178" class="t-faint">andn · orn · xnor</text>
+      </svg></div>
+      <figcaption><b>그림 14-4.</b> 부정 논리 명령의 구현 힌트(규격의 Implementation Hint). rs2 경로에 이미 있는 반전기를 AND·OR·XOR 앞에서도 고르게 하면 여섯 명령이 같은 회로를 나눠 쓴다. 파란 점선이 반전되었을 수도 있는 두 번째 피연산자다.</figcaption>
+    </figure>
+
+    <h3>회전: 밀려난 비트가 돌아온다</h3>
+    <p>시프트는 밀려난 비트를 버리고 빈자리를 0(또는 부호 비트)으로 채운다. 회전은 밀려난 비트를 반대쪽 끝으로 다시 넣는다. 정보가 하나도 사라지지 않으므로 SHA-256, ChaCha20, SM3 같은 “더하기·회전·XOR(ARX)” 계열 알고리즘의 핵심 연산이다. 기본 ISA 로는 <code>neg</code> + <code>sll</code> + <code>srl</code> + <code>or</code> 네 명령이 들던 것을 규격은 바로 이 이유로 넣었다고 적고 있다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 296" role="img" aria-label="srl 과 ror 의 차이를 보여 주는 움직이는 그림">
+        <g class="t-faint" style="font-size:11px">
+          <text x="229" y="30" text-anchor="middle">7</text><text x="297" y="30" text-anchor="middle">6</text><text x="365" y="30" text-anchor="middle">5</text><text x="433" y="30" text-anchor="middle">4</text><text x="501" y="30" text-anchor="middle">3</text><text x="569" y="30" text-anchor="middle">2</text><text x="637" y="30" text-anchor="middle">1</text><text x="705" y="30" text-anchor="middle">0</text>
+          <text x="229" y="162" text-anchor="middle">7</text><text x="297" y="162" text-anchor="middle">6</text><text x="365" y="162" text-anchor="middle">5</text><text x="433" y="162" text-anchor="middle">4</text><text x="501" y="162" text-anchor="middle">3</text><text x="569" y="162" text-anchor="middle">2</text><text x="637" y="162" text-anchor="middle">1</text><text x="705" y="162" text-anchor="middle">0</text>
+        </g>
+        <!-- 시프트 줄 -->
+        <text x="20" y="62" class="t-mono t-bold">srl x, 1</text>
+        <text x="20" y="80" class="t-dim">시프트</text>
+        <g fill="none" stroke="var(--border)" stroke-dasharray="4 4">
+          <rect x="200" y="40" width="58" height="46" rx="8"/><rect x="268" y="40" width="58" height="46" rx="8"/><rect x="336" y="40" width="58" height="46" rx="8"/><rect x="404" y="40" width="58" height="46" rx="8"/><rect x="472" y="40" width="58" height="46" rx="8"/><rect x="540" y="40" width="58" height="46" rx="8"/><rect x="608" y="40" width="58" height="46" rx="8"/><rect x="676" y="40" width="58" height="46" rx="8"/>
+        </g>
+        <g>
+          <rect x="200" y="40" width="58" height="46" rx="8" class="f-surface"><animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.3;0.7;1" dur="3.2s" repeatCount="indefinite"/></rect>
+          <text x="229" y="70" text-anchor="middle" class="t-bad" style="font-size:18px">0<animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.3;0.7;1" dur="3.2s" repeatCount="indefinite"/></text>
+        </g>
+        <g><rect x="200" y="40" width="58" height="46" rx="8" class="f-accent"/><text x="229" y="70" text-anchor="middle" class="t-on-accent" style="font-size:18px">1</text><animateMotion dur="3.2s" repeatCount="indefinite" calcMode="linear" keyTimes="0;0.3;0.7;1" keyPoints="0;0;1;1" path="M0 0 H68"/></g>
+        <g><rect x="268" y="40" width="58" height="46" rx="8" class="f-elev"/><text x="297" y="70" text-anchor="middle" class="t" style="font-size:18px">0</text><animateMotion dur="3.2s" repeatCount="indefinite" calcMode="linear" keyTimes="0;0.3;0.7;1" keyPoints="0;0;1;1" path="M0 0 H68"/></g>
+        <g><rect x="336" y="40" width="58" height="46" rx="8" class="f-accent"/><text x="365" y="70" text-anchor="middle" class="t-on-accent" style="font-size:18px">1</text><animateMotion dur="3.2s" repeatCount="indefinite" calcMode="linear" keyTimes="0;0.3;0.7;1" keyPoints="0;0;1;1" path="M0 0 H68"/></g>
+        <g><rect x="404" y="40" width="58" height="46" rx="8" class="f-accent"/><text x="433" y="70" text-anchor="middle" class="t-on-accent" style="font-size:18px">1</text><animateMotion dur="3.2s" repeatCount="indefinite" calcMode="linear" keyTimes="0;0.3;0.7;1" keyPoints="0;0;1;1" path="M0 0 H68"/></g>
+        <g><rect x="472" y="40" width="58" height="46" rx="8" class="f-elev"/><text x="501" y="70" text-anchor="middle" class="t" style="font-size:18px">0</text><animateMotion dur="3.2s" repeatCount="indefinite" calcMode="linear" keyTimes="0;0.3;0.7;1" keyPoints="0;0;1;1" path="M0 0 H68"/></g>
+        <g><rect x="540" y="40" width="58" height="46" rx="8" class="f-elev"/><text x="569" y="70" text-anchor="middle" class="t" style="font-size:18px">0</text><animateMotion dur="3.2s" repeatCount="indefinite" calcMode="linear" keyTimes="0;0.3;0.7;1" keyPoints="0;0;1;1" path="M0 0 H68"/></g>
+        <g><rect x="608" y="40" width="58" height="46" rx="8" class="f-accent"/><text x="637" y="70" text-anchor="middle" class="t-on-accent" style="font-size:18px">1</text><animateMotion dur="3.2s" repeatCount="indefinite" calcMode="linear" keyTimes="0;0.3;0.7;1" keyPoints="0;0;1;1" path="M0 0 H68"/></g>
+        <g><rect x="676" y="40" width="58" height="46" rx="8" class="f-gold"/><text x="705" y="70" text-anchor="middle" class="t-on-accent" style="font-size:18px">1</text><animateMotion dur="3.2s" repeatCount="indefinite" calcMode="linear" keyTimes="0;0.3;0.7;1" keyPoints="0;0;1;1" path="M0 0 L50 34"/><animate attributeName="opacity" values="1;1;0;0" keyTimes="0;0.3;0.7;1" dur="3.2s" repeatCount="indefinite"/></g>
+        <text x="752" y="68" class="t-mono">0xB3→0x59</text>
+        <text x="200" y="120" class="t-dim">밀려난 비트 0 은 버려지고, 빈자리(비트 7)에는 0 이 들어온다</text>
+        <!-- 회전 줄 -->
+        <text x="20" y="194" class="t-mono t-bold">ror x, 1</text>
+        <text x="20" y="212" class="t-dim">회전</text>
+        <g fill="none" stroke="var(--border)" stroke-dasharray="4 4">
+          <rect x="200" y="172" width="58" height="46" rx="8"/><rect x="268" y="172" width="58" height="46" rx="8"/><rect x="336" y="172" width="58" height="46" rx="8"/><rect x="404" y="172" width="58" height="46" rx="8"/><rect x="472" y="172" width="58" height="46" rx="8"/><rect x="540" y="172" width="58" height="46" rx="8"/><rect x="608" y="172" width="58" height="46" rx="8"/><rect x="676" y="172" width="58" height="46" rx="8"/>
+        </g>
+        <g><rect x="200" y="172" width="58" height="46" rx="8" class="f-accent"/><text x="229" y="202" text-anchor="middle" class="t-on-accent" style="font-size:18px">1</text><animateMotion dur="3.2s" repeatCount="indefinite" calcMode="linear" keyTimes="0;0.3;0.7;1" keyPoints="0;0;1;1" path="M0 0 H68"/></g>
+        <g><rect x="268" y="172" width="58" height="46" rx="8" class="f-elev"/><text x="297" y="202" text-anchor="middle" class="t" style="font-size:18px">0</text><animateMotion dur="3.2s" repeatCount="indefinite" calcMode="linear" keyTimes="0;0.3;0.7;1" keyPoints="0;0;1;1" path="M0 0 H68"/></g>
+        <g><rect x="336" y="172" width="58" height="46" rx="8" class="f-accent"/><text x="365" y="202" text-anchor="middle" class="t-on-accent" style="font-size:18px">1</text><animateMotion dur="3.2s" repeatCount="indefinite" calcMode="linear" keyTimes="0;0.3;0.7;1" keyPoints="0;0;1;1" path="M0 0 H68"/></g>
+        <g><rect x="404" y="172" width="58" height="46" rx="8" class="f-accent"/><text x="433" y="202" text-anchor="middle" class="t-on-accent" style="font-size:18px">1</text><animateMotion dur="3.2s" repeatCount="indefinite" calcMode="linear" keyTimes="0;0.3;0.7;1" keyPoints="0;0;1;1" path="M0 0 H68"/></g>
+        <g><rect x="472" y="172" width="58" height="46" rx="8" class="f-elev"/><text x="501" y="202" text-anchor="middle" class="t" style="font-size:18px">0</text><animateMotion dur="3.2s" repeatCount="indefinite" calcMode="linear" keyTimes="0;0.3;0.7;1" keyPoints="0;0;1;1" path="M0 0 H68"/></g>
+        <g><rect x="540" y="172" width="58" height="46" rx="8" class="f-elev"/><text x="569" y="202" text-anchor="middle" class="t" style="font-size:18px">0</text><animateMotion dur="3.2s" repeatCount="indefinite" calcMode="linear" keyTimes="0;0.3;0.7;1" keyPoints="0;0;1;1" path="M0 0 H68"/></g>
+        <g><rect x="608" y="172" width="58" height="46" rx="8" class="f-accent"/><text x="637" y="202" text-anchor="middle" class="t-on-accent" style="font-size:18px">1</text><animateMotion dur="3.2s" repeatCount="indefinite" calcMode="linear" keyTimes="0;0.3;0.7;1" keyPoints="0;0;1;1" path="M0 0 H68"/></g>
+        <g><rect x="676" y="172" width="58" height="46" rx="8" class="f-gold"/><text x="705" y="202" text-anchor="middle" class="t-on-accent" style="font-size:18px">1</text><animateMotion dur="3.2s" repeatCount="indefinite" calcMode="linear" keyTimes="0;0.3;0.7;1" keyPoints="0;0;1;1" path="M0 0 C0 66 -476 66 -476 0"/></g>
+        <text x="752" y="200" class="t-mono">0xB3→0xD9</text>
+        <text x="200" y="288" class="t-dim">밀려난 비트 0 이 아래로 돌아 비트 7 자리로 들어간다. 사라지는 정보가 없다.</text>
+      </svg></div>
+      <figcaption><b>그림 14-5.</b> 8비트 값 <code>0xB3</code>을 한 칸 오른쪽으로 시프트할 때(위)와 회전할 때(아래). 금색 상자가 비트 0 이다. 실제 <code>ror</code>은 XLEN 폭 전체에서 같은 일을 하고, 회전 양은 rs2 의 아래 log₂(XLEN) 비트만 쓴다.</figcaption>
+    </figure>
+
+    <h3>rev8 과 orc.b: 바이트 단위로 보기</h3>
+    <p><code>rev8</code>은 레지스터의 바이트 순서를 통째로 뒤집는다. 리틀 엔디언 RISC-V 에서 빅 엔디언 데이터(네트워크 패킷 헤더, 암호 표준의 입력 블록)를 다룰 때 바로 쓰인다. 반쪽(16비트)이나 워드(RV64 의 32비트)만 뒤집고 싶으면 <code>rev8</code> 뒤에 <code>srai</code>(또는 <code>srli</code>)로 내려 주면 된다고 규격의 Software Hint 가 알려 준다. 인코딩은 RV32 와 RV64 에서 서로 다르다(즉시값 필드 <code>0x698</code>과 <code>0x6b8</code>).</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 300" role="img" aria-label="rev8 이 네 바이트의 순서를 뒤집는 움직이는 그림">
+        <text x="430" y="20" text-anchor="middle" class="t-mono">rs = 0x12345678</text>
+        <g class="t-faint" style="font-size:12px"><text x="145" y="42" text-anchor="middle">바이트 3 (31:24)</text><text x="335" y="42" text-anchor="middle">바이트 2 (23:16)</text><text x="525" y="42" text-anchor="middle">바이트 1 (15:8)</text><text x="715" y="42" text-anchor="middle">바이트 0 (7:0)</text></g>
+        <g opacity="0.45">
+          <rect x="70" y="50" width="150" height="50" rx="10" class="f-accent-soft"/><text x="145" y="81" text-anchor="middle" class="t-mono">0x12</text>
+          <rect x="260" y="50" width="150" height="50" rx="10" class="f-teal-soft"/><text x="335" y="81" text-anchor="middle" class="t-mono">0x34</text>
+          <rect x="450" y="50" width="150" height="50" rx="10" class="f-violet-soft"/><text x="525" y="81" text-anchor="middle" class="t-mono">0x56</text>
+          <rect x="640" y="50" width="150" height="50" rx="10" class="f-gold-soft"/><text x="715" y="81" text-anchor="middle" class="t-mono">0x78</text>
+        </g>
+        <g fill="none" stroke="var(--border)" stroke-dasharray="5 5">
+          <rect x="70" y="180" width="150" height="50" rx="10"/><rect x="260" y="180" width="150" height="50" rx="10"/><rect x="450" y="180" width="150" height="50" rx="10"/><rect x="640" y="180" width="150" height="50" rx="10"/>
+        </g>
+        <g><rect x="70" y="50" width="150" height="50" rx="10" class="f-accent-soft"/><text x="145" y="81" text-anchor="middle" class="t-mono t-bold">0x12</text><animateMotion dur="3.6s" repeatCount="indefinite" calcMode="linear" keyTimes="0;0.25;0.7;1" keyPoints="0;0;1;1" path="M0 0 C0 65 570 65 570 130"/></g>
+        <g><rect x="260" y="50" width="150" height="50" rx="10" class="f-teal-soft"/><text x="335" y="81" text-anchor="middle" class="t-mono t-bold">0x34</text><animateMotion dur="3.6s" repeatCount="indefinite" calcMode="linear" keyTimes="0;0.25;0.7;1" keyPoints="0;0;1;1" path="M0 0 C0 65 190 65 190 130"/></g>
+        <g><rect x="450" y="50" width="150" height="50" rx="10" class="f-violet-soft"/><text x="525" y="81" text-anchor="middle" class="t-mono t-bold">0x56</text><animateMotion dur="3.6s" repeatCount="indefinite" calcMode="linear" keyTimes="0;0.25;0.7;1" keyPoints="0;0;1;1" path="M0 0 C0 65 -190 65 -190 130"/></g>
+        <g><rect x="640" y="50" width="150" height="50" rx="10" class="f-gold-soft"/><text x="715" y="81" text-anchor="middle" class="t-mono t-bold">0x78</text><animateMotion dur="3.6s" repeatCount="indefinite" calcMode="linear" keyTimes="0;0.25;0.7;1" keyPoints="0;0;1;1" path="M0 0 C0 65 -570 65 -570 130"/></g>
+        <g class="t-faint" style="font-size:12px"><text x="145" y="252" text-anchor="middle">바이트 3</text><text x="335" y="252" text-anchor="middle">바이트 2</text><text x="525" y="252" text-anchor="middle">바이트 1</text><text x="715" y="252" text-anchor="middle">바이트 0</text></g>
+        <text x="430" y="284" text-anchor="middle" class="t-mono t-bold">rd = rev8(rs) = 0x78563412</text>
+      </svg></div>
+      <figcaption><b>그림 14-6.</b> <code>rev8</code>(RV32)의 동작. 바이트 k 가 바이트 3−k 자리로 옮겨 간다. 비트가 아니라 바이트 단위라서 각 바이트 안의 비트 순서는 그대로다. 바이트 안의 비트 순서까지 뒤집는 <code>brev8</code>은 Zbkb 에 있다.</figcaption>
+    </figure>
+    <p><code>orc.b</code>(OR-Combine, byte granule)는 각 바이트 안의 8비트를 OR 해서, 그 결과를 바이트 전체에 퍼뜨린다. 0인 바이트는 0x00, 0이 아닌 바이트는 0xff 가 된다. 별것 아닌 것 같지만 C 문자열의 끝(NUL)을 찾는 데 꼭 맞는 연산이다. 뒤의 <a href="#strlen">strlen 절</a>에서 자세히 본다.</p>
+
+    <h3>clz · ctz · cpop 과 min · max</h3>
+    <p>세는 명령은 입력이 0일 때의 결과가 분명히 정해져 있다. <code>clz(0)</code>과 <code>ctz(0)</code>은 XLEN 이고, 최상위 비트가 1이면 <code>clz</code>는 0이다. 그래서 <code>31 − clz(x)</code>는 0이 아닌 x 의 ⌊log₂ x⌋ 이고, <code>ctz(x)</code>는 비트맵에서 가장 낮은 번호의 1(예: 비어 있는 페이지 번호)을 바로 알려 준다. <code>min</code>·<code>max</code>는 분기 예측이 어려운 데이터 의존 분기를 없앤다. 예를 들어 <code>x</code>를 [lo, hi] 범위로 자르는 일은 <code>max t0, a0, a1</code> + <code>min a0, t0, a2</code> 두 명령으로 끝난다.</p>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="zbs">
+    <h2>Zbs: 비트 하나만 콕 집어</h2>
+    <p>장치 레지스터의 플래그, 운영체제의 비트맵, 집합을 비트로 표현한 자료구조는 “i번째 비트 하나”를 다루는 일이 잦다. 기본 ISA 로는 <code>li t0, 1</code> → <code>sll t0, t0, a1</code>로 마스크를 만든 뒤 OR·AND·XOR 를 해야 한다. Zbs 는 마스크 만들기와 연산을 한 명령에 묶는다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 300" role="img" aria-label="bset, bclr, binv, bext 가 비트 5 에 하는 일">
+        <rect x="330" y="34" width="40" height="258" rx="6" class="f-gold-soft"/>
+        <g class="t-faint" style="font-size:11px"><text x="270" y="26" text-anchor="middle">7</text><text x="310" y="26" text-anchor="middle">6</text><text x="350" y="26" text-anchor="middle" class="t-gold" style="font-size:12px">5</text><text x="390" y="26" text-anchor="middle">4</text><text x="430" y="26" text-anchor="middle">3</text><text x="470" y="26" text-anchor="middle">2</text><text x="510" y="26" text-anchor="middle">1</text><text x="550" y="26" text-anchor="middle">0</text></g>
+        <text x="24" y="61" class="t t-bold">rs1</text><text x="80" y="61" class="t-faint">= 0xB6</text>
+        <text x="24" y="101" class="t t-bold">마스크</text><text x="80" y="101" class="t-faint">= 1 ≪ (rs2 &amp; 31)</text>
+        <g class="t-mono" style="font-size:15px">
+          <text x="270" y="61" text-anchor="middle" class="t-accent">1</text><text x="310" y="61" text-anchor="middle" class="t-faint">0</text><text x="350" y="61" text-anchor="middle" class="t-accent">1</text><text x="390" y="61" text-anchor="middle" class="t-accent">1</text><text x="430" y="61" text-anchor="middle" class="t-faint">0</text><text x="470" y="61" text-anchor="middle" class="t-accent">1</text><text x="510" y="61" text-anchor="middle" class="t-accent">1</text><text x="550" y="61" text-anchor="middle" class="t-faint">0</text>
+          <text x="270" y="101" text-anchor="middle" class="t-faint">0</text><text x="310" y="101" text-anchor="middle" class="t-faint">0</text><text x="350" y="101" text-anchor="middle" class="t-gold">1</text><text x="390" y="101" text-anchor="middle" class="t-faint">0</text><text x="430" y="101" text-anchor="middle" class="t-faint">0</text><text x="470" y="101" text-anchor="middle" class="t-faint">0</text><text x="510" y="101" text-anchor="middle" class="t-faint">0</text><text x="550" y="101" text-anchor="middle" class="t-faint">0</text>
+        </g>
+        <line x1="24" y1="122" x2="836" y2="122" stroke="var(--border)"/>
+        <text x="24" y="151" class="t-mono t-bold">bset</text>
+        <text x="24" y="191" class="t-mono t-bold">bclr</text>
+        <text x="24" y="231" class="t-mono t-bold">binv</text>
+        <text x="24" y="271" class="t-mono t-bold">bext</text>
+        <g class="t-mono" style="font-size:15px">
+          <text x="270" y="151" text-anchor="middle" class="t-accent">1</text><text x="310" y="151" text-anchor="middle" class="t-faint">0</text><text x="350" y="151" text-anchor="middle" class="t-accent">1</text><text x="390" y="151" text-anchor="middle" class="t-accent">1</text><text x="430" y="151" text-anchor="middle" class="t-faint">0</text><text x="470" y="151" text-anchor="middle" class="t-accent">1</text><text x="510" y="151" text-anchor="middle" class="t-accent">1</text><text x="550" y="151" text-anchor="middle" class="t-faint">0</text>
+          <text x="270" y="191" text-anchor="middle" class="t-accent">1</text><text x="310" y="191" text-anchor="middle" class="t-faint">0</text><text x="350" y="191" text-anchor="middle" class="t-bad">0</text><text x="390" y="191" text-anchor="middle" class="t-accent">1</text><text x="430" y="191" text-anchor="middle" class="t-faint">0</text><text x="470" y="191" text-anchor="middle" class="t-accent">1</text><text x="510" y="191" text-anchor="middle" class="t-accent">1</text><text x="550" y="191" text-anchor="middle" class="t-faint">0</text>
+          <text x="270" y="231" text-anchor="middle" class="t-accent">1</text><text x="310" y="231" text-anchor="middle" class="t-faint">0</text><text x="350" y="231" text-anchor="middle" class="t-bad">0</text><text x="390" y="231" text-anchor="middle" class="t-accent">1</text><text x="430" y="231" text-anchor="middle" class="t-faint">0</text><text x="470" y="231" text-anchor="middle" class="t-accent">1</text><text x="510" y="231" text-anchor="middle" class="t-accent">1</text><text x="550" y="231" text-anchor="middle" class="t-faint">0</text>
+          <text x="270" y="271" text-anchor="middle" class="t-faint">0</text><text x="310" y="271" text-anchor="middle" class="t-faint">0</text><text x="350" y="271" text-anchor="middle" class="t-faint">0</text><text x="390" y="271" text-anchor="middle" class="t-faint">0</text><text x="430" y="271" text-anchor="middle" class="t-faint">0</text><text x="470" y="271" text-anchor="middle" class="t-faint">0</text><text x="510" y="271" text-anchor="middle" class="t-faint">0</text><text x="550" y="271" text-anchor="middle" class="t-gold">1</text>
+        </g>
+        <g class="t-dim">
+          <text x="600" y="101">rs2 = 5 (또는 즉시값 5)</text>
+          <text x="600" y="151">rs1 | 마스크 = 0xB6 (이미 1)</text>
+          <text x="600" y="191">rs1 &amp; ~마스크 = 0x96</text>
+          <text x="600" y="231">rs1 ^ 마스크 = 0x96</text>
+          <text x="600" y="271">(rs1 ≫ 5) &amp; 1 = 1</text>
+        </g>
+      </svg></div>
+      <figcaption><b>그림 14-7.</b> 같은 값 <code>0xB6</code>의 비트 5 에 Zbs 네 명령을 적용한 결과(아래 8비트만 그림). 비트 위치는 rs2 의 아래 log₂(XLEN) 비트만 쓰므로 RV32 에서 rs2 = 37 도 비트 5 를 뜻한다. <code>bext</code>만 결과를 비트 0 으로 내려 0 또는 1 을 만든다.</figcaption>
+    </figure>
+    <p>네 명령 모두 즉시값 형식(<code>bseti</code>·<code>bclri</code>·<code>binvi</code>·<code>bexti</code>)이 있다. 시프트 즉시값 명령처럼 shamt 필드에 비트 번호를 담으며, RV32 에서 shamt[5] = 1 인 인코딩은 예약되어 있다. 특히 <code>bseti</code>/<code>bclri</code>는 <code>andi</code>/<code>ori</code>의 12비트 즉시값이 닿지 않는 비트 11 이상을 한 명령으로 다룰 수 있다는 점이 쓸모 있다.</p>
+    <div class="codebox asm" data-title="장치 레지스터의 비트 20 을 켜기">li    t0, 1          # 기본 ISA: 3개 (마스크를 만들 즉시값이 12비트 범위를 벗어난다)
+slli  t0, t0, 20
+or    a0, a0, t0
+
+bseti a0, a0, 20     # Zbs: 1개</div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="playground">
+    <h2>비트 놀이터: 직접 눌러 보기</h2>
+    <p>지금까지 본 명령을 직접 계산해 보자. 아래 rs1(A)·rs2(B)의 비트를 눌러 바꾸거나 16진수를 입력하고, 명령을 고르면 rd 가 계산된다. 결과 비트 중 A 와 달라진 비트는 금색 테두리로 표시된다. 함께 나오는 기계어는 <code>op a0, a1, a2</code>(단항 명령은 <code>op a0, a1</code>)를 RV32 로 인코딩한 값이다.</p>
+    <div class="sim" id="playground-sim">
+      <div class="sim-head"><span class="sim-tag">SIMULATOR</span><h3>비트 놀이터 (RV32)</h3></div>
+      <div class="sim-pad">
+        <div class="playground-operand" id="playground-operand-a">
+          <div class="operand-head"><b>rs1 = A</b><input type="text" id="playground-hex-a" aria-label="A 의 16진수 값" spellcheck="false"><span id="playground-decimal-a"></span></div>
+          <div class="byte-groups" id="playground-bits-a"></div>
+        </div>
+        <div class="playground-operand" id="playground-operand-b">
+          <div class="operand-head"><b>rs2 = B</b><input type="text" id="playground-hex-b" aria-label="B 의 16진수 값" spellcheck="false"><span id="playground-decimal-b"></span></div>
+          <div class="byte-groups" id="playground-bits-b"></div>
+        </div>
+        <div class="operation-formula" id="playground-formula">—</div>
+        <div class="playground-operand">
+          <div class="operand-head"><b>rd</b><span class="mono" id="playground-hex-result"></span></div>
+          <div class="byte-groups" id="playground-bits-result"></div>
+        </div>
+      </div>
+      <div class="sim-controls">
+        <label class="control"><span>명령</span>
+          <select id="playground-operation">
+            <optgroup label="Zbb · 부정 논리"><option value="andn">andn</option><option value="orn">orn</option><option value="xnor">xnor</option></optgroup>
+            <optgroup label="Zbb · 세기"><option value="clz">clz</option><option value="ctz">ctz</option><option value="cpop">cpop</option></optgroup>
+            <optgroup label="Zbb · 회전과 바이트"><option value="rol">rol</option><option value="ror" selected>ror</option><option value="rev8">rev8</option><option value="orc.b">orc.b</option></optgroup>
+            <optgroup label="Zbb · 확장"><option value="sext.b">sext.b</option><option value="sext.h">sext.h</option><option value="zext.h">zext.h</option></optgroup>
+            <optgroup label="Zbb · 최소·최대"><option value="min">min</option><option value="max">max</option><option value="minu">minu</option><option value="maxu">maxu</option></optgroup>
+            <optgroup label="Zbs · 단일 비트"><option value="bset">bset</option><option value="bclr">bclr</option><option value="binv">binv</option><option value="bext">bext</option></optgroup>
+            <optgroup label="Zba · 주소 계산"><option value="sh1add">sh1add</option><option value="sh2add">sh2add</option><option value="sh3add">sh3add</option></optgroup>
+            <optgroup label="Zbc · 캐리 없는 곱셈"><option value="clmul">clmul</option><option value="clmulh">clmulh</option><option value="clmulr">clmulr</option></optgroup>
+          </select>
+        </label>
+        <div class="control"><span>값 바꾸기</span><div class="button-row">
+          <button class="button" id="playground-random">A 무작위</button>
+          <button class="button" id="playground-swap">A ↔ B</button>
+          <button class="button" id="playground-result-to-a">rd → A</button>
+          <button class="button" id="playground-clear">모두 0</button>
+        </div></div>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">rd (16진수)</span><span class="value" id="playground-readout-hex">—</span></div>
+        <div class="stat"><span class="key">rd (부호 있음)</span><span class="value" id="playground-readout-signed">—</span></div>
+        <div class="stat"><span class="key">확장</span><span class="value" id="playground-readout-extension">—</span></div>
+        <div class="stat"><span class="key">기계어</span><span class="value" id="playground-readout-machine">—</span></div>
+      </div>
+      <div class="sim-note">A = <code>0x12345678</code>, B = 8 에서 <code>ror</code>과 <code>rol</code>을 비교해 보자. <code>rd → A</code>를 눌러 <code>rev8</code>을 두 번 적용하면 원래 값으로 돌아온다. B 를 37 로 두고 <code>bset</code>을 하면 비트 5 가 켜진다(아래 5비트만 쓰기 때문). <code>clmul</code>에서 A = B = <code>0xffffffff</code>이면 왜 <code>0x55555555</code>가 나올지 생각해 보자.</div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="strlen">
+    <h2>orc.b 로 strlen 빠르게</h2>
+    <p>C 문자열의 길이를 구하는 가장 단순한 방법은 바이트를 하나씩 읽어 0인지 보는 것이다. 문자 하나마다 <code>lbu</code> · <code>addi</code> · <code>bnez</code> 세 명령이 든다. 레지스터에 4바이트(RV64 는 8바이트)를 한꺼번에 읽어 “이 안에 0인 바이트가 있나?”를 한 번에 물을 수 있다면 훨씬 빠를 것이다. <code>orc.b</code>가 바로 그 질문에 답한다. 0이 없는 덩어리는 <code>orc.b</code> 결과가 모두 1(= −1)이므로 <code>beq</code> 한 번으로 판정이 끝난다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 336" role="img" aria-label="orc.b, not, ctz 로 첫 NUL 바이트의 위치를 찾는 과정">
+        <defs><marker id="strlen-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker></defs>
+        <text x="24" y="50" class="t t-bold">메모리</text>
+        <text x="24" y="68" class="t-faint">0x1000 → 0x1003</text>
+        <g>
+          <rect x="300" y="36" width="100" height="40" rx="8" class="f-elev"/><text x="350" y="61" text-anchor="middle" class="t-mono">'a' 61</text>
+          <rect x="410" y="36" width="100" height="40" rx="8" class="f-elev"/><text x="460" y="61" text-anchor="middle" class="t-mono">'b' 62</text>
+          <rect x="520" y="36" width="100" height="40" rx="8" class="f-elev"/><text x="570" y="61" text-anchor="middle" class="t-mono">'c' 63</text>
+          <rect x="630" y="36" width="100" height="40" rx="8" class="f-bad-soft"/><text x="680" y="61" text-anchor="middle" class="t-mono">NUL 00</text>
+        </g>
+        <!-- 리틀 엔디언으로 엇갈려 들어가는 선 -->
+        <path d="M350 78 L680 114" class="s-accent flow-dash"/>
+        <path d="M460 78 L570 114" class="s-accent flow-dash"/>
+        <path d="M570 78 L460 114" class="s-accent flow-dash"/>
+        <path d="M680 78 L350 114" class="s-bad flow-dash"/>
+        <text x="760" y="100" class="t-faint">리틀 엔디언:</text>
+        <text x="760" y="116" class="t-faint">첫 바이트가</text>
+        <text x="760" y="132" class="t-faint">오른쪽 끝</text>
+        <text x="24" y="140" class="t-mono t-bold">lw a2, 0(a1)</text>
+        <text x="24" y="158" class="t-faint">a2 = 0x00636261</text>
+        <g>
+          <rect x="300" y="118" width="100" height="40" rx="8" class="f-bad-soft"/><text x="350" y="143" text-anchor="middle" class="t-mono">00</text>
+          <rect x="410" y="118" width="100" height="40" rx="8" class="f-elev"/><text x="460" y="143" text-anchor="middle" class="t-mono">63</text>
+          <rect x="520" y="118" width="100" height="40" rx="8" class="f-elev"/><text x="570" y="143" text-anchor="middle" class="t-mono">62</text>
+          <rect x="630" y="118" width="100" height="40" rx="8" class="f-elev"/><text x="680" y="143" text-anchor="middle" class="t-mono">61</text>
+        </g>
+        <path d="M515 160 V174" class="s-accent" marker-end="url(#strlen-arrow)"/>
+        <text x="24" y="202" class="t-mono t-bold">orc.b a2, a2</text>
+        <text x="24" y="220" class="t-faint">a2 = 0x00ffffff ≠ −1 → 루프 탈출</text>
+        <g>
+          <rect x="300" y="180" width="100" height="40" rx="8" class="f-surface"/><text x="350" y="205" text-anchor="middle" class="t-mono">00</text>
+          <rect x="410" y="180" width="100" height="40" rx="8" class="f-accent"/><text x="460" y="205" text-anchor="middle" class="t-on-accent">ff</text>
+          <rect x="520" y="180" width="100" height="40" rx="8" class="f-accent"/><text x="570" y="205" text-anchor="middle" class="t-on-accent">ff</text>
+          <rect x="630" y="180" width="100" height="40" rx="8" class="f-accent"/><text x="680" y="205" text-anchor="middle" class="t-on-accent">ff</text>
+        </g>
+        <path d="M515 222 V236" class="s-accent" marker-end="url(#strlen-arrow)"/>
+        <text x="24" y="264" class="t-mono t-bold">not a2, a2</text>
+        <text x="24" y="282" class="t-faint">a2 = 0xff000000</text>
+        <g>
+          <rect x="300" y="242" width="100" height="40" rx="8" class="f-gold blink-highlight"/><text x="350" y="267" text-anchor="middle" class="t-on-accent">ff</text>
+          <rect x="410" y="242" width="100" height="40" rx="8" class="f-surface"/><text x="460" y="267" text-anchor="middle" class="t-mono">00</text>
+          <rect x="520" y="242" width="100" height="40" rx="8" class="f-surface"/><text x="570" y="267" text-anchor="middle" class="t-mono">00</text>
+          <rect x="630" y="242" width="100" height="40" rx="8" class="f-surface"/><text x="680" y="267" text-anchor="middle" class="t-mono">00</text>
+        </g>
+        <path d="M730 300 H300" class="s-gold flow-dash" marker-end="url(#strlen-arrow)"/>
+        <text x="24" y="326" class="t-gold">ctz a2, a2 → 24 (오른쪽부터 0이 24개),   srli a0, a2, 3 → 3 = strlen("abc")</text>
+      </svg></div>
+      <figcaption><b>그림 14-8.</b> <code>orc.b</code>로 NUL 바이트를 찾는 원리(RV32, 리틀 엔디언). <code>orc.b</code>는 NUL 이 아닌 바이트를 0xff 로, NUL 바이트를 0x00 으로 만든다. <code>not</code>으로 뒤집으면 NUL 자리만 1이 되고, <code>ctz</code>가 오른쪽(낮은 주소)부터 0을 세어 첫 NUL 의 비트 위치를 준다. 8로 나누면(<code>srli 3</code>) 바이트 위치다.</figcaption>
+    </figure>
+    <p>규격 부록의 strlen 예제는 이 원리 위에 시작 주소가 정렬되지 않은 경우의 처리(첫 덩어리를 시프트해 앞부분을 버림)를 더한 것이다. 핵심 루프는 단 네 명령이다.</p>
+    <div class="codebox asm" data-title="규격 부록 strlen 의 핵심 루프 (REG_L 은 RV32 에서 lw, RV64 에서 ld)">.Lloop:
+        REG_L  a2, SZREG(a1)     # 다음 덩어리(4 또는 8바이트) 읽기
+        addi   a1, a1, SZREG
+        orc.b  a2, a2            # NUL 아닌 바이트 → 0xff, NUL → 0x00
+        beq    a2, a4, .Lloop    # a4 = -1: 모두 0xff 면 NUL 없음 → 계속
+.Lepilogue:
+        not    a2, a2            # NUL 자리만 0xff
+        ctz    a2, a2            # 리틀 엔디언: 낮은 주소 = 낮은 비트
+        ...
+        srli   a2, a2, 3         # 비트 위치 → 바이트 위치</div>
+    <div class="sim" id="strlen-sim">
+      <div class="sim-head"><span class="sim-tag animation">ANIMATION</span><h3>orc.b 로 문자열 끝 찾기</h3></div>
+      <div class="sim-view"><canvas id="strlen-canvas"></canvas></div>
+      <div class="step-description" id="strlen-description"><b>한 단계</b> 또는 <b>자동 재생</b>을 눌러 시작하자.</div>
+      <div class="sim-controls">
+        <label class="control"><span>문자열 (ASCII, 최대 19자)</span><input type="text" id="strlen-text" value="Hello, RISC-V" maxlength="19" spellcheck="false"></label>
+        <div class="control"><span>XLEN</span><div class="segmented" id="strlen-xlen"><button data-value="4" class="on">RV32 (4바이트)</button><button data-value="8">RV64 (8바이트)</button></div></div>
+        <div class="control"><span>실행</span><div class="button-row">
+          <button class="button primary" id="strlen-step">한 단계</button>
+          <button class="button" id="strlen-play">자동 재생</button>
+          <button class="button" id="strlen-reset">처음으로</button>
+        </div></div>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">읽은 덩어리</span><span class="value" id="strlen-readout-chunks">0</span></div>
+        <div class="stat"><span class="key">바이트 루프 (3 × 바이트)</span><span class="value" id="strlen-readout-byte-loop">—</span></div>
+        <div class="stat"><span class="key">orc.b 루프 (4 × 덩어리)</span><span class="value" id="strlen-readout-chunk-loop">—</span></div>
+        <div class="stat"><span class="key">strlen 결과</span><span class="value" id="strlen-readout-length">?</span></div>
+      </div>
+      <div class="sim-note">문자열 시작이 정렬되어 있다고 가정하고 루프 본문 명령만 센다. 문자열 길이를 4의 배수(예: 8자)로 맞추면 NUL 이 새 덩어리의 맨 앞에 오는 경우를 볼 수 있다. NUL 뒤의 바이트(회색 x)는 무엇이든 결과에 영향을 주지 않는다는 점도 확인하자.</div>
+    </div>
+    <div class="callout tip"><strong>strcmp 에서는 rev8 이 짝꿍</strong><p>규격 부록의 strcmp 예제는 두 문자열을 워드 단위로 비교하다가 다른 워드를 만나면 <code>rev8</code>로 두 워드를 빅 엔디언 순서로 뒤집은 뒤 <code>sltu</code> 한 번으로 크기를 비교한다. 바이트 순서를 뒤집으면 “앞 글자가 더 중요한” 사전식 비교가 정수 비교와 같아지기 때문이다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="zbc">
+    <h2>Zbc: 캐리 없는 곱셈</h2>
+    <p>보통 곱셈은 부분곱을 <b>더한다</b>. 같은 자리에서 1 + 1 이 나오면 윗자리로 올림(carry)이 생긴다. <span class="term">캐리 없는 곱셈</span><span class="english">(carry-less multiplication)</span>은 부분곱을 <b>XOR</b> 한다. 1 ⊕ 1 = 0 이고 올림은 없다. 이것은 계수가 0과 1뿐인 다항식, 곧 GF(2) 위의 다항식 곱셈과 정확히 같다. 비트 k 를 xᵏ 의 계수로 읽으면 된다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 300" role="img" aria-label="1011 곱하기 0110 을 보통 곱셈과 캐리 없는 곱셈으로 비교">
+        <text x="210" y="22" text-anchor="middle" class="t t-bold">보통 곱셈  11 × 6</text>
+        <text x="630" y="22" text-anchor="middle" class="t t-bold">캐리 없는 곱셈  clmul(11, 6)</text>
+        <rect x="264" y="34" width="36" height="210" rx="6" class="f-gold-soft"/>
+        <rect x="684" y="34" width="36" height="210" rx="6" class="f-gold-soft"/>
+        <g class="t-mono" style="font-size:15px">
+          <!-- 왼쪽 패널: 열 k 의 중심 = 354 - 36k -->
+          <text x="60" y="56" class="t-dim">A</text>
+          <text x="246" y="56" text-anchor="middle">1</text><text x="282" y="56" text-anchor="middle">0</text><text x="318" y="56" text-anchor="middle">1</text><text x="354" y="56" text-anchor="middle">1</text>
+          <text x="60" y="84" class="t-dim">× B</text>
+          <text x="246" y="84" text-anchor="middle">0</text><text x="282" y="84" text-anchor="middle">1</text><text x="318" y="84" text-anchor="middle">1</text><text x="354" y="84" text-anchor="middle">0</text>
+          <line x1="130" y1="94" x2="372" y2="94" stroke="var(--border)"/>
+          <text x="60" y="116" class="t-faint" style="font-size:12px">B₀=0</text>
+          <text x="246" y="116" text-anchor="middle" class="t-faint">0</text><text x="282" y="116" text-anchor="middle" class="t-faint">0</text><text x="318" y="116" text-anchor="middle" class="t-faint">0</text><text x="354" y="116" text-anchor="middle" class="t-faint">0</text>
+          <text x="60" y="144" class="t-faint" style="font-size:12px">B₁=1: A≪1</text>
+          <text x="210" y="144" text-anchor="middle">1</text><text x="246" y="144" text-anchor="middle">0</text><text x="282" y="144" text-anchor="middle">1</text><text x="318" y="144" text-anchor="middle">1</text><text x="354" y="144" text-anchor="middle" class="t-faint">0</text>
+          <text x="60" y="172" class="t-faint" style="font-size:12px">B₂=1: A≪2</text>
+          <text x="174" y="172" text-anchor="middle">1</text><text x="210" y="172" text-anchor="middle">0</text><text x="246" y="172" text-anchor="middle">1</text><text x="282" y="172" text-anchor="middle">1</text><text x="318" y="172" text-anchor="middle" class="t-faint">0</text><text x="354" y="172" text-anchor="middle" class="t-faint">0</text>
+          <text x="60" y="200" class="t-faint" style="font-size:12px">B₃=0</text>
+          <text x="246" y="200" text-anchor="middle" class="t-faint">0</text><text x="282" y="200" text-anchor="middle" class="t-faint">0</text><text x="318" y="200" text-anchor="middle" class="t-faint">0</text><text x="354" y="200" text-anchor="middle" class="t-faint">0</text>
+          <line x1="130" y1="212" x2="372" y2="212" stroke="var(--border)"/>
+          <text x="60" y="236" class="t-dim">합 (+)</text>
+          <text x="138" y="236" text-anchor="middle" class="t-accent">1</text><text x="174" y="236" text-anchor="middle" class="t-accent">0</text><text x="210" y="236" text-anchor="middle" class="t-accent">0</text><text x="246" y="236" text-anchor="middle" class="t-accent">0</text><text x="282" y="236" text-anchor="middle" class="t-accent">0</text><text x="318" y="236" text-anchor="middle" class="t-accent">1</text><text x="354" y="236" text-anchor="middle" class="t-accent">0</text>
+          <!-- 오른쪽 패널: 열 k 의 중심 = 774 - 36k -->
+          <text x="480" y="56" class="t-dim">A</text>
+          <text x="666" y="56" text-anchor="middle">1</text><text x="702" y="56" text-anchor="middle">0</text><text x="738" y="56" text-anchor="middle">1</text><text x="774" y="56" text-anchor="middle">1</text>
+          <text x="480" y="84" class="t-dim">× B</text>
+          <text x="666" y="84" text-anchor="middle">0</text><text x="702" y="84" text-anchor="middle">1</text><text x="738" y="84" text-anchor="middle">1</text><text x="774" y="84" text-anchor="middle">0</text>
+          <line x1="550" y1="94" x2="792" y2="94" stroke="var(--border)"/>
+          <text x="480" y="116" class="t-faint" style="font-size:12px">B₀=0</text>
+          <text x="666" y="116" text-anchor="middle" class="t-faint">0</text><text x="702" y="116" text-anchor="middle" class="t-faint">0</text><text x="738" y="116" text-anchor="middle" class="t-faint">0</text><text x="774" y="116" text-anchor="middle" class="t-faint">0</text>
+          <text x="480" y="144" class="t-faint" style="font-size:12px">B₁=1: A≪1</text>
+          <text x="630" y="144" text-anchor="middle">1</text><text x="666" y="144" text-anchor="middle">0</text><text x="702" y="144" text-anchor="middle">1</text><text x="738" y="144" text-anchor="middle">1</text><text x="774" y="144" text-anchor="middle" class="t-faint">0</text>
+          <text x="480" y="172" class="t-faint" style="font-size:12px">B₂=1: A≪2</text>
+          <text x="594" y="172" text-anchor="middle">1</text><text x="630" y="172" text-anchor="middle">0</text><text x="666" y="172" text-anchor="middle">1</text><text x="702" y="172" text-anchor="middle">1</text><text x="738" y="172" text-anchor="middle" class="t-faint">0</text><text x="774" y="172" text-anchor="middle" class="t-faint">0</text>
+          <text x="480" y="200" class="t-faint" style="font-size:12px">B₃=0</text>
+          <text x="666" y="200" text-anchor="middle" class="t-faint">0</text><text x="702" y="200" text-anchor="middle" class="t-faint">0</text><text x="738" y="200" text-anchor="middle" class="t-faint">0</text><text x="774" y="200" text-anchor="middle" class="t-faint">0</text>
+          <line x1="550" y1="212" x2="792" y2="212" stroke="var(--border)"/>
+          <text x="480" y="236" class="t-dim">XOR (⊕)</text>
+          <text x="594" y="236" text-anchor="middle" class="t-teal">1</text><text x="630" y="236" text-anchor="middle" class="t-teal">1</text><text x="666" y="236" text-anchor="middle" class="t-teal">1</text><text x="702" y="236" text-anchor="middle" class="t-teal">0</text><text x="738" y="236" text-anchor="middle" class="t-teal">1</text><text x="774" y="236" text-anchor="middle" class="t-teal">0</text>
+        </g>
+        <text x="210" y="262" text-anchor="middle" class="t-dim">= 1000010₂ = 66  (비트 2 의 1+1 이 올림을 만든다)</text>
+        <text x="630" y="262" text-anchor="middle" class="t-dim">= 111010₂ = 58  (비트 2 의 1⊕1 = 0, 올림 없음)</text>
+        <text x="430" y="290" text-anchor="middle" class="t-accent">다항식으로 읽으면 (x³ + x + 1)(x² + x) = x⁵ + x⁴ + x³ + x   — 두 x² 항이 서로 지워진다</text>
+      </svg></div>
+      <figcaption><b>그림 14-9.</b> 같은 부분곱을 더하면 보통 곱셈, XOR 하면 캐리 없는 곱셈이 된다. 금색 열(비트 2)에서 두 1이 만난다. 보통 곱셈에서는 올림이 위로 번져 결과 전체가 달라지지만, 캐리 없는 곱셈에서는 그 자리만 0이 되고 끝난다.</figcaption>
+    </figure>
+    <p>XLEN 비트 두 수의 캐리 없는 곱은 최대 2·XLEN − 1 비트다. Zbc 는 이것을 세 가지로 잘라 준다.</p>
+    <div class="table-wrap"><table class="instruction-table compact">
+      <thead><tr><th>명령</th><th>결과 (2·XLEN 비트 곱 P 에서)</th><th>쓰임</th></tr></thead>
+      <tbody>
+        <tr><td>clmul</td><td>P[XLEN−1 : 0] — 아래 절반</td><td>GCM 의 GHASH, CRC</td></tr>
+        <tr><td>clmulh</td><td>P[2·XLEN−1 : XLEN] — 위 절반</td><td>clmul 과 짝을 이뤄 전체 곱</td></tr>
+        <tr><td>clmulr</td><td>P[2·XLEN−2 : XLEN−1] — “뒤집힌” 절반</td><td>비트 순서가 반대인 CRC (Zbkc 에는 없음)</td></tr>
+      </tbody>
+    </table></div>
+    <p><code>clmulr</code>의 r 은 reversed 다. 규격 비고에 따르면 이 명령은 “입력 둘을 비트 반전한 뒤 <code>clmul</code>을 하고 결과를 다시 비트 반전한 것”과 같다. 이더넷 CRC-32 처럼 비트를 LSB 부터 보내는 프로토콜의 CRC 를 계산할 때 비트 반전 없이 바로 쓸 수 있다.</p>
+    <div class="sim" id="clmul-sim">
+      <div class="sim-head"><span class="sim-tag">SIMULATOR</span><h3>보통 곱셈 vs 캐리 없는 곱셈 (8비트)</h3></div>
+      <div class="sim-pad">
+        <div class="operand-bits">
+          <div><div class="label">A (<span class="mono" id="clmul-value-a"></span>)</div><div class="bit-row" id="clmul-bits-a"></div></div>
+          <div><div class="label">B (<span class="mono" id="clmul-value-b"></span>)</div><div class="bit-row" id="clmul-bits-b"></div></div>
+        </div>
+        <div class="multiply-panels">
+          <div class="multiply-panel"><h4>보통 곱셈: 부분곱을 더한다 (mul)</h4><div class="multiply-grid" id="clmul-grid-normal"></div></div>
+          <div class="multiply-panel"><h4>캐리 없는 곱셈: 부분곱을 XOR 한다 (clmul)</h4><div class="multiply-grid" id="clmul-grid-carryless"></div></div>
+        </div>
+      </div>
+      <div class="step-description" id="clmul-description">비트를 눌러 A·B 를 정하고 <b>부분곱 하나 더</b>를 눌러 보자.</div>
+      <div class="sim-controls">
+        <div class="control"><span>진행</span><div class="button-row">
+          <button class="button primary" id="clmul-step">부분곱 하나 더</button>
+          <button class="button" id="clmul-all">모두 보기</button>
+          <button class="button" id="clmul-reset">처음으로</button>
+        </div></div>
+        <div class="control"><span>예제</span><div class="button-row">
+          <button class="button" id="clmul-example-figure">11 × 6</button>
+          <button class="button" id="clmul-example-square">0xff × 0xff</button>
+        </div></div>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">A × B</span><span class="value" id="clmul-readout-product">—</span></div>
+        <div class="stat"><span class="key">clmul(A, B)</span><span class="value" id="clmul-readout-carryless">—</span></div>
+        <div class="stat"><span class="key">결과가 다른 비트 수</span><span class="value" id="clmul-readout-difference">—</span></div>
+      </div>
+      <div class="sim-note"><b>0xff × 0xff</b> 예제를 보자. 보통 곱셈은 0xfe01 이지만 캐리 없는 곱은 0x5555 다. 자기 자신과의 캐리 없는 곱(제곱)은 언제나 비트 사이에 0을 끼워 넣은 꼴이 된다. 교차항이 두 번씩 나와 XOR 로 지워지기 때문이다.</div>
+    </div>
+    <div class="callout deep"><strong>CRC 와 AES-GCM 에서 왜 필요한가</strong><p>CRC 는 메시지를 GF(2) 다항식으로 보고 생성 다항식으로 나눈 나머지다. 바렛 축약(Barrett reduction)을 쓰면 이 나눗셈을 캐리 없는 곱셈 몇 번으로 바꿀 수 있어서, 비트마다 시프트·XOR 하던 루프나 큰 테이블 조회가 필요 없어진다. AES-GCM 의 인증 태그를 만드는 GHASH 는 GF(2¹²⁸) 의 곱셈이며, 128비트 곱셈을 64비트(또는 32비트) <code>clmul</code>/<code>clmulh</code> 조각으로 나눠 계산한다. 테이블 조회를 쓰지 않으니 캐시 타이밍으로 키가 새는 위험도 사라진다. 그래서 암호용 Zbkc 는 GHASH 에 필요한 <code>clmul</code>·<code>clmulh</code>만 담았다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="crypto">
+    <h2>스칼라 암호 Zk*: AES · SHA-2 · SM4 · SM3</h2>
+    <p>스칼라 암호 확장(v1.0.1)은 정수 레지스터만으로 표준 암호 알고리즘을 빠르고 안전하게 돌리기 위한 명령 모음이다. 벡터 유닛이 없는 작은 코어도 쓸 수 있도록 32비트·64비트 정수 레지스터 위에서 동작한다. 규격은 쓰임새에 따라 확장을 잘게 나눴다. TLS 1.3 의 GCM 모드처럼 복호화가 필요 없는 경우가 있어 AES 암호화(Zkne)와 복호화(Zknd)를 나눴고, 나라마다 요구하는 알고리즘이 달라 NIST 계열과 중국 ShangMi(SM) 계열도 나눴다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 300" role="img" aria-label="Zk, Zkn, Zks 묶음 확장의 구성">
+        <rect x="208" y="20" width="104" height="44" rx="10" class="f-accent"/><text x="260" y="47" text-anchor="middle" class="t-on-accent" style="font-size:16px">Zk</text>
+        <rect x="650" y="20" width="104" height="44" rx="10" class="f-violet-soft"/><text x="702" y="47" text-anchor="middle" class="t t-bold" style="font-size:16px">Zks</text>
+        <path d="M260 64 L152 110" class="s-accent"/><path d="M260 64 L292 110" class="s-accent"/><path d="M260 64 L432 110" class="s-accent"/>
+        <rect x="100" y="110" width="104" height="44" rx="10" class="f-accent-soft"/><text x="152" y="130" text-anchor="middle" class="t t-bold">Zkn</text><text x="152" y="147" text-anchor="middle" class="t-faint">NIST 묶음</text>
+        <rect x="240" y="110" width="104" height="44" rx="10" class="f-teal-soft"/><text x="292" y="130" text-anchor="middle" class="t t-bold">Zkr</text><text x="292" y="147" text-anchor="middle" class="t-faint">엔트로피 소스</text>
+        <rect x="380" y="110" width="104" height="44" rx="10" class="f-teal-soft"/><text x="432" y="130" text-anchor="middle" class="t t-bold">Zkt</text><text x="432" y="147" text-anchor="middle" class="t-faint">상수 시간</text>
+        <g class="s-gold">
+          <path d="M152 154 L62 210"/><path d="M152 154 L156 210"/><path d="M152 154 L250 210"/>
+          <path d="M152 154 L372 210"/><path d="M152 154 L466 210"/><path d="M152 154 L560 210"/>
+        </g>
+        <g class="s-line">
+          <path d="M702 64 L372 210" stroke-dasharray="5 4"/><path d="M702 64 L466 210" stroke-dasharray="5 4"/><path d="M702 64 L560 210" stroke-dasharray="5 4"/>
+          <path d="M702 64 L692 210"/><path d="M702 64 L786 210"/>
+        </g>
+        <g>
+          <rect x="20" y="210" width="84" height="52" rx="10" class="f-gold-soft"/><text x="62" y="232" text-anchor="middle" class="t t-bold">Zkne</text><text x="62" y="251" text-anchor="middle" class="t-faint">AES 암호화</text>
+          <rect x="114" y="210" width="84" height="52" rx="10" class="f-gold-soft"/><text x="156" y="232" text-anchor="middle" class="t t-bold">Zknd</text><text x="156" y="251" text-anchor="middle" class="t-faint">AES 복호화</text>
+          <rect x="208" y="210" width="84" height="52" rx="10" class="f-gold-soft"/><text x="250" y="232" text-anchor="middle" class="t t-bold">Zknh</text><text x="250" y="251" text-anchor="middle" class="t-faint">SHA-2</text>
+          <rect x="330" y="210" width="84" height="52" rx="10" class="f-elev"/><text x="372" y="232" text-anchor="middle" class="t t-bold">Zbkb</text><text x="372" y="251" text-anchor="middle" class="t-faint">비트 조작</text>
+          <rect x="424" y="210" width="84" height="52" rx="10" class="f-elev"/><text x="466" y="232" text-anchor="middle" class="t t-bold">Zbkc</text><text x="466" y="251" text-anchor="middle" class="t-faint">clmul</text>
+          <rect x="518" y="210" width="84" height="52" rx="10" class="f-elev"/><text x="560" y="232" text-anchor="middle" class="t t-bold">Zbkx</text><text x="560" y="251" text-anchor="middle" class="t-faint">xperm</text>
+          <rect x="650" y="210" width="84" height="52" rx="10" class="f-violet-soft"/><text x="692" y="232" text-anchor="middle" class="t t-bold">Zksed</text><text x="692" y="251" text-anchor="middle" class="t-faint">SM4</text>
+          <rect x="744" y="210" width="84" height="52" rx="10" class="f-violet-soft"/><text x="786" y="232" text-anchor="middle" class="t t-bold">Zksh</text><text x="786" y="251" text-anchor="middle" class="t-faint">SM3</text>
+        </g>
+        <text x="430" y="290" text-anchor="middle" class="t-dim">Zk = Zkn + Zkr + Zkt.  Zks 는 Zk 에 들어 있지 않은 별도 묶음이며, Zbk* 세 확장은 Zkn 과 Zks 가 함께 쓴다.</text>
+      </svg></div>
+      <figcaption><b>그림 14-10.</b> 스칼라 암호 확장의 묶음 구조. 묶음 이름(Zkn·Zks·Zk)을 지원한다고 밝히는 코어는 아래에 달린 확장을 모두 구현해야 한다.</figcaption>
+    </figure>
+
+    <h3>AES: RV32 와 RV64 의 서로 다른 전략</h3>
+    <p>AES 한 라운드는 SubBytes(S-box 치환) → ShiftRows(행 회전) → MixColumns(열 섞기) → AddRoundKey(키 XOR)로 이뤄진다. 128비트 상태를 레지스터에 어떻게 담느냐에 따라 두 가지 설계가 나왔다.</p>
+    <ul>
+      <li><b>RV32 (<code>aes32esi</code>·<code>aes32esmi</code>·<code>aes32dsi</code>·<code>aes32dsmi</code>)</b> — 바이트 하나씩 처리한다. 2비트 즉시값 <code>bs</code>로 rs2 의 바이트 하나를 골라 S-box 에 통과시키고(<code>…smi</code>는 MixColumns 의 그 바이트 몫까지 계산), <code>bs × 8</code>만큼 회전해 rs1 에 XOR 한다. 소프트웨어의 “T-테이블” 방식을 하드웨어로 옮긴 것이다.</li>
+      <li><b>RV64 (<code>aes64es</code>·<code>aes64esm</code>·<code>aes64ds</code>·<code>aes64dsm</code>·<code>aes64im</code>·<code>aes64ks1i</code>·<code>aes64ks2</code>)</b> — 두 64비트 레지스터에 상태 전체(128비트)를 담고, 한 명령이 다음 라운드 상태의 절반(64비트)을 만든다. 같은 명령을 레지스터 순서만 바꿔 두 번 쓰면 한 라운드가 끝난다.</li>
+    </ul>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 300" role="img" aria-label="aes32esi 의 데이터 흐름">
+        <defs><marker id="aes-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent-2)"/></marker></defs>
+        <text x="40" y="26" class="t-dim">rs2 (입력 상태의 한 열)</text>
+        <rect x="40" y="36" width="74" height="40" rx="8" class="f-elev"/><text x="77" y="61" text-anchor="middle" class="t-mono">b3</text>
+        <rect x="120" y="36" width="74" height="40" rx="8" class="f-gold-soft blink-highlight"/><text x="157" y="61" text-anchor="middle" class="t-mono t-bold">b2</text>
+        <rect x="200" y="36" width="74" height="40" rx="8" class="f-elev"/><text x="237" y="61" text-anchor="middle" class="t-mono">b1</text>
+        <rect x="280" y="36" width="74" height="40" rx="8" class="f-elev"/><text x="317" y="61" text-anchor="middle" class="t-mono">b0</text>
+        <text x="370" y="61" class="t-gold">← bs = 2 가 고른 바이트</text>
+        <path d="M157 78 V118" class="s-gold flow-dash" marker-end="url(#aes-arrow)"/>
+        <rect x="100" y="120" width="120" height="54" rx="10" class="f-gold-soft"/><text x="160" y="143" text-anchor="middle" class="t t-bold">S-box</text><text x="160" y="162" text-anchor="middle" class="t-faint">SubBytes</text>
+        <path d="M220 147 H296" class="s-gold flow-dash" marker-end="url(#aes-arrow)"/>
+        <rect x="298" y="120" width="150" height="54" rx="10" class="f-elev"/><text x="373" y="143" text-anchor="middle" class="t-mono">0x000000‖S</text><text x="373" y="162" text-anchor="middle" class="t-faint">32비트로 넓힘</text>
+        <path d="M448 147 H488" class="s-gold flow-dash" marker-end="url(#aes-arrow)"/>
+        <rect x="490" y="120" width="150" height="54" rx="10" class="f-violet-soft"/><text x="565" y="143" text-anchor="middle" class="t t-bold">rol (bs × 8)</text><text x="565" y="162" text-anchor="middle" class="t-faint">= 16비트 회전</text>
+        <path d="M640 147 H674" class="s-gold flow-dash" marker-end="url(#aes-arrow)"/>
+        <circle cx="700" cy="147" r="24" class="f-accent-soft"/><text x="700" y="155" text-anchor="middle" class="t-accent" style="font-size:22px">⊕</text>
+        <rect x="650" y="30" width="100" height="44" rx="8" class="f-elev"/><text x="700" y="50" text-anchor="middle" class="t-mono">rs1</text><text x="700" y="66" text-anchor="middle" class="t-faint" style="font-size:11px">누적값·라운드 키</text>
+        <path d="M700 76 V120" class="s-accent flow-dash" marker-end="url(#aes-arrow)"/>
+        <path d="M700 172 V208" class="s-accent flow-dash" marker-end="url(#aes-arrow)"/>
+        <rect x="650" y="210" width="100" height="44" rx="8" class="f-accent"/><text x="700" y="237" text-anchor="middle" class="t-on-accent">rd</text>
+        <text x="40" y="222" class="t-dim">aes32esi: S-box 결과를 그대로 회전해 XOR (마지막 라운드)</text>
+        <text x="40" y="246" class="t-dim">aes32esmi: S-box 뒤에 MixColumns 의 그 바이트 몫을 더 적용 (중간 라운드)</text>
+        <text x="40" y="270" class="t-dim">서로 다른 입력 열에서 바이트를 골라 bs = 0·1·2·3 으로 네 번 누적하면</text>
+        <text x="40" y="290" class="t-dim">출력 상태의 한 열(32비트)이 완성된다.</text>
+      </svg></div>
+      <figcaption><b>그림 14-11.</b> <code>aes32esi rd, rs1, rs2, bs</code>의 데이터 흐름(규격 Sail 코드를 그림으로 옮김). S-box 는 하드웨어 표 조회이지만, 규격은 이 명령의 실행 시간이 데이터에 따라 달라지면 안 된다고 못 박는다. 소프트웨어 표 조회가 캐시 타이밍으로 키를 흘리던 문제를 없애는 것이 목적이다.</figcaption>
+    </figure>
+    <div class="codebox asm" data-title="RV64 AES 중간 라운드 한 번 (규격의 Note To Software Developers)">aes64esm t2, t0, t1      # t0·t1 = 현재 상태, t2·t3 = 다음 상태
+aes64esm t3, t1, t0      # 두 번째는 레지스터 순서를 뒤집는다
+# 이후 라운드 키를 xor 로 더한다</div>
+
+    <h3>SHA-2: 시그마 함수를 한 명령으로</h3>
+    <p>SHA-256 의 메시지 확장과 압축 단계는 회전 두세 번과 XOR 로 이뤄진 네 함수를 반복해서 부른다. Zbb 의 <code>ror</code>만 있어도 함수 하나에 회전 3 + XOR 2 = 5개쯤 드는 일을, Zknh 는 한 명령으로 줄인다.</p>
+    <div class="table-wrap"><table class="instruction-table compact">
+      <thead><tr><th>명령</th><th>계산 (32비트)</th><th>SHA-256 표기</th></tr></thead>
+      <tbody>
+        <tr><td>sha256sig0</td><td>ror(x,7) ⊕ ror(x,18) ⊕ (x ≫ 3)</td><td>σ₀ (메시지 확장)</td></tr>
+        <tr><td>sha256sig1</td><td>ror(x,17) ⊕ ror(x,19) ⊕ (x ≫ 10)</td><td>σ₁ (메시지 확장)</td></tr>
+        <tr><td>sha256sum0</td><td>ror(x,2) ⊕ ror(x,13) ⊕ ror(x,22)</td><td>Σ₀ (압축)</td></tr>
+        <tr><td>sha256sum1</td><td>ror(x,6) ⊕ ror(x,11) ⊕ ror(x,25)</td><td>Σ₁ (압축)</td></tr>
+      </tbody>
+    </table></div>
+    <p>SHA-512 용으로는 RV64 에 같은 꼴의 64비트 명령 네 개(<code>sha512sig0</code> 등)가, RV32 에는 64비트 값을 두 레지스터로 나눠 계산하는 여섯 개(<code>sha512sig0h/l</code>, <code>sha512sig1h/l</code>, <code>sha512sum0r</code>, <code>sha512sum1r</code>)가 있다.</p>
+
+    <h3>SM4 · SM3 과 Zbk* 보조 명령</h3>
+    <p>중국 표준 블록 암호 SM4 는 암호화와 복호화가 같은 라운드 함수를 쓰므로 확장도 하나(Zksed: <code>sm4ed</code>, <code>sm4ks</code>)다. 구조는 RV32 AES 명령과 같다. <code>bs</code>로 바이트 하나를 골라 S-box 와 선형 변환을 거친 뒤 회전해 rs1 에 XOR 한다. 해시 SM3 용 Zksh 는 치환 함수 P0(<code>x ⊕ rol(x,9) ⊕ rol(x,17)</code>)과 P1(<code>x ⊕ rol(x,15) ⊕ rol(x,23)</code>)을 각각 한 명령으로 만든다.</p>
+    <p>암호용 비트 조작 확장은 이렇게 쓰인다. Zbkb 의 <code>pack</code>·<code>packh</code>는 바이트 문자열을 워드로 모으고, <code>brev8</code>은 GHASH 의 비트 순서를 맞추며, RV32 전용 <code>zip</code>·<code>unzip</code>은 SHA-3 의 64비트 회전을 32비트 레지스터 둘로 흉내 낼 때 쓴다. Zbkx 의 <code>xperm4</code>·<code>xperm8</code>은 레지스터 안에 담은 작은 표에서 4비트·8비트 원소를 골라 오는 “레지스터 속 표 조회”다. 메모리 표 조회 없이 S-box 를 구현할 수 있어 실행 시간이 비밀 값에 따라 달라지지 않는다. 규격은 이 방식으로 구현할 수 있는 8비트 S-box 의 예로 AES, SM4, 일본의 Camellia 와 함께 <b>한국의 ARIA</b>를 든다.</p>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="entropy-timing">
+    <h2>Zkr 엔트로피 소스와 Zkt 상수 시간</h2>
+    <p>암호는 좋은 알고리즘만으로 완성되지 않는다. 예측할 수 없는 <b>난수</b>가 필요하고, 계산하는 동안 <b>시간</b>으로 비밀이 새지 않아야 한다. 스칼라 암호 확장의 마지막 두 조각이 이 둘을 맡는다.</p>
+    <h3>seed CSR: 하드웨어 엔트로피 16비트씩</h3>
+    <p>Zkr 은 비특권 CSR <code>seed</code>를 주소 <b>0x015</b>에 정의한다. 물리적 잡음원에서 모은 엔트로피를 한 번에 16비트씩 내준다. 이 값은 그대로 난수로 쓰기보다, SHA-2 등으로 정리(conditioning)한 뒤 AES 기반 CTR_DRBG 같은 결정적 난수 생성기의 씨앗(seed)으로 쓰라고 규격은 권한다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 160" role="img" aria-label="seed CSR 의 비트 배치">
+        <g class="t-faint" style="font-size:11px">
+          <text x="52" y="28">31</text><text x="96" y="28" text-anchor="end">30</text>
+          <text x="100" y="28">29</text><text x="240" y="28" text-anchor="end">24</text>
+          <text x="244" y="28">23</text><text x="432" y="28" text-anchor="end">16</text>
+          <text x="436" y="28">15</text><text x="816" y="28" text-anchor="end">0</text>
+        </g>
+        <rect x="50" y="36" width="48" height="54" class="f-gold-soft"/><text x="74" y="60" text-anchor="middle" class="t t-bold" style="font-size:13px">OPST</text><text x="74" y="78" text-anchor="middle" class="t-faint" style="font-size:11px">상태</text>
+        <rect x="98" y="36" width="144" height="54" class="f-surface"/><text x="170" y="60" text-anchor="middle" class="t-dim">reserved</text><text x="170" y="78" text-anchor="middle" class="t-faint">표준용 예약</text>
+        <rect x="242" y="36" width="192" height="54" class="f-surface"/><text x="338" y="60" text-anchor="middle" class="t-dim">custom</text><text x="338" y="78" text-anchor="middle" class="t-faint">구현 자유 (실험용)</text>
+        <rect x="434" y="36" width="384" height="54" class="f-ok-soft"/><text x="626" y="60" text-anchor="middle" class="t t-bold">entropy</text><text x="626" y="78" text-anchor="middle" class="t-faint">OPST = ES16 일 때만 유효한 16비트</text>
+        <text x="50" y="122" class="t-mono">csrrw a0, seed, x0   → a0 = 0x8000ABCD : OPST = 10 (ES16), entropy = 0xABCD</text>
+        <text x="50" y="148" class="t-dim">읽기 전용 형식(csrrs/csrrc 의 rs1 = x0 등)으로 접근하면 불법 명령 예외. 쓰는 값은 무시된다.</text>
+      </svg></div>
+      <figcaption><b>그림 14-12.</b> <code>seed</code> CSR(0x015)의 비트 배치. 읽으면 엔트로피가 지워지는(wipe-on-read) CSR 이라서 “읽기와 쓰기를 함께 하는” <code>csrrw rd, seed, x0</code>로 읽는 것이 정석이다. OPST 가 ES16 이 아니면 entropy 필드는 0이어야 한다.</figcaption>
+    </figure>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 350" role="img" aria-label="seed CSR 의 OPST 상태 전이">
+        <defs>
+          <marker id="entropy-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--text-faint)"/></marker>
+          <marker id="entropy-arrow-alarm" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker>
+          <marker id="entropy-arrow-fatal" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--bad)"/></marker>
+          <path id="entropy-poll-loop" d="M300 165 C400 135 460 135 560 165 L560 188 C460 215 400 215 300 188 Z"/>
+        </defs>
+        <text x="450" y="14" text-anchor="middle" class="t-dim">reset</text>
+        <path d="M450 18 V38" class="s-line" marker-end="url(#entropy-arrow)"/>
+        <!-- 상태 상자 -->
+        <rect x="365" y="40" width="130" height="50" rx="10" class="f-teal-soft"/><text x="430" y="62" text-anchor="middle" class="t t-bold">BIST</text><text x="430" y="80" text-anchor="middle" class="t-faint">OPST = 00</text>
+        <rect x="170" y="150" width="130" height="50" rx="10" class="f-gold-soft"/><text x="235" y="172" text-anchor="middle" class="t t-bold">WAIT</text><text x="235" y="190" text-anchor="middle" class="t-faint">OPST = 01</text>
+        <rect x="560" y="150" width="130" height="50" rx="10" class="f-ok-soft pulse"/><text x="625" y="172" text-anchor="middle" class="t t-bold">ES16</text><text x="625" y="190" text-anchor="middle" class="t-faint">OPST = 10</text>
+        <rect x="365" y="262" width="130" height="50" rx="10" class="f-bad-soft"/><text x="430" y="284" text-anchor="middle" class="t t-bold">DEAD</text><text x="430" y="302" text-anchor="middle" class="t-faint">OPST = 11</text>
+        <!-- 정상 전이 -->
+        <path d="M398 92 L272 148" class="s-line" marker-end="url(#entropy-arrow)"/>
+        <path d="M462 92 L588 148" class="s-line" marker-end="url(#entropy-arrow)"/>
+        <path d="M300 165 C400 135 460 135 556 164" class="s-line" marker-end="url(#entropy-arrow)"/>
+        <path d="M560 188 C460 215 400 215 304 189" class="s-line" marker-end="url(#entropy-arrow)"/>
+        <!-- 치명적이지 않은 경보 -->
+        <path d="M195 148 C195 90 290 62 362 60" class="s-accent s-dashed" marker-end="url(#entropy-arrow-alarm)"/>
+        <path d="M665 148 C665 90 570 62 498 60" class="s-accent s-dashed" marker-end="url(#entropy-arrow-alarm)"/>
+        <path d="M382 40 C368 14 412 12 404 38" class="s-accent s-dashed" marker-end="url(#entropy-arrow-alarm)"/>
+        <text x="690" y="100" class="t-accent" style="font-size:12.5px">치명적이지 않은 경보</text>
+        <text x="690" y="118" class="t-faint">(기록만 하고 계속)</text>
+        <!-- 치명적 오류 -->
+        <path d="M262 202 L398 260" class="s-bad s-dashed" marker-end="url(#entropy-arrow-fatal)"/>
+        <path d="M598 202 L462 260" class="s-bad s-dashed" marker-end="url(#entropy-arrow-fatal)"/>
+        <path d="M372 90 C110 110 100 300 362 292" class="s-bad s-dashed" marker-end="url(#entropy-arrow-fatal)"/>
+        <text x="40" y="250" class="t-bad" style="font-size:13px">치명적 오류</text>
+        <!-- 제자리 전이 -->
+        <path d="M222 202 C210 238 262 238 250 203" class="s-line" marker-end="url(#entropy-arrow)"/>
+        <path d="M612 202 C600 238 652 238 640 203" class="s-line" marker-end="url(#entropy-arrow)"/>
+        <path d="M418 314 C406 344 456 344 444 315" class="s-bad" marker-end="url(#entropy-arrow-fatal)"/>
+        <text x="470" y="338" class="t-bad" style="font-size:12px">한번 DEAD 면 계속 DEAD</text>
+        <text x="702" y="172" class="t-ok">16비트 엔트로피</text>
+        <text x="702" y="190" class="t-ok">유효!</text>
+        <text x="40" y="160" class="t-faint">엔트로피가 아직</text>
+        <text x="40" y="176" class="t-faint">모이지 않음</text>
+        <circle r="6" fill="var(--accent-2)"><animateMotion dur="4s" begin="-1s" repeatCount="indefinite"><mpath href="#entropy-poll-loop"/></animateMotion></circle>
+      </svg></div>
+      <figcaption><b>그림 14-13.</b> <code>seed</code>의 OPST 상태 전이(규격 그림 “Entropy Source state transition diagram”을 옮김). 평소에는 WAIT(아직 없음)와 ES16(16비트 유효)을 오간다(금색 점). BIST 는 리셋 직후의 자체 시험이며, 동작 중에 BIST 로 돌아가면 치명적이지 않은 경보라는 뜻이다. DEAD 는 복구할 수 없는 오류다.</figcaption>
+    </figure>
+    <div class="codebox asm" data-title="seed 에서 16비트 엔트로피 하나 얻기 (M 모드 또는 접근이 허락된 모드)">poll:   csrrw  t0, seed, x0      # 읽으면서 쓴다 → 읽은 엔트로피는 지워진다
+        srli   t1, t0, 30        # t1 = OPST
+        li     t2, 2             # ES16 = 0b10
+        beq    t1, t2, got
+        li     t2, 3             # DEAD = 0b11
+        beq    t1, t2, fatal     # 복구 불가: 보고하고 멈춘다
+        j      poll              # BIST·WAIT: 잠시 후 다시
+got:    zext.h t0, t0            # 아래 16비트가 엔트로피 (zext.h 는 Zbb)</div>
+    <p><code>seed</code>는 기본적으로 M 모드에서만 접근할 수 있다. S·U 모드에서 쓰게 하려면 M 모드가 <code>mseccfg</code> CSR 의 SSEED·USEED 필드를 켜 줘야 하고, 그렇지 않으면 불법 명령 예외가 난다. 가상 머신 안의 운영체제에는 하이퍼바이저가 이 접근을 가로채 소프트웨어 난수 생성기(규격의 “가상 엔트로피 소스”, 최소 256비트 보안 수준)로 흉내 낸 값을 줄 수 있다.</p>
+
+    <h3>Zkt: 실행 시간이 데이터에 따라 달라지지 않는다는 약속</h3>
+    <p>타이밍 공격은 “계산이 얼마나 걸렸는지”만으로 비밀 키를 알아낸다. 곱셈기가 0을 만나면 일찍 끝난다거나, 비밀 값에 따라 분기 방향이나 메모리 주소가 바뀌면 시간 차이가 생긴다. 암호 라이브러리 개발자들은 그동안 “이 명령은 상수 시간일 것”이라고 <b>가정</b>하며 코드를 써 왔다. Zkt 는 그 가정을 규격의 약속으로 바꾼다.</p>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>Zkt 목록에 있는 것 (구현했다면 데이터 독립 시간)</th><th>목록에 없는 것</th></tr></thead>
+      <tbody>
+        <tr><td>RVI 의 산술·논리·시프트·<code>slt*</code>, <code>lui</code>·<code>auipc</code>·<code>addi</code> 등</td><td>load·store, 조건 분기</td></tr>
+        <tr><td>M 의 곱셈 (<code>mul</code>·<code>mulh</code>·<code>mulhsu</code>·<code>mulhu</code>·<code>mulw</code>)</td><td>나눗셈·나머지 (<code>div</code>·<code>rem</code> …)</td></tr>
+        <tr><td>C 의 해당 압축 명령, Zcb 의 <code>c.mul</code>·<code>c.not</code>·<code>c.zext.b</code></td><td>부동소수점 F·D·Q</td></tr>
+        <tr><td>Zbkb·Zbkc·Zbkx 전체, 모든 Zk* 암호 명령</td><td>Zicsr·Zifencei, HINT 인코딩</td></tr>
+      </tbody>
+    </table></div>
+    <div class="callout spec"><strong>규격 원문에서</strong>
+      <blockquote>“The Zkt extension attests that the machine has data-independent execution time for a safe subset of instructions. … Zkt does not define a set of instructions available in the core; it just restricts the behaviour of certain instructions if those are implemented.”</blockquote>
+      <p><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/scalar-crypto.html" target="_blank" rel="noopener">Volume I, Scalar Cryptography — Zkt</a> — Zkt 는 새 명령이 아니라 기존 명령의 “시간적 성질”에 대한 약속이다. 그래서 곱셈기가 없는 단순한 RV32I 코어도 Zkt 를 만족할 수 있다.</p></div>
+    <div class="callout warn"><strong>Zkt 가 막지 못하는 것</strong><p>Zkt 는 명령 하나의 실행 시간만 약속한다. 비밀 값으로 분기하거나 비밀 값을 주소로 메모리를 읽는 코드는 여전히 위험하다(그래서 load·store·분기가 목록에서 빠져 있다). 스펙터(Spectre)류의 추측 실행 공격도 Zkt 의 범위 밖이라고 규격이 분명히 적고 있다. 비순차 코어가 명령을 합치거나 쪼개는 최적화는 허용되지만, 그 결정이 피연산자 값에 따라 달라져서는 안 된다.</p></div>
+  </section>
+
+  <section class="keypoints" id="summary">
+    <h2>핵심 정리</h2>
+    <ol>
+      <li><b>B = Zba + Zbb + Zbs</b>(v1.0.0)다. 캐리 없는 곱셈 Zbc 는 B 에 들어가지 않는다. 명령의 인코딩은 어느 확장에서 오든 유일하다.</li>
+      <li><b>Zba</b>의 <code>sh1add/sh2add/sh3add</code>는 <code>rd = rs2 + (rs1 ≪ n)</code>로 배열 주소 계산을 한 명령에 끝낸다. RV64 의 <code>.uw</code> 형은 32비트 인덱스의 0 확장까지 흡수한다.</li>
+      <li><b>Zbb</b>는 부정 논리, clz·ctz·cpop, min·max, 부호/0 확장, 회전, <code>orc.b</code>, <code>rev8</code>을 담는다. clz·ctz 는 입력이 0이면 XLEN 을 돌려준다.</li>
+      <li><b>Zbs</b>의 bset·bclr·binv·bext 는 rs2(또는 즉시값)의 아래 log₂(XLEN) 비트로 비트 하나를 고른다.</li>
+      <li><code>orc.b</code> + <code>not</code> + <code>ctz</code>로 여러 바이트 중 첫 NUL 의 위치를 한 번에 찾는다. strlen 의 핵심 루프는 네 명령이다.</li>
+      <li><b>clmul/clmulh/clmulr</b>는 부분곱을 XOR 하는 GF(2) 다항식 곱셈이다. CRC 와 AES-GCM 의 GHASH 를 표 없이 빠르게 계산한다.</li>
+      <li>스칼라 암호(v1.0.1)는 <b>Zk = Zkn + Zkr + Zkt</b>, Zkn = Zbkb+Zbkc+Zbkx+Zkne+Zknd+Zknh, Zks = Zbkb+Zbkc+Zbkx+Zksed+Zksh 로 묶인다.</li>
+      <li><code>seed</code> CSR(0x015)은 OPST(BIST·WAIT·ES16·DEAD)와 16비트 엔트로피를 준다. Zkt 는 목록의 명령이 데이터와 무관한 시간에 실행된다는 약속이다.</li>
+    </ol>
+  </section>
+
+  <section id="quiz">
+    <h2>확인 퀴즈</h2>
+    <div class="quiz">
+      <div class="quiz-question"><p>“B” 확장을 지원한다고 할 때 반드시 들어 있는 확장의 조합은?</p><div class="options">
+        <button class="option">Zba + Zbb + Zbc + Zbs</button>
+        <button class="option" data-correct>Zba + Zbb + Zbs</button>
+        <button class="option">Zbb + Zbkb</button>
+        <button class="option">Zbb 하나</button>
+      </div><div class="quiz-explanation">B 는 Zba·Zbb·Zbs 의 묶음 이름이다. Zbc(캐리 없는 곱셈)는 별도로 골라 넣는 확장이다.</div></div>
+      <div class="quiz-question"><p><code>sh2add a0, a1, a2</code>를 실행한 뒤 a0 의 값은?</p><div class="options">
+        <button class="option">a1 + (a2 ≪ 2)</button>
+        <button class="option" data-correct>a2 + (a1 ≪ 2)</button>
+        <button class="option">(a1 + a2) ≪ 2</button>
+        <button class="option">a1 ≪ (a2 + 2)</button>
+      </div><div class="quiz-explanation">규격의 정의는 X(rd) = X(rs2) + (X(rs1) ≪ 2)다. rs1 에 인덱스, rs2 에 배열 시작 주소를 둔다.</div></div>
+      <div class="quiz-question"><p>RV32 에서 <code>orc.b</code>를 <code>0x00410042</code>에 적용한 결과는?</p><div class="options">
+        <button class="option">0x00000000</button>
+        <button class="option">0xffffffff</button>
+        <button class="option" data-correct>0x00ff00ff</button>
+        <button class="option">0xff00ff00</button>
+      </div><div class="quiz-explanation">바이트별로 0x00 → 0x00, 0x41 → 0xff, 0x00 → 0x00, 0x42 → 0xff 가 된다.</div></div>
+      <div class="quiz-question"><p>RV64 에서 <code>unsigned int</code> 인덱스로 배열에 접근할 때 <code>sh2add.uw</code>가 기본 ISA 보다 특히 유리한 이유는?</p><div class="options">
+        <button class="option">RV64 에는 slli 명령이 없어서</button>
+        <button class="option" data-correct>32비트 값이 레지스터에 부호 확장되어 있어, 위 32비트를 지우는 0 확장까지 한 명령에 흡수하므로</button>
+        <button class="option">unsigned 값은 메모리에서만 읽을 수 있어서</button>
+        <button class="option">.uw 형은 곱셈기를 쓰기 때문에</button>
+      </div><div class="quiz-explanation">psABI 는 32비트 정수를 부호 없는 타입이라도 부호 확장해 둔다. 기본 ISA 는 slli 32 + srli 로 0 확장을 해야 하지만 .uw 형은 rs1 의 아래 32비트를 0 확장해 쓴다.</div></div>
+      <div class="quiz-question"><p><code>clmul</code>로 3(0b11)과 3(0b11)을 곱한 결과는?</p><div class="options">
+        <button class="option">9</button>
+        <button class="option">6</button>
+        <button class="option" data-correct>5</button>
+        <button class="option">0</button>
+      </div><div class="quiz-explanation">부분곱 0b11 과 0b110 을 XOR 하면 0b101 = 5 다. 다항식으로는 (x+1)² = x² + 1 이다.</div></div>
+      <div class="quiz-question"><p><code>csrrw a0, seed, x0</code>의 결과가 <code>0x8000ABCD</code>였다. 올바른 해석은?</p><div class="options">
+        <button class="option">OPST = DEAD, 엔트로피 없음</button>
+        <button class="option">OPST = WAIT, 다시 읽어야 한다</button>
+        <button class="option" data-correct>OPST = ES16, 16비트 엔트로피 0xABCD 가 유효하다</button>
+        <button class="option">custom 필드에 0xABCD 가 들어 있다</button>
+      </div><div class="quiz-explanation">비트 31:30 = 10 은 ES16 이고, 비트 15:0 이 엔트로피다. 규격이 직접 드는 예다.</div></div>
+      <div class="quiz-question"><p>Zkt 확장에 대한 설명으로 옳은 것은?</p><div class="options">
+        <button class="option">새로운 상수 시간 암호 명령을 추가한다</button>
+        <button class="option">load·store 와 분기의 실행 시간도 데이터와 무관하게 만든다</button>
+        <button class="option" data-correct>목록에 있는 명령을 구현했다면 그 실행 시간이 처리하는 데이터에 따라 달라지지 않음을 약속한다</button>
+        <button class="option">나눗셈을 상수 시간으로 만든다</button>
+      </div><div class="quiz-explanation">Zkt 는 명령을 추가하지 않고 기존 명령의 시간적 성질만 제한한다. load·store·분기·나눗셈은 목록에서 빠져 있다.</div></div>
+      <div class="quiz-question"><p>RV64 의 <code>aes64esm t2, t0, t1</code>에 대한 설명으로 옳은 것은?</p><div class="options">
+        <button class="option">바이트 하나를 S-box 에 통과시킨다</button>
+        <button class="option" data-correct>t0·t1 의 128비트 상태로부터 ShiftRows·SubBytes·MixColumns 를 적용한 다음 상태의 절반(64비트)을 만든다</button>
+        <button class="option">AES 키 스케줄을 계산한다</button>
+        <button class="option">마지막 라운드 전용이며 MixColumns 를 하지 않는다</button>
+      </div><div class="quiz-explanation">RV64 AES 명령은 두 레지스터에 상태 전체를 담는다. 나머지 절반은 레지스터 순서를 바꾼 <code>aes64esm t3, t1, t0</code>로 만든다. MixColumns 가 없는 마지막 라운드용은 <code>aes64es</code>다.</div></div>
+    </div>
+  </section>
+
+  <section id="references">
+    <h2>더 읽을거리</h2>
+    <ul class="references">
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/b-st-ext.html" target="_blank" rel="noopener">The RISC-V Instruction Set Manual, Volume I — Bit Manipulation Extensions (B, Zba, Zbb, Zbs, Zbc, Zbkb, Zbkc, Zbkx)</a> (v20260120)</li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/bitmanip-examples.html" target="_blank" rel="noopener">Volume I — Bit Manipulation Extensions Assembly Code Examples (strlen, strcmp)</a></li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/scalar-crypto.html" target="_blank" rel="noopener">Volume I — Cryptography Extensions: Scalar &amp; Entropy Source Instructions, Version 1.0.1</a></li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/vector-crypto.html" target="_blank" rel="noopener">Volume I — Vector Cryptography Extensions</a> (벡터 쪽 대응 확장, 15장 참고)</li>
+      <li><a href="https://docs.riscv.org/reference/rva23/index.html" target="_blank" rel="noopener">RVA23 Profiles</a> — B·Zkt 필수, Zbc 확장 옵션</li>
+      <li>Ben Marshall 외, “The design of scalar AES Instruction Set Extensions for RISC-V”, IACR TCHES 2021(1) — RV32·RV64 AES 명령의 설계 공간 탐색</li>
+      <li>NIST FIPS 197 (AES), FIPS 180-4 (SHA-2), SP 800-38D (GCM), SP 800-90B (엔트로피 소스)</li>
+    </ul>
+  </section>
+</main>
+
+<script>
+/* ---------------------------------------------------------------------------
+   코드 상자 강조: 숫자가 들어간 니모닉(sh2add, aes64esm …)도 명령으로 칠한다.
+   (riscv.js 의 강조기는 숫자 없는 니모닉만 알아보므로 이 장 전용으로 둔다.)
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const REGISTER_NAMES = ["zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2", "s0", "s1", "a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7",
+    "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "t3", "t4", "t5", "t6", "fp", "x0", "seed"];
+  const escapeHtml = (text) => text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const registerPattern = new RegExp("\\b(" + REGISTER_NAMES.join("|") + ")\\b", "g");
+
+  function highlightLine(line) {
+    const commentIndex = line.indexOf("#");
+    const code = commentIndex >= 0 ? line.slice(0, commentIndex) : line;
+    const comment = commentIndex >= 0 ? line.slice(commentIndex) : "";
+    let html = escapeHtml(code)
+      .replace(/^(\s*)([A-Za-z_.][\w.]*:)/, '$1<span class="label">$2</span>')
+      .replace(/^((?:\s*<span class="label">[^<]*<\/span>)?\s*)([a-z][a-z0-9.]*)(?=\s|$)/, '$1<span class="keyword">$2</span>')
+      .replace(registerPattern, '<span class="register">$1</span>')
+      .replace(/(?<![\w>.])(-?(?:0x[0-9a-fA-F]+|\d+))\b/g, '<span class="number">$1</span>');
+    if (comment) html += '<span class="comment">' + escapeHtml(comment) + "</span>";
+    return html;
+  }
+  window.bitManipulationHighlight = (source) => source.split("\n").map(highlightLine).join("\n");
+  document.querySelectorAll(".codebox.asm").forEach((box) => {
+    box.innerHTML = window.bitManipulationHighlight(box.textContent);
+  });
+})();
+
+/* ---------------------------------------------------------------------------
+   Zba 배열 인덱싱 비교: 설정에 따라 두 명령열을 만들고 주소 계산 명령 수를 센다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const ARRAY_BASE_ADDRESS = 0x10000;
+  const ARRAY_LENGTH = 8;
+  const ACCESSES_PER_STEP = 1000000;
+  const MAXIMUM_SHIFT_FOR_SHIFT_ADD = 3;
+  const UPPER_HALF_SHIFT = 32;
+  const settings = { xlen: 64, elementSize: 4, indexType: "long", index: 3, accessSteps: 5 };
+
+  function loadMnemonic(elementSize, xlen) {
+    if (elementSize === 2) return "lh";
+    if (elementSize === 4) return "lw";
+    return xlen === 64 ? "ld" : "lw";
+  }
+
+  /** 기본 ISA 와 Zba 의 명령열을 만든다. 주소 계산 명령만 세고 load 는 공통으로 덧붙인다. */
+  function buildSequences() {
+    const shift = Math.log2(settings.elementSize);
+    const isUnsignedWordIndex = settings.indexType === "unsigned" && settings.xlen === 64;
+    const load = loadMnemonic(settings.elementSize, settings.xlen) + "   t1, 0(t0)";
+    const base = [];
+    const fast = [];
+    if (isUnsignedWordIndex) {
+      base.push("slli  t0, a1, " + UPPER_HALF_SHIFT + "     # 위 32비트를 밀어내고");
+      base.push("srli  t0, t0, " + (UPPER_HALF_SHIFT - shift) + "     # 0 확장 + ×" + settings.elementSize + " 를 한 번에");
+      base.push("add   t0, a0, t0     # 시작 주소 + 오프셋");
+    } else {
+      base.push("slli  t0, a1, " + shift + "      # i × " + settings.elementSize);
+      base.push("add   t0, a0, t0     # 시작 주소 + 오프셋");
+    }
+    if (shift <= MAXIMUM_SHIFT_FOR_SHIFT_ADD) {
+      const suffix = isUnsignedWordIndex ? ".uw" : "";
+      fast.push("sh" + shift + "add" + suffix + " t0, a1, a0   # a0 + (i << " + shift + ")");
+    } else if (isUnsignedWordIndex) {
+      fast.push("slli.uw t0, a1, " + shift + "   # 0 확장 후 << " + shift);
+      fast.push("add   t0, a0, t0");
+    } else {
+      fast.push("slli  t0, a1, " + shift + "      # 시프트 4는 sh*add 범위 밖");
+      fast.push("add   t0, a0, t0");
+    }
+    return { base, fast, load, baseCount: base.length, fastCount: fast.length };
+  }
+
+  function formatMillions(steps) {
+    return (steps * ACCESSES_PER_STEP / 10000).toLocaleString("ko-KR") + "만 번";
+  }
+
+  function render() {
+    const sequences = buildSequences();
+    const highlight = window.bitManipulationHighlight;
+    const indexComment = settings.indexType === "unsigned" ? "# a1 = unsigned int i" : "# a1 = long i";
+    document.getElementById("zba-base-code").innerHTML = highlight(["# a0 = a, " + indexComment.slice(2)].concat(sequences.base, [sequences.load]).join("\n"));
+    document.getElementById("zba-fast-code").innerHTML = highlight(["# a0 = a, " + indexComment.slice(2)].concat(sequences.fast, [sequences.load]).join("\n"));
+
+    const memory = document.getElementById("zba-memory");
+    let cells = "";
+    for (let elementIndex = 0; elementIndex < ARRAY_LENGTH; elementIndex += 1) {
+      const address = ARRAY_BASE_ADDRESS + elementIndex * settings.elementSize;
+      const isSelected = elementIndex === settings.index;
+      cells += '<div class="cell' + (isSelected ? " changed" : "") + '"><div class="cell-name">a[' + elementIndex + ']</div><div class="cell-value">0x' + address.toString(16) + "</div></div>";
+    }
+    memory.innerHTML = cells;
+
+    const accessCount = settings.accessSteps * ACCESSES_PER_STEP;
+    const baseTotal = sequences.baseCount * accessCount;
+    const fastTotal = sequences.fastCount * accessCount;
+    const largestTotal = 3 * 10 * ACCESSES_PER_STEP;
+    const baseBar = document.getElementById("zba-bar-base");
+    const fastBar = document.getElementById("zba-bar-fast");
+    baseBar.style.width = Math.max(24, (baseTotal / largestTotal) * 100) + "%";
+    fastBar.style.width = Math.max(24, (fastTotal / largestTotal) * 100) + "%";
+    baseBar.textContent = (baseTotal / 10000).toLocaleString("ko-KR") + "만";
+    fastBar.textContent = (fastTotal / 10000).toLocaleString("ko-KR") + "만";
+
+    document.getElementById("zba-readout-base").textContent = sequences.baseCount + "개";
+    document.getElementById("zba-readout-fast").textContent = sequences.fastCount + "개";
+    const savedPerAccess = sequences.baseCount - sequences.fastCount;
+    document.getElementById("zba-readout-saved").textContent = savedPerAccess === 0 ? "0 (이득 없음)" : (savedPerAccess * accessCount / 10000).toLocaleString("ko-KR") + "만";
+    // 앞자리 0 을 길게 늘어놓지 않도록 짧은 16진수로 보인다
+    document.getElementById("zba-readout-address").textContent = "0x" + (ARRAY_BASE_ADDRESS + settings.index * settings.elementSize).toString(16);
+  }
+
+  const indexTypeControl = book.segmented("zba-index-type", (value) => { settings.indexType = value; render(); });
+  book.segmented("zba-xlen", (value) => {
+    settings.xlen = Number(value);
+    // RV32 에서는 unsigned int 도 XLEN 폭이므로 .uw 비교가 의미 없다
+    if (settings.xlen === 32 && indexTypeControl) indexTypeControl.set("long");
+    render();
+  });
+  book.segmented("zba-size", (value) => { settings.elementSize = Number(value); render(); });
+  book.range("zba-index", (value) => { settings.index = value; render(); }, (value) => String(value));
+  book.range("zba-count", (value) => { settings.accessSteps = value; render(); }, formatMillions);
+})();
+
+/* ---------------------------------------------------------------------------
+   비트 놀이터: 두 32비트 피연산자와 B 확장 명령의 RV32 의미를 그대로 계산한다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  /* BIT-OPERATIONS-START */
+  // 모든 값은 32비트 부호 없는 수(0 … 2^32-1)로 다룬다. JavaScript 비트 연산은 결과를
+  // 부호 있는 32비트로 돌려주므로, 매번 >>> 0 으로 부호 없는 값으로 되돌린다.
+  const WORD_BITS = 32;
+  const SHIFT_MASK = WORD_BITS - 1;
+  const BYTE_BITS = 8;
+  const BYTE_MASK = 0xff;
+  const HALF_MASK = 0xffff;
+  const LOW_WORD_MASK = 0xffffffffn;
+  const OPCODE_OP = 0b0110011;
+  const OPCODE_OP_IMM = 0b0010011;
+
+  const toUnsigned = (value) => value >>> 0;
+  const toSigned = (value) => value | 0;
+
+  function rotateLeft(value, amount) {
+    const shift = amount & SHIFT_MASK;
+    if (shift === 0) return toUnsigned(value);
+    return toUnsigned((value << shift) | (value >>> (WORD_BITS - shift)));
+  }
+  function rotateRight(value, amount) {
+    const shift = amount & SHIFT_MASK;
+    return rotateLeft(value, (WORD_BITS - shift) & SHIFT_MASK);
+  }
+  function countLeadingZeros(value) {
+    return Math.clz32(value);
+  }
+  function countTrailingZeros(value) {
+    const unsignedValue = toUnsigned(value);
+    if (unsignedValue === 0) return WORD_BITS;
+    // value & -value 는 가장 낮은 1 비트 하나만 남긴다
+    return SHIFT_MASK - Math.clz32(unsignedValue & -unsignedValue);
+  }
+  function populationCount(value) {
+    let remaining = toUnsigned(value);
+    let count = 0;
+    while (remaining !== 0) {
+      count += remaining & 1;
+      remaining >>>= 1;
+    }
+    return count;
+  }
+  function reverseBytes(value) {
+    let result = 0;
+    for (let byteIndex = 0; byteIndex < 4; byteIndex += 1) {
+      const byte = (value >>> (byteIndex * BYTE_BITS)) & BYTE_MASK;
+      result |= byte << ((3 - byteIndex) * BYTE_BITS);
+    }
+    return toUnsigned(result);
+  }
+  function orCombineBytes(value) {
+    let result = 0;
+    for (let byteIndex = 0; byteIndex < 4; byteIndex += 1) {
+      const byte = (value >>> (byteIndex * BYTE_BITS)) & BYTE_MASK;
+      if (byte !== 0) result |= BYTE_MASK << (byteIndex * BYTE_BITS);
+    }
+    return toUnsigned(result);
+  }
+  /** 64비트 캐리 없는 곱 전체를 BigInt 로 돌려준다 (rs2 의 1 비트마다 rs1 을 밀어 XOR). */
+  function carrylessProduct(first, second) {
+    const firstBig = BigInt(toUnsigned(first));
+    let product = 0n;
+    for (let bitIndex = 0; bitIndex < WORD_BITS; bitIndex += 1) {
+      if ((second >>> bitIndex) & 1) product ^= firstBig << BigInt(bitIndex);
+    }
+    return product;
+  }
+  function shiftAndAdd(index, base, shift) {
+    return toUnsigned(base + toUnsigned(index << shift));
+  }
+  const singleBitMask = (index) => toUnsigned(1 << (index & SHIFT_MASK));
+
+  function registerType(funct7, funct3) {
+    return { kind: "register", funct7, funct3, opcode: OPCODE_OP };
+  }
+  function unaryImmediateType(immediate12, funct3) {
+    return { kind: "immediate", immediate12, funct3, opcode: OPCODE_OP_IMM };
+  }
+
+  /* isUnary: rs1(A)만 쓰는 명령. encoding 은 RV32 기준이며 규격의 인코딩 그림에서 옮겼다. */
+  const OPERATIONS = {
+    andn:   { extension: "Zbb", isUnary: false, formula: "rd = rs1 & ~rs2", compute: (a, b) => toUnsigned(a & ~b), encoding: registerType(0b0100000, 0b111) },
+    orn:    { extension: "Zbb", isUnary: false, formula: "rd = rs1 | ~rs2", compute: (a, b) => toUnsigned(a | ~b), encoding: registerType(0b0100000, 0b110) },
+    xnor:   { extension: "Zbb", isUnary: false, formula: "rd = ~(rs1 ^ rs2)", compute: (a, b) => toUnsigned(~(a ^ b)), encoding: registerType(0b0100000, 0b100) },
+    clz:    { extension: "Zbb", isUnary: true, formula: "rd = 맨 위 비트부터 센 0의 개수", compute: (a) => countLeadingZeros(a), encoding: unaryImmediateType(0x600, 0b001) },
+    ctz:    { extension: "Zbb", isUnary: true, formula: "rd = 맨 아래 비트부터 센 0의 개수", compute: (a) => countTrailingZeros(a), encoding: unaryImmediateType(0x601, 0b001) },
+    cpop:   { extension: "Zbb", isUnary: true, formula: "rd = 1인 비트의 개수", compute: (a) => populationCount(a), encoding: unaryImmediateType(0x602, 0b001) },
+    min:    { extension: "Zbb", isUnary: false, formula: "rd = 부호 있는 비교로 더 작은 값", compute: (a, b) => (toSigned(a) < toSigned(b) ? toUnsigned(a) : toUnsigned(b)), encoding: registerType(0b0000101, 0b100) },
+    minu:   { extension: "Zbb", isUnary: false, formula: "rd = 부호 없는 비교로 더 작은 값", compute: (a, b) => (toUnsigned(a) < toUnsigned(b) ? toUnsigned(a) : toUnsigned(b)), encoding: registerType(0b0000101, 0b101) },
+    max:    { extension: "Zbb", isUnary: false, formula: "rd = 부호 있는 비교로 더 큰 값", compute: (a, b) => (toSigned(a) < toSigned(b) ? toUnsigned(b) : toUnsigned(a)), encoding: registerType(0b0000101, 0b110) },
+    maxu:   { extension: "Zbb", isUnary: false, formula: "rd = 부호 없는 비교로 더 큰 값", compute: (a, b) => (toUnsigned(a) < toUnsigned(b) ? toUnsigned(b) : toUnsigned(a)), encoding: registerType(0b0000101, 0b111) },
+    "sext.b": { extension: "Zbb", isUnary: true, formula: "rd = rs1[7:0] 을 부호 확장", compute: (a) => toUnsigned((a << 24) >> 24), encoding: unaryImmediateType(0x604, 0b001) },
+    "sext.h": { extension: "Zbb", isUnary: true, formula: "rd = rs1[15:0] 을 부호 확장", compute: (a) => toUnsigned((a << 16) >> 16), encoding: unaryImmediateType(0x605, 0b001) },
+    "zext.h": { extension: "Zbb", isUnary: true, formula: "rd = rs1[15:0] 을 0 확장", compute: (a) => toUnsigned(a & HALF_MASK), encoding: { kind: "register", funct7: 0b0000100, funct3: 0b100, opcode: OPCODE_OP, fixedRs2: 0 } },
+    rol:    { extension: "Zbb", isUnary: false, formula: "rd = rs1 을 (rs2 & 31) 만큼 왼쪽으로 회전", compute: (a, b) => rotateLeft(a, b), encoding: registerType(0b0110000, 0b001) },
+    ror:    { extension: "Zbb", isUnary: false, formula: "rd = rs1 을 (rs2 & 31) 만큼 오른쪽으로 회전", compute: (a, b) => rotateRight(a, b), encoding: registerType(0b0110000, 0b101) },
+    rev8:   { extension: "Zbb", isUnary: true, formula: "rd = rs1 의 바이트 순서를 뒤집음", compute: (a) => reverseBytes(a), encoding: unaryImmediateType(0x698, 0b101) },
+    "orc.b": { extension: "Zbb", isUnary: true, formula: "바이트마다: 0이면 0x00, 아니면 0xff", compute: (a) => orCombineBytes(a), encoding: unaryImmediateType(0x287, 0b101) },
+    bset:   { extension: "Zbs", isUnary: false, formula: "rd = rs1 | (1 << (rs2 & 31))", compute: (a, b) => toUnsigned(a | singleBitMask(b)), encoding: registerType(0b0010100, 0b001) },
+    bclr:   { extension: "Zbs", isUnary: false, formula: "rd = rs1 & ~(1 << (rs2 & 31))", compute: (a, b) => toUnsigned(a & ~singleBitMask(b)), encoding: registerType(0b0100100, 0b001) },
+    binv:   { extension: "Zbs", isUnary: false, formula: "rd = rs1 ^ (1 << (rs2 & 31))", compute: (a, b) => toUnsigned(a ^ singleBitMask(b)), encoding: registerType(0b0110100, 0b001) },
+    bext:   { extension: "Zbs", isUnary: false, formula: "rd = (rs1 >> (rs2 & 31)) & 1", compute: (a, b) => (a >>> (b & SHIFT_MASK)) & 1, encoding: registerType(0b0100100, 0b101) },
+    sh1add: { extension: "Zba", isUnary: false, formula: "rd = rs2 + (rs1 << 1)", compute: (a, b) => shiftAndAdd(a, b, 1), encoding: registerType(0b0010000, 0b010) },
+    sh2add: { extension: "Zba", isUnary: false, formula: "rd = rs2 + (rs1 << 2)", compute: (a, b) => shiftAndAdd(a, b, 2), encoding: registerType(0b0010000, 0b100) },
+    sh3add: { extension: "Zba", isUnary: false, formula: "rd = rs2 + (rs1 << 3)", compute: (a, b) => shiftAndAdd(a, b, 3), encoding: registerType(0b0010000, 0b110) },
+    clmul:  { extension: "Zbc", isUnary: false, formula: "rd = 64비트 캐리 없는 곱의 아래 32비트", compute: (a, b) => Number(carrylessProduct(a, b) & LOW_WORD_MASK), encoding: registerType(0b0000101, 0b001) },
+    clmulh: { extension: "Zbc", isUnary: false, formula: "rd = 64비트 캐리 없는 곱의 위 32비트", compute: (a, b) => Number((carrylessProduct(a, b) >> 32n) & LOW_WORD_MASK), encoding: registerType(0b0000101, 0b011) },
+    clmulr: { extension: "Zbc", isUnary: false, formula: "rd = 캐리 없는 곱의 비트 62…31", compute: (a, b) => Number((carrylessProduct(a, b) >> 31n) & LOW_WORD_MASK), encoding: registerType(0b0000101, 0b010) },
+  };
+
+  /** 'op a0, a1, a2' (단항이면 'op a0, a1') 의 32비트 기계어를 만든다. */
+  const EXAMPLE_DESTINATION = 10;
+  const EXAMPLE_FIRST_SOURCE = 11;
+  const EXAMPLE_SECOND_SOURCE = 12;
+  function encodeExample(operation) {
+    const encoding = operation.encoding;
+    let word;
+    if (encoding.kind === "immediate") {
+      word = (encoding.immediate12 << 20) | (EXAMPLE_FIRST_SOURCE << 15) | (encoding.funct3 << 12) | (EXAMPLE_DESTINATION << 7) | encoding.opcode;
+    } else {
+      const secondSource = encoding.fixedRs2 === undefined ? EXAMPLE_SECOND_SOURCE : encoding.fixedRs2;
+      word = (encoding.funct7 << 25) | (secondSource << 20) | (EXAMPLE_FIRST_SOURCE << 15) | (encoding.funct3 << 12) | (EXAMPLE_DESTINATION << 7) | encoding.opcode;
+    }
+    return toUnsigned(word);
+  }
+  /* BIT-OPERATIONS-END */
+
+  const BYTES_PER_WORD = 4;
+  const FLIP_DELAY_PER_BIT_SECONDS = 0.012;
+  const INITIAL_FIRST_OPERAND = 0x12345678;
+  const INITIAL_SECOND_OPERAND = 8;
+  const state = { first: INITIAL_FIRST_OPERAND, second: INITIAL_SECOND_OPERAND, operationName: "ror", previousResult: null };
+  const operationSelect = document.getElementById("playground-operation");
+
+  /** 바이트 네 묶음(31–24 … 7–0)으로 비트 상자를 만든다. 좁은 화면에서는 묶음 단위로 줄이 바뀐다. */
+  function buildBitBoxes(container, isClickable, onToggle) {
+    const boxes = new Array(WORD_BITS);
+    for (let byteIndex = BYTES_PER_WORD - 1; byteIndex >= 0; byteIndex -= 1) {
+      const group = document.createElement("div");
+      group.className = "byte-group";
+      const rangeLabel = document.createElement("span");
+      rangeLabel.className = "byte-range";
+      rangeLabel.textContent = (byteIndex * BYTE_BITS + 7) + "–" + (byteIndex * BYTE_BITS);
+      const row = document.createElement("div");
+      row.className = "bit-row";
+      for (let bitInByte = BYTE_BITS - 1; bitInByte >= 0; bitInByte -= 1) {
+        const bitIndex = byteIndex * BYTE_BITS + bitInByte;
+        const box = document.createElement(isClickable ? "button" : "span");
+        box.className = "bit" + (isClickable ? "" : " result-bit");
+        box.title = "비트 " + bitIndex;
+        if (isClickable) {
+          box.type = "button";
+          box.setAttribute("aria-label", "비트 " + bitIndex + " 토글");
+          box.addEventListener("click", () => onToggle(bitIndex));
+        }
+        row.appendChild(box);
+        boxes[bitIndex] = box;
+      }
+      group.append(rangeLabel, row);
+      container.appendChild(group);
+    }
+    return boxes;
+  }
+
+  function paintBits(boxes, value) {
+    for (let bitIndex = 0; bitIndex < WORD_BITS; bitIndex += 1) {
+      const isOn = ((value >>> bitIndex) & 1) === 1;
+      boxes[bitIndex].classList.toggle("on", isOn);
+      boxes[bitIndex].textContent = isOn ? "1" : "0";
+    }
+  }
+
+  const firstBoxes = buildBitBoxes(document.getElementById("playground-bits-a"), true, (bitIndex) => {
+    state.first = toUnsigned(state.first ^ (1 << bitIndex));
+    render();
+  });
+  const secondBoxes = buildBitBoxes(document.getElementById("playground-bits-b"), true, (bitIndex) => {
+    state.second = toUnsigned(state.second ^ (1 << bitIndex));
+    render();
+  });
+  const resultBoxes = buildBitBoxes(document.getElementById("playground-bits-result"), false, null);
+  const firstHexInput = document.getElementById("playground-hex-a");
+  const secondHexInput = document.getElementById("playground-hex-b");
+
+  function parseHexadecimal(text) {
+    const cleaned = text.trim().replace(/^0x/i, "").replace(/_/g, "");
+    if (!/^[0-9a-f]{1,8}$/i.test(cleaned)) return null;
+    return toUnsigned(parseInt(cleaned, 16));
+  }
+
+  function render() {
+    const operation = OPERATIONS[state.operationName];
+    const result = operation.compute(state.first, state.second);
+    paintBits(firstBoxes, state.first);
+    paintBits(secondBoxes, state.second);
+    paintBits(resultBoxes, result);
+    // 결과 비트가 오른쪽(비트 0)부터 차례로 뒤집히듯 나타나게 한다
+    for (let bitIndex = 0; bitIndex < WORD_BITS; bitIndex += 1) {
+      const box = resultBoxes[bitIndex];
+      const isDifferentFromFirst = ((result ^ state.first) >>> bitIndex & 1) === 1;
+      box.classList.toggle("differs", isDifferentFromFirst);
+      const hasChanged = state.previousResult === null || (((result ^ state.previousResult) >>> bitIndex) & 1) === 1;
+      if (hasChanged) {
+        box.classList.remove("flip");
+        void box.offsetWidth;
+        box.style.animationDelay = (bitIndex * FLIP_DELAY_PER_BIT_SECONDS) + "s";
+        box.classList.add("flip");
+      }
+    }
+    state.previousResult = result;
+    if (document.activeElement !== firstHexInput) firstHexInput.value = book.toHex(state.first);
+    if (document.activeElement !== secondHexInput) secondHexInput.value = book.toHex(state.second);
+    document.getElementById("playground-decimal-a").textContent = "= " + toSigned(state.first) + " (부호 있음)";
+    document.getElementById("playground-decimal-b").textContent = "= " + state.second + (operation.isUnary ? " · 이 명령은 B 를 쓰지 않음" : "");
+    document.getElementById("playground-operand-b").classList.toggle("is-unused", operation.isUnary);
+    document.getElementById("playground-hex-result").textContent = book.toHex(result);
+    const assembly = state.operationName + (operation.isUnary ? " a0, a1" : " a0, a1, a2");
+    document.getElementById("playground-formula").textContent = assembly + "  ·  " + operation.formula;
+    document.getElementById("playground-readout-hex").textContent = book.toHex(result);
+    document.getElementById("playground-readout-signed").textContent = String(toSigned(result));
+    document.getElementById("playground-readout-extension").textContent = operation.extension;
+    document.getElementById("playground-readout-machine").textContent = book.toHex(encodeExample(operation));
+  }
+
+  function bindHexInput(input, applyValue) {
+    input.addEventListener("input", () => {
+      const value = parseHexadecimal(input.value);
+      if (value === null) return;
+      applyValue(value);
+      render();
+    });
+    input.addEventListener("blur", render);
+  }
+  bindHexInput(firstHexInput, (value) => { state.first = value; });
+  bindHexInput(secondHexInput, (value) => { state.second = value; });
+  operationSelect.addEventListener("change", () => { state.operationName = operationSelect.value; render(); });
+  document.getElementById("playground-random").addEventListener("click", () => {
+    state.first = toUnsigned(Math.floor(Math.random() * 2 ** WORD_BITS));
+    render();
+  });
+  document.getElementById("playground-swap").addEventListener("click", () => {
+    const temporary = state.first;
+    state.first = state.second;
+    state.second = temporary;
+    render();
+  });
+  document.getElementById("playground-result-to-a").addEventListener("click", () => {
+    state.first = OPERATIONS[state.operationName].compute(state.first, state.second);
+    render();
+  });
+  document.getElementById("playground-clear").addEventListener("click", () => {
+    state.first = 0;
+    state.second = 0;
+    render();
+  });
+  state.operationName = operationSelect.value;
+  render();
+})();
+
+/* ---------------------------------------------------------------------------
+   strlen 애니메이션: 덩어리를 읽고 orc.b 로 판정하고, 마지막에 not·ctz 로 위치를 찾는다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const START_ADDRESS = 0x1000;
+  const FILLER_BYTE = 0x78;          // NUL 뒤의 아무 바이트 ('x')
+  const REPLACEMENT_BYTE = 0x3f;     // ASCII 밖의 글자는 '?' 로 바꾼다
+  const PRINTABLE_FIRST = 0x20;
+  const PRINTABLE_LAST = 0x7e;
+  const ALL_ONES_BYTE = 0xff;
+  const BYTE_LOOP_INSTRUCTIONS = 3;  // lbu · addi · bnez
+  const CHUNK_LOOP_INSTRUCTIONS = 4; // REG_L · addi · orc.b · beq
+  const ANIMATION_SECONDS = 0.55;
+  const AUTO_PLAY_INTERVAL_SECONDS = 1.3;
+
+  const canvas = document.getElementById("strlen-canvas");
+  const description = document.getElementById("strlen-description");
+  const textInput = document.getElementById("strlen-text");
+  const playButton = document.getElementById("strlen-play");
+  let bytesPerChunk = 4;
+  let memoryBytes = [];
+  let stringLength = 0;
+  let steps = [];
+  let stepIndex = -1;
+  let transition = 1;
+  let isAutoPlaying = false;
+  let autoPlayTimer = 0;
+
+  function encodeText(text) {
+    const codes = [];
+    for (const character of text) {
+      const code = character.charCodeAt(0);
+      const isPrintable = code >= PRINTABLE_FIRST && code <= PRINTABLE_LAST;
+      codes.push(isPrintable ? code : REPLACEMENT_BYTE);
+    }
+    return codes;
+  }
+
+  /** 단계 목록을 만든다. 각 단계는 그 시점의 레지스터 줄들과 설명을 가진다. */
+  function buildSteps() {
+    const codes = encodeText(textInput.value);
+    stringLength = codes.length;
+    const chunkCount = Math.floor(stringLength / bytesPerChunk) + 1;
+    memoryBytes = codes.concat([0]);
+    while (memoryBytes.length < chunkCount * bytesPerChunk) memoryBytes.push(FILLER_BYTE);
+    steps = [];
+    for (let chunkIndex = 0; chunkIndex < chunkCount; chunkIndex += 1) {
+      const chunk = memoryBytes.slice(chunkIndex * bytesPerChunk, (chunkIndex + 1) * bytesPerChunk);
+      const combined = chunk.map((byte) => (byte === 0 ? 0 : ALL_ONES_BYTE));
+      const hasNul = combined.some((byte) => byte === 0);
+      const address = book.toHex(START_ADDRESS + chunkIndex * bytesPerChunk, 16);
+      steps.push({ chunkIndex, rows: [{ label: "로드", bytes: chunk, kind: "load" }],
+        text: "<b>" + address + "</b>에서 " + bytesPerChunk + "바이트를 한 번에 읽는다. 레지스터에서는 첫 바이트가 <b>오른쪽 끝(최하위 바이트)</b>에 온다." });
+      steps.push({ chunkIndex, rows: [{ label: "로드", bytes: chunk, kind: "load" }, { label: "orc.b", bytes: combined, kind: "combine" }],
+        text: "<code>orc.b</code>: 0이 아닌 바이트는 0xff, NUL(0x00)은 0x00 이 된다." });
+      if (!hasNul) {
+        steps.push({ chunkIndex, rows: [{ label: "로드", bytes: chunk, kind: "load" }, { label: "orc.b", bytes: combined, kind: "combine" }], verdict: "continue",
+          text: "결과가 모두 0xff(= −1) → <code>beq a2, a4, .Lloop</code> 성립. 이 덩어리에는 NUL 이 없으니 다음 덩어리로 간다." });
+      } else {
+        const inverted = combined.map((byte) => ALL_ONES_BYTE - byte);
+        const firstNulInChunk = chunk.indexOf(0);
+        const trailingZeros = firstNulInChunk * 8;
+        const length = chunkIndex * bytesPerChunk + firstNulInChunk;
+        steps.push({ chunkIndex, rows: [{ label: "로드", bytes: chunk, kind: "load" }, { label: "orc.b", bytes: combined, kind: "combine" }], verdict: "exit",
+          text: "0x00 바이트가 있으니 −1 이 아니다 → 분기 불성립, 루프를 빠져나온다." });
+        steps.push({ chunkIndex, rows: [{ label: "로드", bytes: chunk, kind: "load" }, { label: "orc.b", bytes: combined, kind: "combine" }, { label: "not", bytes: inverted, kind: "invert" }], verdict: "exit",
+          text: "<code>not</code>: 이제 NUL 자리만 0xff 다." });
+        steps.push({ chunkIndex, rows: [{ label: "로드", bytes: chunk, kind: "load" }, { label: "orc.b", bytes: combined, kind: "combine" }, { label: "not", bytes: inverted, kind: "invert" }], verdict: "exit",
+          ctz: trailingZeros, length,
+          text: "<code>ctz</code> = " + trailingZeros + " → <code>srli 3</code> = " + firstNulInChunk + "번째 바이트. 길이 = " + chunkIndex + " × " + bytesPerChunk + " + " + firstNulInChunk + " = <b>" + length + "</b>" });
+      }
+    }
+  }
+
+  function currentStep() {
+    return stepIndex >= 0 ? steps[stepIndex] : null;
+  }
+
+  function byteText(byte) {
+    return byte.toString(16).padStart(2, "0");
+  }
+  function characterText(byte) {
+    if (byte === 0) return "NUL";
+    if (byte >= PRINTABLE_FIRST && byte <= PRINTABLE_LAST) return "'" + String.fromCharCode(byte) + "'";
+    return "";
+  }
+
+  const drawing = book.createCanvas(canvas, (context, width, height, colors) => {
+    const padding = 12;
+    const labelWidth = Math.min(96, Math.max(64, width * 0.17));
+    const chunkCount = memoryBytes.length / bytesPerChunk;
+    const cellWidth = Math.min(64, (width - padding * 2 - labelWidth) / bytesPerChunk);
+    const cellGap = Math.min(5, cellWidth * 0.1);
+    const gridLeft = padding + labelWidth;
+    const memoryRowHeight = 30;
+    const step = currentStep();
+    const progress = book.easeInOut(book.clamp(transition, 0, 1));
+    const fontSize = cellWidth < 40 ? 11 : 13;
+
+    book.drawText(context, "메모리 (주소가 커지는 쪽 →)", padding, 14, { size: 12, color: colors.dim });
+    for (let chunkIndex = 0; chunkIndex < chunkCount; chunkIndex += 1) {
+      const rowTop = 26 + chunkIndex * memoryRowHeight;
+      const isCurrent = step && step.chunkIndex === chunkIndex;
+      const isDone = step && chunkIndex < step.chunkIndex;
+      book.drawText(context, book.toHex(START_ADDRESS + chunkIndex * bytesPerChunk, 16), padding, rowTop + 12, { size: 11, mono: true, color: isCurrent ? colors.accent : colors.faint, bold: isCurrent });
+      for (let byteIndex = 0; byteIndex < bytesPerChunk; byteIndex += 1) {
+        const byte = memoryBytes[chunkIndex * bytesPerChunk + byteIndex];
+        const isAfterNul = chunkIndex * bytesPerChunk + byteIndex > stringLength;
+        const cellLeft = gridLeft + byteIndex * cellWidth;
+        book.roundedRectangle(context, cellLeft + cellGap / 2, rowTop, cellWidth - cellGap, memoryRowHeight - 6, 5);
+        if (byte === 0) context.fillStyle = colors.badSoft;
+        else if (isCurrent) context.fillStyle = colors.accentSoft;
+        else context.fillStyle = colors.surface;
+        context.fill();
+        context.globalAlpha = isDone ? 0.45 : 1;
+        const label = cellWidth >= 52 ? characterText(byte) + " " + byteText(byte) : (byte === 0 ? "00" : characterText(byte) || byteText(byte));
+        book.drawText(context, label, cellLeft + cellWidth / 2, rowTop + 12, { size: fontSize, mono: true, align: "center", color: isAfterNul ? colors.faint : colors.text });
+        context.globalAlpha = 1;
+      }
+      if (isCurrent) {
+        context.strokeStyle = colors.accent;
+        context.lineWidth = 2;
+        book.roundedRectangle(context, gridLeft - 2, rowTop - 3, cellWidth * bytesPerChunk + 4, memoryRowHeight, 7);
+        context.stroke();
+      }
+    }
+
+    const registerTop = 26 + chunkCount * memoryRowHeight + 22;
+    book.drawText(context, "레지스터 a2 (왼쪽이 최상위 바이트)", padding, registerTop, { size: 12, color: colors.dim });
+    if (!step) {
+      book.drawText(context, "한 단계를 눌러 첫 덩어리를 읽자", gridLeft, registerTop + 34, { size: 13, color: colors.faint });
+      return;
+    }
+    const registerRowHeight = 40;
+    step.rows.forEach((row, rowIndex) => {
+      const isNewest = rowIndex === step.rows.length - 1;
+      const rowAlpha = isNewest ? progress : 1;
+      const rowTop = registerTop + 14 + rowIndex * registerRowHeight + (isNewest ? (1 - progress) * 12 : 0);
+      context.globalAlpha = rowAlpha;
+      book.drawText(context, row.label, padding, rowTop + 15, { size: 13, mono: true, bold: true, color: colors.text });
+      for (let slot = 0; slot < bytesPerChunk; slot += 1) {
+        // 레지스터 표시는 최상위 바이트가 왼쪽: 슬롯 0 = 바이트 (n-1)
+        const byteIndex = bytesPerChunk - 1 - slot;
+        const byte = row.bytes[byteIndex];
+        const cellLeft = gridLeft + slot * cellWidth;
+        book.roundedRectangle(context, cellLeft + cellGap / 2, rowTop, cellWidth - cellGap, registerRowHeight - 10, 6);
+        let fill = colors.surface;
+        let textColor = colors.text;
+        if (row.kind === "load" && byte === 0) fill = colors.badSoft;
+        if (row.kind === "combine" && byte === ALL_ONES_BYTE) { fill = colors.accent; textColor = colors.onAccent; }
+        if (row.kind === "invert" && byte === ALL_ONES_BYTE) { fill = colors.gold; textColor = colors.onAccent; }
+        context.fillStyle = fill;
+        context.fill();
+        book.drawText(context, byteText(byte), cellLeft + cellWidth / 2, rowTop + 15, { size: fontSize, mono: true, align: "center", color: textColor, bold: row.kind !== "load" });
+      }
+      context.globalAlpha = 1;
+    });
+    const resultTop = registerTop + 14 + step.rows.length * registerRowHeight + 12;
+    if (step.verdict === "continue") {
+      book.drawText(context, "= −1 → 다음 덩어리로 ↻", gridLeft, resultTop, { size: 13, bold: true, color: colors.accent });
+    } else if (step.verdict === "exit" && step.ctz === undefined) {
+      book.drawText(context, "≠ −1 → 루프 탈출", gridLeft, resultTop, { size: 13, bold: true, color: colors.gold });
+    }
+    if (step.ctz !== undefined) {
+      const arrowRight = gridLeft + cellWidth * bytesPerChunk;
+      const firstNulSlot = bytesPerChunk - 1 - step.ctz / 8;
+      const arrowLeft = gridLeft + firstNulSlot * cellWidth + cellWidth / 2;
+      context.globalAlpha = progress;
+      book.drawArrow(context, arrowRight, resultTop - 4, arrowLeft, resultTop - 4, { color: colors.gold, width: 2, headSize: 8 });
+      book.drawText(context, "ctz = " + step.ctz + " → strlen = " + step.length, gridLeft, resultTop + 16, { size: 13, bold: true, color: colors.gold });
+      context.globalAlpha = 1;
+    }
+  }, { aspectRatio: 0.5, minimumHeight: 430, maximumHeight: 470 });
+
+  const loop = book.animationLoop(canvas, (deltaSeconds) => {
+    let shouldRedraw = false;
+    if (transition < 1) {
+      transition = Math.min(1, transition + deltaSeconds / ANIMATION_SECONDS);
+      shouldRedraw = true;
+    }
+    if (isAutoPlaying) {
+      autoPlayTimer += deltaSeconds;
+      if (autoPlayTimer >= AUTO_PLAY_INTERVAL_SECONDS) {
+        autoPlayTimer = 0;
+        advance();
+      }
+    }
+    if (shouldRedraw) drawing.redraw();
+  });
+
+  function updateReadouts() {
+    const step = currentStep();
+    const chunksRead = step ? step.chunkIndex + 1 : 0;
+    document.getElementById("strlen-readout-chunks").textContent = String(chunksRead);
+    document.getElementById("strlen-readout-byte-loop").textContent = String((stringLength + 1) * BYTE_LOOP_INSTRUCTIONS);
+    const totalChunks = memoryBytes.length / bytesPerChunk;
+    document.getElementById("strlen-readout-chunk-loop").textContent = String(totalChunks * CHUNK_LOOP_INSTRUCTIONS);
+    const isFinished = step && step.length !== undefined;
+    document.getElementById("strlen-readout-length").textContent = isFinished ? String(step.length) : "?";
+  }
+
+  function advance() {
+    if (stepIndex >= steps.length - 1) {
+      stopAutoPlay();
+      return;
+    }
+    stepIndex += 1;
+    // '동작 줄이기' 설정으로 반복이 멈춰 있으면 전환 효과 없이 바로 최종 모습을 보인다
+    transition = loop.isRunning() ? 0 : 1;
+    description.innerHTML = steps[stepIndex].text;
+    updateReadouts();
+    drawing.redraw();
+    if (stepIndex >= steps.length - 1) stopAutoPlay();
+  }
+  function stopAutoPlay() {
+    isAutoPlaying = false;
+    playButton.textContent = "자동 재생";
+  }
+  function reset() {
+    stopAutoPlay();
+    buildSteps();
+    stepIndex = -1;
+    transition = 1;
+    description.innerHTML = "<b>한 단계</b> 또는 <b>자동 재생</b>을 눌러 시작하자. 문자열 길이는 " + stringLength + "자다.";
+    updateReadouts();
+    drawing.redraw();
+  }
+
+  document.getElementById("strlen-step").addEventListener("click", () => { stopAutoPlay(); advance(); });
+  playButton.addEventListener("click", () => {
+    if (isAutoPlaying) { stopAutoPlay(); return; }
+    if (stepIndex >= steps.length - 1) reset();
+    isAutoPlaying = true;
+    autoPlayTimer = AUTO_PLAY_INTERVAL_SECONDS;
+    playButton.textContent = "멈춤";
+    loop.start();
+  });
+  document.getElementById("strlen-reset").addEventListener("click", reset);
+  textInput.addEventListener("input", reset);
+  book.segmented("strlen-xlen", (value) => { bytesPerChunk = Number(value); reset(); });
+})();
+
+/* ---------------------------------------------------------------------------
+   보통 곱셈 vs 캐리 없는 곱셈: 8비트 두 수의 부분곱을 하나씩 더하거나 XOR 한다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const OPERAND_BITS = 8;
+  const PRODUCT_BITS = 16;
+  const FIGURE_FIRST = 11;
+  const FIGURE_SECOND = 6;
+  const ALL_ONES = 0xff;
+  const state = { first: FIGURE_FIRST, second: FIGURE_SECOND, revealedRows: 0 };
+
+  function buildOperandBits(containerId, onToggle) {
+    const container = document.getElementById(containerId);
+    const boxes = [];
+    for (let bitIndex = OPERAND_BITS - 1; bitIndex >= 0; bitIndex -= 1) {
+      const box = document.createElement("button");
+      box.type = "button";
+      box.className = "bit";
+      box.setAttribute("aria-label", "비트 " + bitIndex + " 토글");
+      box.addEventListener("click", () => onToggle(bitIndex));
+      container.appendChild(box);
+      boxes[bitIndex] = box;
+    }
+    return boxes;
+  }
+  const firstBoxes = buildOperandBits("clmul-bits-a", (bitIndex) => { state.first ^= 1 << bitIndex; state.revealedRows = 0; render(); });
+  const secondBoxes = buildOperandBits("clmul-bits-b", (bitIndex) => { state.second ^= 1 << bitIndex; state.revealedRows = 0; render(); });
+
+  function bitCells(value, width, options) {
+    const settings = Object.assign({ leadingBlank: true, className: "", highlightMask: 0 }, options || {});
+    let html = "";
+    const highestSetBit = value === 0 ? 0 : 31 - Math.clz32(value);
+    for (let bitIndex = PRODUCT_BITS - 1; bitIndex >= 0; bitIndex -= 1) {
+      const bit = (value >>> bitIndex) & 1;
+      const isBeyondWidth = bitIndex >= width;
+      const isLeading = settings.leadingBlank && bitIndex > highestSetBit && bitIndex >= OPERAND_BITS;
+      let className = bit ? "one" : "zero";
+      if (isBeyondWidth || isLeading) className = "blank";
+      if (settings.className) className += " " + settings.className;
+      if ((settings.highlightMask >>> bitIndex) & 1) className += " carry-differs";
+      html += '<span class="' + className + '">' + bit + "</span>";
+    }
+    return html;
+  }
+
+  function buildGrid(isCarryless, sums) {
+    let html = '<span class="row-label">A</span>' + bitCells(state.first, OPERAND_BITS);
+    html += '<span class="row-label">× B</span>' + bitCells(state.second, OPERAND_BITS);
+    html += '<span class="rule"></span>';
+    // 아직 펼치지 않은 부분곱 줄은 그리지 않는다 (누를 때마다 한 줄씩 늘어난다)
+    for (let rowIndex = 0; rowIndex < state.revealedRows; rowIndex += 1) {
+      const isSet = ((state.second >>> rowIndex) & 1) === 1;
+      const partial = isSet ? state.first << rowIndex : 0;
+      const label = isSet ? "A≪" + rowIndex : "B" + rowIndex + "=0";
+      let className = "";
+      if (!isSet) className = "faded";
+      else if (rowIndex === state.revealedRows - 1) className = "latest";
+      html += '<span class="row-label">' + label + "</span>" + bitCells(partial, rowIndex + OPERAND_BITS, { leadingBlank: true, className });
+    }
+    html += '<span class="rule"></span>';
+    const runningValue = isCarryless ? sums.carryless : sums.normal;
+    const differenceMask = sums.normal ^ sums.carryless;
+    html += '<span class="row-label">' + (isCarryless ? "XOR" : "합") + "</span>" + bitCells(runningValue, PRODUCT_BITS, { leadingBlank: false, className: "result", highlightMask: differenceMask });
+    return html;
+  }
+
+  function render() {
+    for (let bitIndex = 0; bitIndex < OPERAND_BITS; bitIndex += 1) {
+      const isFirstOn = ((state.first >>> bitIndex) & 1) === 1;
+      const isSecondOn = ((state.second >>> bitIndex) & 1) === 1;
+      firstBoxes[bitIndex].classList.toggle("on", isFirstOn);
+      firstBoxes[bitIndex].textContent = isFirstOn ? "1" : "0";
+      secondBoxes[bitIndex].classList.toggle("on", isSecondOn);
+      secondBoxes[bitIndex].textContent = isSecondOn ? "1" : "0";
+    }
+    let normal = 0;
+    let carryless = 0;
+    for (let rowIndex = 0; rowIndex < state.revealedRows; rowIndex += 1) {
+      if ((state.second >>> rowIndex) & 1) {
+        normal += state.first << rowIndex;
+        carryless ^= state.first << rowIndex;
+      }
+    }
+    const sums = { normal, carryless };
+    document.getElementById("clmul-grid-normal").innerHTML = buildGrid(false, sums);
+    document.getElementById("clmul-grid-carryless").innerHTML = buildGrid(true, sums);
+    document.getElementById("clmul-value-a").textContent = state.first + " = " + book.toHex(state.first, OPERAND_BITS);
+    document.getElementById("clmul-value-b").textContent = state.second + " = " + book.toHex(state.second, OPERAND_BITS);
+
+    let fullCarryless = 0;
+    for (let rowIndex = 0; rowIndex < OPERAND_BITS; rowIndex += 1) {
+      if ((state.second >>> rowIndex) & 1) fullCarryless ^= state.first << rowIndex;
+    }
+    const fullProduct = state.first * state.second;
+    document.getElementById("clmul-readout-product").textContent = fullProduct + " (" + book.toHex(fullProduct, PRODUCT_BITS) + ")";
+    document.getElementById("clmul-readout-carryless").textContent = fullCarryless + " (" + book.toHex(fullCarryless, PRODUCT_BITS) + ")";
+    let differingBits = 0;
+    let difference = fullProduct ^ fullCarryless;
+    while (difference !== 0) { differingBits += difference & 1; difference >>>= 1; }
+    document.getElementById("clmul-readout-difference").textContent = differingBits + "개";
+
+    const descriptionElement = document.getElementById("clmul-description");
+    if (state.revealedRows === 0) {
+      descriptionElement.innerHTML = "B 의 비트마다 A 를 그만큼 왼쪽으로 민 부분곱이 생긴다. <b>부분곱 하나 더</b>를 눌러 B₀ 부터 차례로 더해(XOR 해) 보자.";
+    } else if (state.revealedRows < OPERAND_BITS) {
+      const rowIndex = state.revealedRows - 1;
+      const isSet = ((state.second >>> rowIndex) & 1) === 1;
+      descriptionElement.innerHTML = "B" + rowIndex + " = " + (isSet ? "1 → A≪" + rowIndex + " 을 더한다(왼쪽)·XOR 한다(오른쪽)." : "0 → 부분곱이 0 이라 아무것도 바뀌지 않는다.") +
+        " 금색 칸은 지금까지 두 결과가 다른 비트, 곧 올림이 만든 차이다.";
+    } else {
+      descriptionElement.innerHTML = "끝. 보통 곱 = <b>" + fullProduct + "</b>, 캐리 없는 곱 = <b>" + fullCarryless + "</b>. 올림이 한 번도 생기지 않는 경우(같은 열에 1이 두 번 겹치지 않을 때)에만 두 결과가 같다.";
+    }
+  }
+
+  document.getElementById("clmul-step").addEventListener("click", () => {
+    state.revealedRows = Math.min(OPERAND_BITS, state.revealedRows + 1);
+    render();
+  });
+  document.getElementById("clmul-all").addEventListener("click", () => { state.revealedRows = OPERAND_BITS; render(); });
+  document.getElementById("clmul-reset").addEventListener("click", () => { state.revealedRows = 0; render(); });
+  document.getElementById("clmul-example-figure").addEventListener("click", () => {
+    state.first = FIGURE_FIRST;
+    state.second = FIGURE_SECOND;
+    state.revealedRows = 0;
+    render();
+  });
+  document.getElementById("clmul-example-square").addEventListener("click", () => {
+    state.first = ALL_ONES;
+    state.second = ALL_ONES;
+    state.revealedRows = OPERAND_BITS;
+    render();
+  });
+  render();
+})();
+</script>
+</body>
+</html>

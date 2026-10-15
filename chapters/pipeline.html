@@ -1,0 +1,1968 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>08 ISA에서 하드웨어로: 파이프라인 · RISC-V Book</title>
+<meta name="description" content="RV32I를 단일 사이클 데이터패스와 5단 파이프라인으로 구현해 보며 데이터·제어 해저드, 포워딩, 분기 예측, 정밀한 예외를 살펴보고, 고정된 레지스터 칸·플래그 없음·지연 슬롯 없음 같은 RISC-V의 설계가 하드웨어를 어떻게 단순하게 만드는지 본다.">
+<link rel="icon" href="../assets/img/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/style.css">
+<script src="../assets/js/book.js"></script>
+<script src="../assets/js/riscv.js"></script>
+<style>
+  .sim .scroll-x { overflow-x: auto; }
+  .sim .scroll-x > svg { display: block; width: 100%; height: auto; min-width: 640px; }
+  /* 단일 사이클 데이터패스 */
+  .datapath-wire { fill: none; stroke: var(--text-faint); stroke-width: 2; transition: opacity 0.3s, stroke 0.3s; }
+  .datapath-wire.is-control { stroke-dasharray: 4 4; stroke-width: 1.6; }
+  .datapath-wire.is-active { stroke: var(--accent); stroke-width: 3; }
+  .datapath-wire.is-active.is-control { stroke: var(--accent-2); stroke-width: 2.2; }
+  .datapath-wire.is-dim { opacity: 0.16; }
+  .datapath-part { transition: opacity 0.3s; }
+  .datapath-part.is-dim { opacity: 0.3; }
+  .datapath-part.is-active .part-shape { stroke: var(--accent); stroke-width: 2.4; }
+  .datapath-junction { fill: var(--text-faint); transition: opacity 0.3s; }
+  .datapath-junction.is-dim { opacity: 0.16; }
+  .datapath-junction.is-active { fill: var(--accent); }
+  .port-label { fill: var(--text-faint); font-size: 10.5px; font-family: var(--mono); }
+  .wire-label { fill: var(--text-faint); font-size: 11px; }
+  .signal-label { fill: var(--text-dim); font-size: 11px; font-family: var(--mono); }
+  .signal-label.is-on { fill: var(--accent-2); font-weight: 700; }
+  /* 파이프라인 현재 사이클 그림 */
+  .stage-box { fill: var(--bg-elev); stroke: var(--border); stroke-width: 1.4; transition: fill 0.25s, stroke 0.25s; }
+  .stage-box.is-bubble { fill: var(--surface); stroke-dasharray: 5 4; }
+  .stage-box.is-stalled { fill: var(--warn-soft); stroke: var(--warn); }
+  .stage-box.is-flushed { fill: var(--bad-soft); stroke: var(--bad); }
+  .stage-box.is-wrong-path { stroke: var(--bad); stroke-dasharray: 3 3; }
+  .stage-box.is-redirect { stroke: var(--accent-2); stroke-width: 2.4; }
+  .stage-instruction { font-family: var(--mono); font-size: 13px; fill: var(--text); font-weight: 600; }
+  .stage-instruction.is-faint { fill: var(--text-faint); font-weight: 400; }
+  .stage-status { font-size: 12px; fill: var(--text-dim); }
+  .stage-status.is-warn { fill: var(--warn); font-weight: 700; }
+  .stage-status.is-bad { fill: var(--bad); font-weight: 700; }
+  .stage-status.is-good { fill: var(--ok); font-weight: 700; }
+  .stage-status.is-gold { fill: var(--accent-2); font-weight: 700; }
+  .bypass-path { fill: none; stroke: var(--text-faint); stroke-width: 2; opacity: 0.25; transition: opacity 0.25s; }
+  .bypass-path.is-active { stroke: var(--accent-2); stroke-width: 3; opacity: 1; }
+  .bypass-path.is-writeback.is-active { stroke: var(--teal); }
+  /* 사이클별 파이프라인 표 */
+  .pipeline-chart { overflow: auto; max-height: 460px; background: var(--canvas-bg); border-top: 1px solid var(--border); }
+  .pipeline-chart table { border-collapse: separate; border-spacing: 2px; width: auto; font-family: var(--mono); font-size: 12px; line-height: 1.2; }
+  .pipeline-chart th, .pipeline-chart td { padding: 0; border: 0; text-align: center; min-width: 36px; height: 24px; vertical-align: middle; }
+  .pipeline-chart thead th { position: sticky; top: 0; z-index: 2; background: var(--canvas-bg); color: var(--text-faint); font-weight: 600; font-size: 11px; white-space: nowrap; }
+  .pipeline-chart thead th.current-cycle { color: var(--accent-2); }
+  .pipeline-chart .instruction-name { position: sticky; left: 0; z-index: 1; background: var(--canvas-bg); text-align: left; padding: 0 10px 0 8px; white-space: nowrap; min-width: 170px; color: var(--text); }
+  .pipeline-chart thead th.instruction-name { z-index: 3; }
+  .pipeline-chart .instruction-name .address { color: var(--text-faint); margin-right: 6px; }
+  .pipeline-chart tr.wrong-path .instruction-name { color: var(--bad); font-style: italic; }
+  .pipeline-chart td.current-column { background: var(--accent-2-soft); border-radius: 4px; }
+  .pipeline-chart td.stage-cell.current-column { box-shadow: inset 0 0 0 1.5px var(--accent-2); }
+  .stage-cell { border-radius: 4px; font-weight: 700; }
+  .stage-cell.stage-if { background: var(--accent-soft); color: var(--accent); }
+  .stage-cell.stage-id { background: var(--teal-soft); color: var(--teal); }
+  .stage-cell.stage-ex { background: var(--accent-2-soft); color: var(--accent-2); }
+  .stage-cell.stage-mem { background: var(--violet-soft); color: var(--violet); }
+  .stage-cell.stage-wb { background: var(--ok-soft); color: var(--ok); }
+  .stage-cell.is-stalled { background: repeating-linear-gradient(135deg, var(--warn-soft) 0 4px, transparent 4px 8px); color: var(--warn); }
+  .stage-cell.is-flushed { background: var(--bad-soft); color: var(--bad); }
+  .chart-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; padding: 10px 18px; font-size: 12.5px; color: var(--text-dim); border-top: 1px solid var(--border); }
+  .chart-legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .chart-legend i { display: inline-block; width: 22px; height: 14px; border-radius: 3px; }
+  .source-editor { padding: 14px 18px 4px; }
+  .source-editor textarea { width: 100%; min-height: 170px; font-family: var(--mono); font-size: 13.5px; line-height: 1.55; color: var(--text); background: var(--canvas-bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; resize: vertical; }
+  .source-editor .editor-row { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin: 8px 0 10px; font-size: 13.5px; color: var(--text-dim); }
+  .source-editor .assemble-message.is-error { color: var(--bad); font-weight: 600; }
+  /* 분기 예측기 실험실 */
+  .predictor-table { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 8px 12px; align-items: center; }
+  .predictor-table .predictor-name { font-size: 13.5px; color: var(--text-dim); font-weight: 600; }
+  .predictor-cells { display: flex; flex-wrap: wrap; gap: 3px; }
+  .predictor-cells span { width: 22px; height: 24px; display: inline-flex; align-items: center; justify-content: center; border-radius: 5px; font-family: var(--mono); font-size: 12px; font-weight: 700; border: 1px solid var(--border); background: var(--surface); color: var(--text-dim); }
+  .predictor-cells span.is-taken { background: var(--accent-2-soft); color: var(--accent-2); border-color: transparent; }
+  .predictor-cells span.is-correct { background: var(--ok-soft); color: var(--ok); border-color: transparent; }
+  .predictor-cells span.is-wrong { background: var(--bad-soft); color: var(--bad); border-color: transparent; }
+  @media (max-width: 520px) { .predictor-table { grid-template-columns: minmax(0, 1fr); gap: 4px; } }
+</style>
+</head>
+<body data-chapter="pipeline">
+<main class="chapter">
+  <header class="chapter-hero">
+    <div class="eyebrow">Chapter 08</div>
+    <h1>ISA에서 하드웨어로: 파이프라인</h1>
+    <p class="lead">ISA는 계약서일 뿐 회로가 아니다. 그런데 계약서를 어떻게 쓰느냐에 따라 그것을 지키는 회로가 쉬워지기도, 어려워지기도 한다. 이 장에서는 RV32I를 직접 <strong>단일 사이클 데이터패스</strong>와 <strong>5단 파이프라인</strong>으로 구현해 보면서, 해저드·포워딩·분기 예측·정밀한 예외 같은 구현의 고민을 만난다. 그리고 <strong>고정된 레지스터 칸, 부호 비트 위치, 플래그 없음, 지연 슬롯 없음</strong> 같은 RISC-V의 결정이 그 고민을 어떻게 덜어 주는지 확인한다.</p>
+    <ul class="objectives">
+      <li>PC·명령어 메모리·레지스터 파일·즉시값 생성기·ALU·데이터 메모리·WB 선택기로 이루어진 단일 사이클 데이터패스를 그림으로 설명한다.</li>
+      <li>명령 분류(R·I·적재·저장·분기·jal)마다 어떤 제어 신호가 켜지는지 안다.</li>
+      <li>IF·ID·EX·MEM·WB 다섯 단계와 파이프라인 레지스터의 역할을 이해한다.</li>
+      <li>RAW 데이터 해저드를 포워딩으로 없애고, 적재-사용 해저드에서 왜 한 사이클 멈춰야 하는지 설명한다.</li>
+      <li>EX 단계에서 판정되는 분기가 왜 손해를 만드는지, 정적·동적 분기 예측이 그것을 어떻게 줄이는지 시뮬레이터로 측정한다.</li>
+      <li>RISC-V의 인코딩·설계 결정이 해독, 비순차 실행, 정밀한 예외를 어떻게 쉽게 만드는지 정리한다.</li>
+    </ul>
+    <div class="spec-meta">
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html" target="_blank" rel="noopener">Unprivileged · RV32I Base Integer ISA</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/unpriv/intro.html" target="_blank" rel="noopener">Unprivileged · Introduction (트랩의 정밀성)</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/priv/machine.html" target="_blank" rel="noopener">Privileged · Machine-Level ISA (mcause)</a>
+    </div>
+  </header>
+
+  <!-- ============================================================ -->
+  <section id="single-cycle">
+    <h2>명령 하나를 한 사이클에: 단일 사이클 데이터패스</h2>
+    <p>가장 단순한 구현부터 시작하자. 클럭이 한 번 똑딱일 때마다 명령 하나를 <b>처음부터 끝까지</b> 처리하는 CPU다. 이런 CPU에서 데이터가 흐르는 길을 <span class="term">데이터패스</span><span class="english">(datapath)</span>라 하고, 어느 길을 열고 닫을지 정하는 부분을 <span class="term">제어 유닛</span><span class="english">(control unit)</span>이라 한다. RV32I의 거의 모든 명령은 다음 일곱 부품만 있으면 처리할 수 있다.</p>
+    <ol>
+      <li><b>PC</b>: 지금 실행할 명령의 주소를 담은 레지스터.</li>
+      <li><b>명령어 메모리</b>: PC가 가리키는 32비트 명령을 꺼낸다.</li>
+      <li><b>레지스터 파일</b>: x0–x31. 읽기 포트 두 개(rs1, rs2)와 쓰기 포트 한 개(rd).</li>
+      <li><b>즉시값 생성기</b>: I·S·B·U·J 형식에 흩어진 즉시값 비트를 모아 32비트로 부호 확장한다(<a href="encoding.html">4장</a>).</li>
+      <li><b>ALU</b>: 더하기·빼기·논리·시프트·비교.</li>
+      <li><b>데이터 메모리</b>: 적재·저장이 접근하는 메모리.</li>
+      <li><b>선택기(mux)</b>: ALU 두 번째 입력(rs2냐 즉시값이냐), 레지스터에 쓸 값(ALU·메모리·PC+4), 다음 PC(PC+4냐 분기 목적지냐)를 고른다.</li>
+    </ol>
+    <p>아래 데이터패스에서 명령 분류를 바꿔 보자. 그 명령이 실제로 쓰는 선만 파란 점선으로 흐르고, 쓰지 않는 부품은 흐려진다. 선 옆의 작은 글자는 제어 유닛이 내보내는 <span class="term">제어 신호</span><span class="english">(control signal)</span>의 값이다.</p>
+
+    <div class="sim" id="single-cycle-sim">
+      <div class="sim-head"><span class="sim-tag">SIMULATOR</span><h3>단일 사이클 RV32I 데이터패스</h3></div>
+      <div class="sim-view"><div class="scroll-x"><svg viewBox="0 0 940 500" id="single-datapath-svg" role="img" aria-label="단일 사이클 RV32I 데이터패스. 선택한 명령 분류가 쓰는 선이 강조된다."></svg></div></div>
+      <div class="step-description" id="single-description"></div>
+      <div class="sim-controls">
+        <div class="control"><span>명령 분류</span>
+          <div class="segmented" id="single-class">
+            <button data-value="r" class="on">R형 (add)</button>
+            <button data-value="i">I형 산술 (addi)</button>
+            <button data-value="load">적재 (lw)</button>
+            <button data-value="store">저장 (sw)</button>
+            <button data-value="branch">분기 (beq)</button>
+            <button data-value="jal">점프 (jal)</button>
+          </div>
+        </div>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">예시 명령</span><span class="value" id="single-example">—</span></div>
+        <div class="stat"><span class="key">기계어</span><span class="value" id="single-machine-code">—</span></div>
+        <div class="stat"><span class="key">형식</span><span class="value" id="single-format">—</span></div>
+        <div class="stat"><span class="key">지연 (교과서 예)</span><span class="value" id="single-delay">—</span></div>
+      </div>
+      <div class="sim-note">적재(lw)를 고르면 명령어 메모리 → 레지스터 파일 → ALU → 데이터 메모리 → WB 선택기 → 레지스터 파일까지 <b>모든 큰 부품</b>을 차례로 지나간다. 이 가장 긴 길이 단일 사이클 CPU의 클럭 주기를 정한다. 저장(sw)과 분기(beq)에서 WB 선택기가 꺼지는 이유도 생각해 보자.</div>
+    </div>
+
+    <p>제어 유닛은 opcode(그리고 funct3·funct7)만 보고 아래 표의 신호를 만든다. RISC-V는 형식이 여섯 가지뿐이고 opcode 칸이 언제나 [6:0]에 있어서, 이 표가 작고 규칙적이다.</p>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>분류 (예)</th><th>RegWrite</th><th>ALUSrc</th><th>ImmSel</th><th>ALUOp</th><th>MemRead</th><th>MemWrite</th><th>WBSel</th><th>다음 PC</th></tr></thead>
+      <tbody>
+        <tr><td><b>R형</b> <code>add</code></td><td>1</td><td>rs2</td><td>—</td><td>funct3·funct7</td><td>0</td><td>0</td><td>ALU</td><td>PC+4</td></tr>
+        <tr><td><b>I형 산술</b> <code>addi</code></td><td>1</td><td>imm</td><td>I</td><td>funct3</td><td>0</td><td>0</td><td>ALU</td><td>PC+4</td></tr>
+        <tr><td><b>적재</b> <code>lw</code></td><td>1</td><td>imm</td><td>I</td><td>더하기</td><td>1</td><td>0</td><td>메모리</td><td>PC+4</td></tr>
+        <tr><td><b>저장</b> <code>sw</code></td><td>0</td><td>imm</td><td>S</td><td>더하기</td><td>0</td><td>1</td><td>—</td><td>PC+4</td></tr>
+        <tr><td><b>분기</b> <code>beq</code></td><td>0</td><td>rs2</td><td>B</td><td>비교</td><td>0</td><td>0</td><td>—</td><td>성립 시 PC+imm</td></tr>
+        <tr><td><b>점프</b> <code>jal</code></td><td>1</td><td>—</td><td>J</td><td>—</td><td>0</td><td>0</td><td>PC+4</td><td>PC+imm</td></tr>
+        <tr><td><b>간접 점프</b> <code>jalr</code></td><td>1</td><td>imm</td><td>I</td><td>더하기</td><td>0</td><td>0</td><td>PC+4</td><td>(rs1+imm) &amp; ~1</td></tr>
+        <tr><td><b>상위 즉시값</b> <code>lui</code></td><td>1</td><td>imm</td><td>U</td><td>B 통과</td><td>0</td><td>0</td><td>ALU</td><td>PC+4</td></tr>
+      </tbody>
+    </table></div>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 820 270" role="img" aria-label="명령 분류별로 거치는 부품의 지연 시간 막대 그래프">
+        <text x="20" y="22" class="t t-bold">명령마다 거치는 부품과 지연 (ps)</text>
+        <line x1="740" y1="30" x2="740" y2="210" class="s-bad s-dashed"/>
+        <text x="736" y="44" text-anchor="end" class="t-bad" style="font-size:12px">클럭 주기 = 800 ps</text>
+        <!-- add -->
+        <text x="20" y="77" class="t-mono">add (R형)</text>
+        <rect x="140" y="58" width="150" height="30" rx="5" class="f-accent-soft"/><text x="215" y="78" text-anchor="middle" class="t-dim">명령 가져오기</text>
+        <rect x="290" y="58" width="75" height="30" rx="5" class="f-teal-soft"/><text x="327" y="78" text-anchor="middle" class="t-dim">읽기</text>
+        <rect x="365" y="58" width="150" height="30" rx="5" class="f-gold-soft"/><text x="440" y="78" text-anchor="middle" class="t-dim">ALU</text>
+        <rect x="515" y="58" width="75" height="30" rx="5" class="f-ok-soft"/><text x="552" y="78" text-anchor="middle" class="t-dim">쓰기</text>
+        <rect x="590" y="58" width="150" height="30" rx="5" fill="none" stroke="var(--border)" stroke-dasharray="4 4"/><text x="665" y="78" text-anchor="middle" class="t-faint">놀고 있는 시간</text>
+        <!-- lw -->
+        <text x="20" y="117" class="t-mono">lw (적재)</text>
+        <rect x="140" y="98" width="150" height="30" rx="5" class="f-accent-soft"/><text x="215" y="118" text-anchor="middle" class="t-dim">명령 가져오기</text>
+        <rect x="290" y="98" width="75" height="30" rx="5" class="f-teal-soft"/><text x="327" y="118" text-anchor="middle" class="t-dim">읽기</text>
+        <rect x="365" y="98" width="150" height="30" rx="5" class="f-gold-soft"/><text x="440" y="118" text-anchor="middle" class="t-dim">ALU (주소)</text>
+        <rect x="515" y="98" width="150" height="30" rx="5" class="f-violet-soft"/><text x="590" y="118" text-anchor="middle" class="t-dim">데이터 메모리</text>
+        <rect x="665" y="98" width="75" height="30" rx="5" class="f-ok-soft"/><text x="702" y="118" text-anchor="middle" class="t-dim">쓰기</text>
+        <text x="750" y="118" class="t-gold" style="font-size:13px">800</text>
+        <!-- sw -->
+        <text x="20" y="157" class="t-mono">sw (저장)</text>
+        <rect x="140" y="138" width="150" height="30" rx="5" class="f-accent-soft"/><text x="215" y="158" text-anchor="middle" class="t-dim">명령 가져오기</text>
+        <rect x="290" y="138" width="75" height="30" rx="5" class="f-teal-soft"/><text x="327" y="158" text-anchor="middle" class="t-dim">읽기</text>
+        <rect x="365" y="138" width="150" height="30" rx="5" class="f-gold-soft"/><text x="440" y="158" text-anchor="middle" class="t-dim">ALU (주소)</text>
+        <rect x="515" y="138" width="150" height="30" rx="5" class="f-violet-soft"/><text x="590" y="158" text-anchor="middle" class="t-dim">데이터 메모리</text>
+        <rect x="665" y="138" width="75" height="30" rx="5" fill="none" stroke="var(--border)" stroke-dasharray="4 4"/>
+        <!-- beq -->
+        <text x="20" y="197" class="t-mono">beq (분기)</text>
+        <rect x="140" y="178" width="150" height="30" rx="5" class="f-accent-soft"/><text x="215" y="198" text-anchor="middle" class="t-dim">명령 가져오기</text>
+        <rect x="290" y="178" width="75" height="30" rx="5" class="f-teal-soft"/><text x="327" y="198" text-anchor="middle" class="t-dim">읽기</text>
+        <rect x="365" y="178" width="150" height="30" rx="5" class="f-gold-soft"/><text x="440" y="198" text-anchor="middle" class="t-dim">ALU (비교)</text>
+        <rect x="515" y="178" width="225" height="30" rx="5" fill="none" stroke="var(--border)" stroke-dasharray="4 4"/><text x="627" y="198" text-anchor="middle" class="t-faint">놀고 있는 시간</text>
+        <!-- 눈금 -->
+        <line x1="140" y1="222" x2="740" y2="222" class="s-line"/>
+        <g class="t-faint" style="font-size:11px">
+          <text x="140" y="238" text-anchor="middle" class="t-faint">0</text>
+          <text x="290" y="238" text-anchor="middle" class="t-faint">200</text>
+          <text x="440" y="238" text-anchor="middle" class="t-faint">400</text>
+          <text x="590" y="238" text-anchor="middle" class="t-faint">600</text>
+          <text x="740" y="238" text-anchor="middle" class="t-faint">800</text>
+        </g>
+        <text x="440" y="260" text-anchor="middle" class="t-faint">메모리 200 · ALU 200 · 레지스터 파일 읽기/쓰기 100 (Patterson·Hennessy 교과서의 예시 값)</text>
+      </svg></div>
+      <figcaption><b>그림 8-1.</b> 단일 사이클 CPU는 모든 명령이 같은 클럭 주기를 쓰므로, 가장 오래 걸리는 <code>lw</code>(800 ps)에 클럭을 맞춰야 한다. <code>add</code>는 600 ps, <code>beq</code>는 500 ps면 충분한데도 매번 800 ps를 기다린다. 점선 상자가 그 낭비다. 이 낭비를 줄이려는 것이 파이프라인의 출발점이다.</figcaption>
+    </figure>
+    <div class="callout tip"><strong>왜 명령어 메모리와 데이터 메모리를 따로 그리나</strong><p>한 사이클 안에 명령도 읽고 데이터도 읽어야 하므로 포트가 두 개 필요하다. 실제 칩에서는 명령어 캐시와 데이터 캐시를 따로 두는 방식(하버드식 L1)으로 이 요구를 맞춘다. 규격은 이런 구조를 전혀 요구하지 않는다. 그래서 명령어 쓰기가 명령어 가져오기에 보이게 하려면 <code>fence.i</code>(<a href="small-extensions.html">16장</a>)로 명시적으로 동기화해야 한다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="five-stage">
+    <h2>5단 파이프라인: IF · ID · EX · MEM · WB</h2>
+    <p>빨래를 생각해 보자. 세탁기가 돌아가는 동안 건조기를 놀리지 않으려면, 첫 빨래가 건조기로 넘어가자마자 다음 빨래를 세탁기에 넣으면 된다. CPU도 똑같다. 명령 처리를 다섯 단계로 자르고, 단계 사이에 값을 잠시 붙잡아 두는 <span class="term">파이프라인 레지스터</span><span class="english">(pipeline register)</span>를 넣으면, 다섯 명령이 동시에 서로 다른 단계에 머물 수 있다. 명령 하나가 걸리는 시간(<span class="term">지연</span><span class="english">(latency)</span>)은 줄지 않지만, 단위 시간에 끝나는 명령 수(<span class="term">처리량</span><span class="english">(throughput)</span>)가 크게 는다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 880 330" role="img" aria-label="단일 사이클과 파이프라인으로 lw 세 개를 실행하는 시간 비교">
+        <text x="20" y="22" class="t t-bold">단일 사이클 — 앞 명령이 끝나야 다음 명령 시작 (클럭 800 ps)</text>
+        <g>
+          <text x="20" y="57" class="t-mono">lw ①</text>
+          <rect x="140" y="40" width="60" height="26" rx="4" class="f-accent-soft"/><text x="170" y="58" text-anchor="middle" class="t-faint">IF</text>
+          <rect x="200" y="40" width="30" height="26" rx="4" class="f-teal-soft"/><text x="215" y="58" text-anchor="middle" class="t-faint">ID</text>
+          <rect x="230" y="40" width="60" height="26" rx="4" class="f-gold-soft"/><text x="260" y="58" text-anchor="middle" class="t-faint">EX</text>
+          <rect x="290" y="40" width="60" height="26" rx="4" class="f-violet-soft"/><text x="320" y="58" text-anchor="middle" class="t-faint">MEM</text>
+          <rect x="350" y="40" width="30" height="26" rx="4" class="f-ok-soft"/><text x="365" y="58" text-anchor="middle" class="t-faint">WB</text>
+          <text x="20" y="89" class="t-mono">lw ②</text>
+          <rect x="380" y="72" width="60" height="26" rx="4" class="f-accent-soft"/><text x="410" y="90" text-anchor="middle" class="t-faint">IF</text>
+          <rect x="440" y="72" width="30" height="26" rx="4" class="f-teal-soft"/><text x="455" y="90" text-anchor="middle" class="t-faint">ID</text>
+          <rect x="470" y="72" width="60" height="26" rx="4" class="f-gold-soft"/><text x="500" y="90" text-anchor="middle" class="t-faint">EX</text>
+          <rect x="530" y="72" width="60" height="26" rx="4" class="f-violet-soft"/><text x="560" y="90" text-anchor="middle" class="t-faint">MEM</text>
+          <rect x="590" y="72" width="30" height="26" rx="4" class="f-ok-soft"/><text x="605" y="90" text-anchor="middle" class="t-faint">WB</text>
+          <text x="20" y="121" class="t-mono">lw ③</text>
+          <rect x="620" y="104" width="60" height="26" rx="4" class="f-accent-soft"/><text x="650" y="122" text-anchor="middle" class="t-faint">IF</text>
+          <rect x="680" y="104" width="30" height="26" rx="4" class="f-teal-soft"/><text x="695" y="122" text-anchor="middle" class="t-faint">ID</text>
+          <rect x="710" y="104" width="60" height="26" rx="4" class="f-gold-soft"/><text x="740" y="122" text-anchor="middle" class="t-faint">EX</text>
+          <rect x="770" y="104" width="60" height="26" rx="4" class="f-violet-soft"/><text x="800" y="122" text-anchor="middle" class="t-faint">MEM</text>
+          <rect x="830" y="104" width="30" height="26" rx="4" class="f-ok-soft"/><text x="845" y="122" text-anchor="middle" class="t-faint">WB</text>
+          <text x="20" y="150" class="t-gold">합계 2400 ps</text>
+          <line x1="140" y1="140" x2="860" y2="140" class="s-line"/>
+        </g>
+        <text x="20" y="182" class="t t-bold">파이프라인 — 단계마다 한 명령씩 겹쳐 실행 (클럭 200 ps)</text>
+        <g>
+          <text x="20" y="215" class="t-mono">lw ①</text>
+          <rect x="140" y="198" width="60" height="26" rx="4" class="f-accent-soft"/><text x="170" y="216" text-anchor="middle" class="t-faint">IF</text>
+          <rect x="200" y="198" width="60" height="26" rx="4" class="f-teal-soft"/><text x="230" y="216" text-anchor="middle" class="t-faint">ID</text>
+          <rect x="260" y="198" width="60" height="26" rx="4" class="f-gold-soft"/><text x="290" y="216" text-anchor="middle" class="t-faint">EX</text>
+          <rect x="320" y="198" width="60" height="26" rx="4" class="f-violet-soft"/><text x="350" y="216" text-anchor="middle" class="t-faint">MEM</text>
+          <rect x="380" y="198" width="60" height="26" rx="4" class="f-ok-soft"/><text x="410" y="216" text-anchor="middle" class="t-faint">WB</text>
+          <text x="20" y="247" class="t-mono">lw ②</text>
+          <rect x="200" y="230" width="60" height="26" rx="4" class="f-accent-soft"/><text x="230" y="248" text-anchor="middle" class="t-faint">IF</text>
+          <rect x="260" y="230" width="60" height="26" rx="4" class="f-teal-soft"/><text x="290" y="248" text-anchor="middle" class="t-faint">ID</text>
+          <rect x="320" y="230" width="60" height="26" rx="4" class="f-gold-soft"/><text x="350" y="248" text-anchor="middle" class="t-faint">EX</text>
+          <rect x="380" y="230" width="60" height="26" rx="4" class="f-violet-soft"/><text x="410" y="248" text-anchor="middle" class="t-faint">MEM</text>
+          <rect x="440" y="230" width="60" height="26" rx="4" class="f-ok-soft"/><text x="470" y="248" text-anchor="middle" class="t-faint">WB</text>
+          <text x="20" y="279" class="t-mono">lw ③</text>
+          <rect x="260" y="262" width="60" height="26" rx="4" class="f-accent-soft"/><text x="290" y="280" text-anchor="middle" class="t-faint">IF</text>
+          <rect x="320" y="262" width="60" height="26" rx="4" class="f-teal-soft"/><text x="350" y="280" text-anchor="middle" class="t-faint">ID</text>
+          <rect x="380" y="262" width="60" height="26" rx="4" class="f-gold-soft"/><text x="410" y="280" text-anchor="middle" class="t-faint">EX</text>
+          <rect x="440" y="262" width="60" height="26" rx="4" class="f-violet-soft"/><text x="470" y="280" text-anchor="middle" class="t-faint">MEM</text>
+          <rect x="500" y="262" width="60" height="26" rx="4" class="f-ok-soft"/><text x="530" y="280" text-anchor="middle" class="t-faint">WB</text>
+          <text x="20" y="308" class="t-gold">합계 1400 ps</text>
+          <line x1="140" y1="298" x2="860" y2="298" class="s-line"/>
+          <text x="600" y="250" class="t-dim">한 명령이 끝나는 간격: 800 → 200 ps</text>
+        </g>
+        <g class="t-faint">
+          <text x="140" y="322" text-anchor="middle" class="t-faint">0</text>
+          <text x="380" y="322" text-anchor="middle" class="t-faint">800</text>
+          <text x="620" y="322" text-anchor="middle" class="t-faint">1600</text>
+          <text x="860" y="322" text-anchor="middle" class="t-faint">2400</text>
+        </g>
+        <line x1="140" y1="32" x2="140" y2="304" stroke="var(--accent-2)" stroke-width="2">
+          <animate attributeName="x1" values="140;860;860" keyTimes="0;0.85;1" dur="7s" repeatCount="indefinite"/>
+          <animate attributeName="x2" values="140;860;860" keyTimes="0;0.85;1" dur="7s" repeatCount="indefinite"/>
+        </line>
+      </svg></div>
+      <figcaption><b>그림 8-2.</b> 같은 <code>lw</code> 세 개를 실행하는 시간. 단일 사이클은 2400 ps, 5단 파이프라인은 1400 ps가 걸린다. 파이프라인에서는 레지스터 읽기·쓰기(100 ps)처럼 짧은 단계도 가장 긴 단계(200 ps)에 맞춰 한 클럭을 다 쓰므로, 명령 하나의 지연은 오히려 1000 ps로 늘었다. 그래도 명령이 많아지면 처리량은 거의 4배가 된다. 금색 세로선은 흘러가는 시간이다.</figcaption>
+    </figure>
+
+    <div class="table-wrap"><table>
+      <thead><tr><th>단계</th><th>하는 일</th><th>RISC-V 인코딩이 돕는 점</th></tr></thead>
+      <tbody>
+        <tr><td><b>IF</b> 가져오기</td><td>PC로 명령어 메모리를 읽고 PC+4를 계산한다.</td><td>C 확장이 없으면 모든 명령이 4바이트이고 4바이트 정렬이라 한 번에 한 명령씩 깔끔하게 읽힌다.</td></tr>
+        <tr><td><b>ID</b> 해독</td><td>opcode를 해독하고, 레지스터 파일에서 rs1·rs2를 읽고, 즉시값을 만든다.</td><td>rs1·rs2 칸 위치가 고정이라 해독과 동시에 레지스터를 읽는다. 부호 비트가 언제나 inst[31]이다.</td></tr>
+        <tr><td><b>EX</b> 실행</td><td>ALU 연산, 적재·저장 주소 계산, 분기 조건 비교와 목적지 계산.</td><td>비교와 분기가 한 명령이라 조건 코드 레지스터가 필요 없다.</td></tr>
+        <tr><td><b>MEM</b> 메모리</td><td>적재는 데이터 메모리를 읽고, 저장은 쓴다. 다른 명령은 통과한다.</td><td>메모리에 접근하는 명령은 적재·저장뿐이다(load-store 구조). 주소 지정 방식이 “레지스터+12비트 오프셋” 하나다.</td></tr>
+        <tr><td><b>WB</b> 쓰기</td><td>결과를 레지스터 파일의 rd에 쓴다.</td><td>명령 하나가 쓰는 정수 레지스터는 많아야 하나(rd)다.</td></tr>
+      </tbody>
+    </table></div>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 900 330" role="img" aria-label="파이프라인 레지스터로 다섯 단계를 나눈 데이터패스와 그 안을 흐르는 명령들">
+        <defs>
+          <marker id="five-stage-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--text-faint)"/></marker>
+        </defs>
+        <!-- 단계 이름 -->
+        <text x="95" y="22" text-anchor="middle" class="t-accent">IF</text><text x="95" y="40" text-anchor="middle" class="t-faint">명령어 가져오기</text>
+        <text x="280" y="22" text-anchor="middle" class="t-accent">ID</text><text x="280" y="40" text-anchor="middle" class="t-faint">해독 · 레지스터 읽기</text>
+        <text x="470" y="22" text-anchor="middle" class="t-accent">EX</text><text x="470" y="40" text-anchor="middle" class="t-faint">실행 · 주소 · 분기 판정</text>
+        <text x="653" y="22" text-anchor="middle" class="t-accent">MEM</text><text x="653" y="40" text-anchor="middle" class="t-faint">메모리 접근</text>
+        <text x="820" y="22" text-anchor="middle" class="t-accent">WB</text><text x="820" y="40" text-anchor="middle" class="t-faint">레지스터에 쓰기</text>
+        <!-- 파이프라인 레지스터 -->
+        <rect x="180" y="62" width="12" height="208" rx="3" class="f-gold-soft"/><text x="186" y="57" text-anchor="middle" class="t-faint" style="font-size:10.5px">IF/ID</text>
+        <rect x="370" y="62" width="12" height="208" rx="3" class="f-gold-soft"/><text x="376" y="57" text-anchor="middle" class="t-faint" style="font-size:10.5px">ID/EX</text>
+        <rect x="560" y="62" width="12" height="208" rx="3" class="f-gold-soft"/><text x="566" y="57" text-anchor="middle" class="t-faint" style="font-size:10.5px">EX/MEM</text>
+        <rect x="735" y="62" width="12" height="208" rx="3" class="f-gold-soft"/><text x="741" y="57" text-anchor="middle" class="t-faint" style="font-size:10.5px">MEM/WB</text>
+        <!-- IF -->
+        <rect x="26" y="135" width="44" height="50" rx="6" class="f-elev"/><text x="48" y="165" text-anchor="middle" class="t t-bold">PC</text>
+        <rect x="88" y="115" width="82" height="90" rx="8" class="f-elev"/><text x="129" y="156" text-anchor="middle" class="t">명령어</text><text x="129" y="174" text-anchor="middle" class="t">메모리</text>
+        <!-- ID -->
+        <rect x="204" y="105" width="110" height="110" rx="8" class="f-elev"/><text x="259" y="156" text-anchor="middle" class="t">레지스터</text><text x="259" y="174" text-anchor="middle" class="t">파일</text>
+        <rect x="268" y="228" width="96" height="32" rx="6" class="f-elev"/><text x="316" y="249" text-anchor="middle" class="t-dim">즉시값 생성</text>
+        <rect x="324" y="135" width="40" height="50" rx="6" class="f-surface"/><text x="344" y="165" text-anchor="middle" class="t-dim">제어</text>
+        <!-- EX -->
+        <polygon points="410,110 500,140 500,180 410,210 410,175 425,160 410,145" class="f-gold-soft"/>
+        <text x="468" y="165" text-anchor="middle" class="t t-bold">ALU</text>
+        <rect x="508" y="228" width="44" height="32" rx="6" class="f-surface"/><text x="530" y="249" text-anchor="middle" class="t-dim">분기</text>
+        <!-- MEM -->
+        <rect x="598" y="115" width="110" height="90" rx="8" class="f-elev"/><text x="653" y="156" text-anchor="middle" class="t">데이터</text><text x="653" y="174" text-anchor="middle" class="t">메모리</text>
+        <!-- WB -->
+        <rect x="790" y="125" width="26" height="70" rx="13" class="f-surface"/><text x="803" y="214" text-anchor="middle" class="t-faint">선택</text>
+        <!-- 선 -->
+        <path d="M70 160 H86" class="s-line" marker-end="url(#five-stage-arrow)"/>
+        <path d="M170 160 H180" class="s-line"/><path d="M192 160 H202" class="s-line" marker-end="url(#five-stage-arrow)"/>
+        <path d="M314 128 H370" class="s-line"/><path d="M314 192 H370" class="s-line"/><path d="M364 244 H370" class="s-line"/>
+        <path d="M382 128 H408" class="s-line" marker-end="url(#five-stage-arrow)"/>
+        <path d="M382 192 H408" class="s-line" marker-end="url(#five-stage-arrow)"/>
+        <path d="M382 244 H396 V196" class="s-line"/>
+        <path d="M500 160 H560" class="s-line"/><path d="M572 160 H596" class="s-line" marker-end="url(#five-stage-arrow)"/>
+        <path d="M572 140 H584 V96 H770 V140 H788" class="s-line" marker-end="url(#five-stage-arrow)"/>
+        <path d="M708 160 H735" class="s-line"/><path d="M747 168 H788" class="s-line" marker-end="url(#five-stage-arrow)"/>
+        <path d="M816 160 H850 V286 H236 V217" class="s-accent flow-dash"/>
+        <text x="653" y="279" text-anchor="middle" class="t-faint">WB → 레지스터 파일 (rd에 쓰기)</text>
+        <!-- 명령 흐름 -->
+        <line x1="20" y1="306" x2="880" y2="306" stroke="var(--border)" stroke-width="2" stroke-dasharray="3 5"/>
+        <g><circle r="10" class="f-accent"/><text y="4" text-anchor="middle" class="t-on-accent" style="font-size:11px">5</text><animateMotion dur="7.5s" begin="-0.1s" repeatCount="indefinite" path="M20 306 H880"/></g>
+        <g><circle r="10" class="f-accent"/><text y="4" text-anchor="middle" class="t-on-accent" style="font-size:11px">4</text><animateMotion dur="7.5s" begin="-1.6s" repeatCount="indefinite" path="M20 306 H880"/></g>
+        <g><circle r="10" class="f-accent"/><text y="4" text-anchor="middle" class="t-on-accent" style="font-size:11px">3</text><animateMotion dur="7.5s" begin="-3.1s" repeatCount="indefinite" path="M20 306 H880"/></g>
+        <g><circle r="10" class="f-accent"/><text y="4" text-anchor="middle" class="t-on-accent" style="font-size:11px">2</text><animateMotion dur="7.5s" begin="-4.6s" repeatCount="indefinite" path="M20 306 H880"/></g>
+        <g><circle r="10" class="f-gold"/><text y="4" text-anchor="middle" class="t-on-accent" style="font-size:11px">1</text><animateMotion dur="7.5s" begin="-6.1s" repeatCount="indefinite" path="M20 306 H880"/></g>
+      </svg></div>
+      <figcaption><b>그림 8-3.</b> 5단 파이프라인 데이터패스. 금색 세로 막대가 파이프라인 레지스터다. 클럭마다 각 단계의 결과가 다음 막대에 저장되므로, 단계마다 서로 다른 명령이 동시에 일할 수 있다. 아래 줄의 번호 공들은 차례로 들어온 명령들이 한 단계 간격으로 흘러가는 모습이다. WB에서 레지스터 파일로 되돌아가는 선(파란 점선)만이 “뒤로” 가는 길인데, 여기서 해저드가 생긴다.</figcaption>
+    </figure>
+
+    <div class="callout deep"><strong>파이프라인 레지스터에는 무엇이 실리나</strong><p>값만이 아니다. ID/EX에는 rs1·rs2 값, 즉시값과 함께 <b>그 명령이 뒤 단계에서 쓸 제어 신호</b>(MemRead, MemWrite, RegWrite, WBSel)와 목적 레지스터 번호 rd도 실린다. 제어 신호가 명령과 함께 “따라 내려가기” 때문에, 각 단계는 자기 앞에 있는 막대만 보고 일할 수 있다. 다음 절의 해저드 검출도 바로 이 rd 번호를 비교한다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="data-hazards">
+    <h2>데이터 해저드와 포워딩</h2>
+    <p>파이프라인은 명령이 서로 독립일 때 가장 잘 돈다. 하지만 실제 프로그램은 앞 명령의 결과를 바로 다음 명령이 쓰는 일이 흔하다. 다음 코드를 보자.</p>
+    <div class="codebox" data-title="앞 명령의 결과를 곧바로 쓰는 코드"><span class="keyword">add</span>  <span class="register">x1</span>, <span class="register">x2</span>, <span class="register">x3</span>     <span class="comment"># x1을 만든다 (WB는 5번째 사이클)</span>
+<span class="keyword">sub</span>  <span class="register">x4</span>, <span class="register">x1</span>, <span class="register">x5</span>     <span class="comment"># x1이 필요하다 (ID는 3번째 사이클!)</span>
+<span class="keyword">and</span>  <span class="register">x6</span>, <span class="register">x1</span>, <span class="register">x7</span>
+<span class="keyword">or</span>   <span class="register">x8</span>, <span class="register">x1</span>, <span class="register">x9</span></div>
+    <p><code>add</code>는 5번째 사이클의 WB에서야 x1을 레지스터 파일에 쓰는데, <code>sub</code>는 3번째 사이클의 ID에서 x1을 읽는다. 쓰기 전에 읽으려는 이 상황을 <span class="term">RAW 해저드</span><span class="english">(read-after-write hazard)</span>라 한다. 가장 단순한 해결은 <code>sub</code>를 ID에 붙잡아 두는 것(<span class="term">멈춤</span><span class="english">(stall)</span>)이지만, 두 사이클이나 손해다.</p>
+    <p>그런데 잘 보면 x1의 값은 <b>3번째 사이클 EX가 끝날 때 이미 계산되어</b> EX/MEM 레지스터에 있다. 레지스터 파일을 거치지 말고 그 값을 다음 명령의 ALU 입력으로 바로 돌려보내면 된다. 이것이 <span class="term">포워딩</span><span class="english">(forwarding, bypassing)</span>이다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 880 320" role="img" aria-label="포워딩 경로를 표시한 파이프라인 다이어그램">
+        <defs>
+          <marker id="forward-arrow-gold" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent-2)"/></marker>
+          <marker id="forward-arrow-violet" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--violet)"/></marker>
+          <marker id="forward-arrow-teal" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--teal)"/></marker>
+        </defs>
+        <g class="t-faint" style="font-size:11px">
+          <text x="268" y="34" text-anchor="middle" class="t-faint">1</text><text x="356" y="34" text-anchor="middle" class="t-faint">2</text><text x="444" y="34" text-anchor="middle" class="t-faint">3</text><text x="532" y="34" text-anchor="middle" class="t-faint">4</text><text x="620" y="34" text-anchor="middle" class="t-faint">5</text><text x="708" y="34" text-anchor="middle" class="t-faint">6</text><text x="796" y="34" text-anchor="middle" class="t-faint">7</text>
+          <text x="20" y="34" class="t-faint">사이클 →</text>
+        </g>
+        <!-- add -->
+        <text x="20" y="70" class="t-mono">add x1, x2, x3</text>
+        <rect x="230" y="50" width="76" height="30" rx="5" class="f-accent-soft"/><text x="268" y="70" text-anchor="middle" class="t-dim">IF</text>
+        <rect x="318" y="50" width="76" height="30" rx="5" class="f-teal-soft"/><text x="356" y="70" text-anchor="middle" class="t-dim">ID</text>
+        <rect x="406" y="50" width="76" height="30" rx="5" class="f-gold-soft"/><text x="444" y="70" text-anchor="middle" class="t-dim">EX</text>
+        <rect x="494" y="50" width="76" height="30" rx="5" class="f-violet-soft"/><text x="532" y="70" text-anchor="middle" class="t-dim">MEM</text>
+        <rect x="582" y="50" width="76" height="30" rx="5" class="f-ok-soft"/><text x="620" y="70" text-anchor="middle" class="t-dim">WB</text>
+        <!-- sub -->
+        <text x="20" y="133" class="t-mono">sub x4, <tspan class="t-bad">x1</tspan>, x5</text>
+        <rect x="318" y="113" width="76" height="30" rx="5" class="f-accent-soft"/><text x="356" y="133" text-anchor="middle" class="t-dim">IF</text>
+        <rect x="406" y="113" width="76" height="30" rx="5" class="f-teal-soft"/><text x="444" y="133" text-anchor="middle" class="t-dim">ID</text>
+        <rect x="494" y="113" width="76" height="30" rx="5" class="f-gold-soft"/><text x="532" y="133" text-anchor="middle" class="t-dim">EX</text>
+        <rect x="582" y="113" width="76" height="30" rx="5" class="f-violet-soft"/><text x="620" y="133" text-anchor="middle" class="t-dim">MEM</text>
+        <rect x="670" y="113" width="76" height="30" rx="5" class="f-ok-soft"/><text x="708" y="133" text-anchor="middle" class="t-dim">WB</text>
+        <!-- and -->
+        <text x="20" y="196" class="t-mono">and x6, <tspan class="t-bad">x1</tspan>, x7</text>
+        <rect x="406" y="176" width="76" height="30" rx="5" class="f-accent-soft"/><text x="444" y="196" text-anchor="middle" class="t-dim">IF</text>
+        <rect x="494" y="176" width="76" height="30" rx="5" class="f-teal-soft"/><text x="532" y="196" text-anchor="middle" class="t-dim">ID</text>
+        <rect x="582" y="176" width="76" height="30" rx="5" class="f-gold-soft"/><text x="620" y="196" text-anchor="middle" class="t-dim">EX</text>
+        <rect x="670" y="176" width="76" height="30" rx="5" class="f-violet-soft"/><text x="708" y="196" text-anchor="middle" class="t-dim">MEM</text>
+        <rect x="758" y="176" width="76" height="30" rx="5" class="f-ok-soft"/><text x="796" y="196" text-anchor="middle" class="t-dim">WB</text>
+        <!-- or -->
+        <text x="20" y="259" class="t-mono">or  x8, <tspan class="t-bad">x1</tspan>, x9</text>
+        <rect x="494" y="239" width="76" height="30" rx="5" class="f-accent-soft"/><text x="532" y="259" text-anchor="middle" class="t-dim">IF</text>
+        <rect x="582" y="239" width="76" height="30" rx="5" class="f-teal-soft"/><text x="620" y="259" text-anchor="middle" class="t-dim">ID</text>
+        <rect x="670" y="239" width="76" height="30" rx="5" class="f-gold-soft"/><text x="708" y="259" text-anchor="middle" class="t-dim">EX</text>
+        <rect x="758" y="239" width="76" height="30" rx="5" class="f-violet-soft"/><text x="796" y="259" text-anchor="middle" class="t-dim">MEM</text>
+        <!-- 포워딩 화살표 -->
+        <path d="M520 81 V110" class="s-gold flow-dash" stroke-width="3" marker-end="url(#forward-arrow-gold)"/>
+        <path d="M590 81 C 574 100, 574 150, 588 173" fill="none" stroke="var(--violet)" stroke-width="3" class="flow-dash" marker-end="url(#forward-arrow-violet)"/>
+        <path d="M652 81 C 676 120, 676 200, 652 236" fill="none" stroke="var(--teal)" stroke-width="3" class="flow-dash" marker-end="url(#forward-arrow-teal)"/>
+        <!-- 범례 -->
+        <line x1="20" y1="296" x2="44" y2="296" class="s-gold" stroke-width="3"/><text x="50" y="300" class="t-dim">EX/MEM → EX 포워딩</text>
+        <line x1="230" y1="296" x2="254" y2="296" stroke="var(--violet)" stroke-width="3"/><text x="260" y="300" class="t-dim">MEM/WB → EX 포워딩</text>
+        <line x1="440" y1="296" x2="464" y2="296" stroke="var(--teal)" stroke-width="3"/><text x="470" y="300" class="t-dim">레지스터 파일: 같은 사이클 앞 절반 쓰기 → 뒤 절반 읽기</text>
+      </svg></div>
+      <figcaption><b>그림 8-4.</b> 포워딩으로 RAW 해저드를 없앤다. <code>sub</code>는 4번째 사이클 EX에서 EX/MEM 레지스터의 x1을, <code>and</code>는 5번째 사이클 EX에서 MEM/WB 레지스터의 x1을 받는다. <code>or</code>는 5번째 사이클 ID에서 레지스터 파일을 읽는데, 같은 사이클 앞 절반에 WB가 먼저 쓰도록 설계하면 포워딩 없이도 새 값을 본다. 결국 이 네 명령은 한 사이클도 멈추지 않는다.</figcaption>
+    </figure>
+
+    <p>포워딩 유닛은 EX 단계에 들어온 명령의 rs1·rs2 번호를 앞선 두 명령의 rd 번호와 비교하는 작은 비교기 묶음이다. 조건을 그대로 적으면 다음과 같다(rs2도 똑같다).</p>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>우선</th><th>조건</th><th>ALU 입력 A로 보낼 값</th></tr></thead>
+      <tbody>
+        <tr><td>1</td><td><code>EX/MEM.RegWrite</code> 이고 <code>EX/MEM.rd ≠ 0</code> 이고 <code>EX/MEM.rd = ID/EX.rs1</code></td><td>EX/MEM의 ALU 결과 (바로 앞 명령)</td></tr>
+        <tr><td>2</td><td><code>MEM/WB.RegWrite</code> 이고 <code>MEM/WB.rd ≠ 0</code> 이고 <code>MEM/WB.rd = ID/EX.rs1</code></td><td>MEM/WB의 쓰기 값 (두 칸 앞 명령)</td></tr>
+        <tr><td>3</td><td>그 밖</td><td>ID에서 레지스터 파일로 읽은 값</td></tr>
+      </tbody>
+    </table></div>
+    <p>1번이 2번보다 앞서는 이유는, 두 명령이 모두 같은 레지스터를 썼다면 <b>더 최근 명령</b>의 값이 맞기 때문이다. 그리고 rd가 0인지 따로 검사하는 이유는 x0 때문이다.</p>
+    <div class="callout tip"><strong>x0가 하드웨어를 단순하게 하는 한 가지 방법</strong><p>x0에 쓰는 값은 버려지고 x0를 읽으면 언제나 0이다(<a href="registers.html">3장</a>). 따라서 <code>addi x0, x0, 0</code>(nop)이나 <code>jal x0, …</code>(j) 같은 명령은 아무리 많아도 진짜 의존성을 만들지 않는다. 포워딩·해저드 검출 비교기에 “rd ≠ 0” 조건 하나만 붙이면 이 모든 경우가 걸러진다. RISC-V는 이렇게 쓰지 않는 결과를 버리는 곳으로 x0를 일관되게 써서, 비교 결과만 내는 별도 명령이나 “결과 없음” 표시 비트를 따로 두지 않았다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="load-use">
+    <h2>적재-사용 해저드: 피할 수 없는 한 사이클</h2>
+    <p>포워딩으로도 해결할 수 없는 경우가 있다. <code>lw</code>의 값은 데이터 메모리를 읽는 <b>MEM 단계가 끝나야</b> 나온다. 그런데 바로 다음 명령이 그 값을 EX에서 쓰려면, 같은 사이클의 시작에 값이 있어야 한다. 아직 존재하지 않는 값을 시간을 거슬러 보낼 수는 없으므로, 해저드 검출 유닛이 다음 명령을 ID에 한 사이클 붙잡고 EX에 아무 일도 하지 않는 <span class="term">거품</span><span class="english">(bubble)</span>을 넣는다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 880 310" role="img" aria-label="적재-사용 해저드에서 한 사이클 멈추고 MEM/WB에서 포워딩하는 모습">
+        <defs>
+          <marker id="load-use-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--violet)"/></marker>
+          <marker id="load-use-bad-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--bad)"/></marker>
+        </defs>
+        <g style="font-size:11px">
+          <text x="20" y="32" class="t-faint">사이클 →</text>
+          <text x="246" y="32" text-anchor="middle" class="t-faint">1</text><text x="328" y="32" text-anchor="middle" class="t-faint">2</text><text x="410" y="32" text-anchor="middle" class="t-faint">3</text><text x="492" y="32" text-anchor="middle" class="t-faint">4</text><text x="574" y="32" text-anchor="middle" class="t-faint">5</text><text x="656" y="32" text-anchor="middle" class="t-faint">6</text><text x="738" y="32" text-anchor="middle" class="t-faint">7</text><text x="820" y="32" text-anchor="middle" class="t-faint">8</text>
+        </g>
+        <!-- lw -->
+        <text x="20" y="66" class="t-mono">lw  x1, 0(x2)</text>
+        <rect x="210" y="46" width="72" height="30" rx="5" class="f-accent-soft"/><text x="246" y="66" text-anchor="middle" class="t-dim">IF</text>
+        <rect x="292" y="46" width="72" height="30" rx="5" class="f-teal-soft"/><text x="328" y="66" text-anchor="middle" class="t-dim">ID</text>
+        <rect x="374" y="46" width="72" height="30" rx="5" class="f-gold-soft"/><text x="410" y="66" text-anchor="middle" class="t-dim">EX</text>
+        <rect x="456" y="46" width="72" height="30" rx="5" class="f-violet-soft"/><text x="492" y="66" text-anchor="middle" class="t-dim">MEM</text>
+        <rect x="538" y="46" width="72" height="30" rx="5" class="f-ok-soft"/><text x="574" y="66" text-anchor="middle" class="t-dim">WB</text>
+        <!-- 거품 -->
+        <text x="20" y="122" class="t-faint">(거품 = nop)</text>
+        <rect x="456" y="102" width="72" height="30" rx="5" fill="none" stroke="var(--warn)" stroke-dasharray="4 3"/><text x="492" y="122" text-anchor="middle" class="t-warn" style="font-size:12px">거품</text>
+        <rect x="538" y="102" width="72" height="30" rx="5" fill="none" stroke="var(--warn)" stroke-dasharray="4 3"/><text x="574" y="122" text-anchor="middle" class="t-warn" style="font-size:12px">거품</text>
+        <rect x="620" y="102" width="72" height="30" rx="5" fill="none" stroke="var(--warn)" stroke-dasharray="4 3"/><text x="656" y="122" text-anchor="middle" class="t-warn" style="font-size:12px">거품</text>
+        <!-- add -->
+        <text x="20" y="178" class="t-mono">add x3, <tspan class="t-bad">x1</tspan>, x4</text>
+        <rect x="292" y="158" width="72" height="30" rx="5" class="f-accent-soft"/><text x="328" y="178" text-anchor="middle" class="t-dim">IF</text>
+        <rect x="374" y="158" width="72" height="30" rx="5" class="f-teal-soft"/><text x="410" y="178" text-anchor="middle" class="t-dim">ID</text>
+        <rect x="456" y="158" width="72" height="30" rx="5" class="f-warn-soft"/><text x="492" y="178" text-anchor="middle" class="t-warn" style="font-size:12px">ID 멈춤</text>
+        <rect x="538" y="158" width="72" height="30" rx="5" class="f-gold-soft"/><text x="574" y="178" text-anchor="middle" class="t-dim">EX</text>
+        <rect x="620" y="158" width="72" height="30" rx="5" class="f-violet-soft"/><text x="656" y="178" text-anchor="middle" class="t-dim">MEM</text>
+        <rect x="702" y="158" width="72" height="30" rx="5" class="f-ok-soft"/><text x="738" y="178" text-anchor="middle" class="t-dim">WB</text>
+        <!-- sub -->
+        <text x="20" y="234" class="t-mono">sub x5, x6, x7</text>
+        <rect x="374" y="214" width="72" height="30" rx="5" class="f-accent-soft"/><text x="410" y="234" text-anchor="middle" class="t-dim">IF</text>
+        <rect x="456" y="214" width="72" height="30" rx="5" class="f-warn-soft"/><text x="492" y="234" text-anchor="middle" class="t-warn" style="font-size:12px">IF 멈춤</text>
+        <rect x="538" y="214" width="72" height="30" rx="5" class="f-teal-soft"/><text x="574" y="234" text-anchor="middle" class="t-dim">ID</text>
+        <rect x="620" y="214" width="72" height="30" rx="5" class="f-gold-soft"/><text x="656" y="234" text-anchor="middle" class="t-dim">EX</text>
+        <rect x="702" y="214" width="72" height="30" rx="5" class="f-violet-soft"/><text x="738" y="234" text-anchor="middle" class="t-dim">MEM</text>
+        <rect x="784" y="214" width="72" height="30" rx="5" class="f-ok-soft"/><text x="820" y="234" text-anchor="middle" class="t-dim">WB</text>
+        <!-- 불가능한 화살표와 실제 포워딩 -->
+        <path d="M526 78 L 462 154" class="s-bad s-dashed" marker-end="url(#load-use-bad-arrow)"/>
+        <text x="420" y="104" text-anchor="end" class="t-bad" style="font-size:12px">✕ 시간을 거슬러야 함</text>
+        <path d="M543 78 C 527 98, 527 132, 543 155" fill="none" stroke="var(--violet)" stroke-width="3" class="flow-dash" marker-end="url(#load-use-arrow)"/>
+        <text x="618" y="92" class="t-violet" style="font-size:12px">MEM/WB → EX</text>
+        <text x="20" y="284" class="t-dim">해저드 검출 조건: ID/EX.MemRead 이고 ID/EX.rd ≠ 0 이고 (ID/EX.rd = IF/ID.rs1 또는 IF/ID.rs2)</text>
+        <text x="20" y="302" class="t-faint">→ PC와 IF/ID 쓰기를 막고(멈춤), ID/EX의 제어 신호를 0으로 만든다(거품)</text>
+      </svg></div>
+      <figcaption><b>그림 8-5.</b> 적재-사용 해저드. <code>lw</code>의 값은 4번째 사이클 MEM이 끝나야 생기므로, 4번째 사이클 EX로 보낼 수 없다(빨간 점선). <code>add</code>를 한 사이클 붙잡아 5번째 사이클 EX에서 MEM/WB 레지스터로부터 받는다(보라 화살표). 뒤따르는 <code>sub</code>도 함께 한 칸 밀린다.</figcaption>
+    </figure>
+
+    <p>포워딩이 없을 때와 있을 때 멈추는 사이클 수를 의존 거리별로 정리하면 다음과 같다. 의존 거리 1은 “바로 다음 명령이 쓴다”는 뜻이다.</p>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>생산자 → 소비자</th><th class="number">거리 1</th><th class="number">거리 2</th><th class="number">거리 3 이상</th></tr></thead>
+      <tbody>
+        <tr><td>ALU 명령 → 사용, 포워딩 없음</td><td class="number">2</td><td class="number">1</td><td class="number">0</td></tr>
+        <tr><td>ALU 명령 → 사용, 포워딩 있음</td><td class="number">0</td><td class="number">0</td><td class="number">0</td></tr>
+        <tr><td>적재 → 사용, 포워딩 없음</td><td class="number">2</td><td class="number">1</td><td class="number">0</td></tr>
+        <tr><td>적재 → 사용, 포워딩 있음</td><td class="number">1</td><td class="number">0</td><td class="number">0</td></tr>
+      </tbody>
+    </table></div>
+    <p>남은 한 사이클은 하드웨어 대신 <b>컴파일러</b>가 숨길 수 있다. 적재와 그 값을 쓰는 명령 사이에 서로 관계없는 명령을 끼워 넣는 <span class="term">명령어 스케줄링</span><span class="english">(instruction scheduling)</span>이다.</p>
+    <div class="codebox" data-title="배열 합계 루프: 스케줄링 전과 후"><span class="comment"># 전: lw 바로 뒤에 add → 반복마다 1사이클 멈춤</span>
+<span class="label">loop:</span> <span class="keyword">lw</span>   <span class="register">t0</span>, <span class="number">0</span>(<span class="register">a0</span>)
+       <span class="keyword">add</span>  <span class="register">a2</span>, <span class="register">a2</span>, <span class="register">t0</span>
+       <span class="keyword">addi</span> <span class="register">a0</span>, <span class="register">a0</span>, <span class="number">4</span>
+       <span class="keyword">addi</span> <span class="register">a1</span>, <span class="register">a1</span>, <span class="number">-1</span>
+       <span class="keyword">bnez</span> <span class="register">a1</span>, loop
+<span class="comment"># 후: 독립적인 addi 두 개를 사이에 끼움 → 멈춤 없음</span>
+<span class="label">loop:</span> <span class="keyword">lw</span>   <span class="register">t0</span>, <span class="number">0</span>(<span class="register">a0</span>)
+       <span class="keyword">addi</span> <span class="register">a0</span>, <span class="register">a0</span>, <span class="number">4</span>
+       <span class="keyword">addi</span> <span class="register">a1</span>, <span class="register">a1</span>, <span class="number">-1</span>
+       <span class="keyword">add</span>  <span class="register">a2</span>, <span class="register">a2</span>, <span class="register">t0</span>
+       <span class="keyword">bnez</span> <span class="register">a1</span>, loop</div>
+    <div class="callout history"><strong>MIPS의 적재 지연 슬롯</strong><p>초기 MIPS(R2000)는 이 한 사이클을 아예 ISA에 적어 넣었다. “적재 바로 다음 명령은 아직 새 값을 볼 수 없다”는 <b>적재 지연 슬롯</b>이다. 하드웨어는 해저드 검출 회로가 필요 없어졌지만, 그 규칙은 특정 파이프라인 구조를 계약서에 박제해 버렸고 MIPS II에서 사라졌다. RISC-V는 이런 구현 세부를 ISA에 넣지 않는다. 멈출지 말지는 구현이 알아서 정하고, 소프트웨어는 언제나 순서대로 실행된 것과 같은 결과를 본다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="control-hazards">
+    <h2>제어 해저드와 분기 예측</h2>
+    <p>분기 명령은 또 다른 문제를 만든다. 다음에 가져올 명령이 무엇인지 분기 조건을 계산해 봐야 아는데, 그 계산(두 레지스터 비교)은 EX 단계에서 끝난다. 그동안 IF는 놀 수 없으니 무언가를 가져와야 한다. 이 책의 파이프라인은 <b>분기를 EX에서 판정</b>하고, 그동안 일단 다음 주소(PC+4)를 계속 가져온다. 이것이 “불성립 예측”이다. 예측이 틀리면 그사이 가져온 두 명령을 <span class="term">폐기</span><span class="english">(flush)</span>한다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 880 300" role="img" aria-label="EX에서 분기가 성립으로 판정되어 두 명령을 폐기하는 모습">
+        <defs>
+          <marker id="flush-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent-2)"/></marker>
+        </defs>
+        <g style="font-size:11px">
+          <text x="20" y="32" class="t-faint">사이클 →</text>
+          <text x="246" y="32" text-anchor="middle" class="t-faint">1</text><text x="328" y="32" text-anchor="middle" class="t-faint">2</text><text x="410" y="32" text-anchor="middle" class="t-faint">3</text><text x="492" y="32" text-anchor="middle" class="t-faint">4</text><text x="574" y="32" text-anchor="middle" class="t-faint">5</text><text x="656" y="32" text-anchor="middle" class="t-faint">6</text><text x="738" y="32" text-anchor="middle" class="t-faint">7</text><text x="820" y="32" text-anchor="middle" class="t-faint">8</text>
+        </g>
+        <text x="20" y="66" class="t-mono">beq x1, x2, L</text>
+        <rect x="210" y="46" width="72" height="30" rx="5" class="f-accent-soft"/><text x="246" y="66" text-anchor="middle" class="t-dim">IF</text>
+        <rect x="292" y="46" width="72" height="30" rx="5" class="f-teal-soft"/><text x="328" y="66" text-anchor="middle" class="t-dim">ID</text>
+        <rect x="374" y="46" width="72" height="30" rx="5" class="f-gold-soft blink-highlight"/><text x="410" y="66" text-anchor="middle" class="t-gold" style="font-size:12px">EX 판정</text>
+        <rect x="456" y="46" width="72" height="30" rx="5" class="f-violet-soft"/><text x="492" y="66" text-anchor="middle" class="t-dim">MEM</text>
+        <rect x="538" y="46" width="72" height="30" rx="5" class="f-ok-soft"/><text x="574" y="66" text-anchor="middle" class="t-dim">WB</text>
+        <text x="20" y="116" class="t-mono t-faint">PC+4 의 명령</text>
+        <rect x="292" y="96" width="72" height="30" rx="5" class="f-accent-soft"/><text x="328" y="116" text-anchor="middle" class="t-dim">IF</text>
+        <rect x="374" y="96" width="72" height="30" rx="5" class="f-teal-soft"/><text x="410" y="116" text-anchor="middle" class="t-dim">ID</text>
+        <rect x="456" y="96" width="72" height="30" rx="5" class="f-bad-soft"/><text x="492" y="116" text-anchor="middle" class="t-bad">✕ 폐기</text>
+        <text x="20" y="166" class="t-mono t-faint">PC+8 의 명령</text>
+        <rect x="374" y="146" width="72" height="30" rx="5" class="f-accent-soft"/><text x="410" y="166" text-anchor="middle" class="t-dim">IF</text>
+        <rect x="456" y="146" width="72" height="30" rx="5" class="f-bad-soft"/><text x="492" y="166" text-anchor="middle" class="t-bad">✕ 폐기</text>
+        <text x="20" y="216" class="t-mono">L: or x8, x9, x10</text>
+        <rect x="456" y="196" width="72" height="30" rx="5" class="f-accent-soft"/><text x="492" y="216" text-anchor="middle" class="t-dim">IF</text>
+        <rect x="538" y="196" width="72" height="30" rx="5" class="f-teal-soft"/><text x="574" y="216" text-anchor="middle" class="t-dim">ID</text>
+        <rect x="620" y="196" width="72" height="30" rx="5" class="f-gold-soft"/><text x="656" y="216" text-anchor="middle" class="t-dim">EX</text>
+        <rect x="702" y="196" width="72" height="30" rx="5" class="f-violet-soft"/><text x="738" y="216" text-anchor="middle" class="t-dim">MEM</text>
+        <rect x="784" y="196" width="72" height="30" rx="5" class="f-ok-soft"/><text x="820" y="216" text-anchor="middle" class="t-dim">WB</text>
+        <path d="M446 72 C 470 110, 452 160, 470 192" class="s-gold flow-dash" stroke-width="3" marker-end="url(#flush-arrow)"/>
+        <text x="540" y="116" class="t-gold" style="font-size:12px">성립! 목적지 L로 방향 전환</text>
+        <text x="20" y="266" class="t-dim">불성립으로 예측했는데 성립하면 잃는 사이클 = 판정 단계(EX) − 가져오기 단계(IF) = 2</text>
+        <text x="20" y="286" class="t-faint">폐기된 두 명령은 아직 레지스터·메모리를 바꾸지 않았으므로(WB·MEM 이전) 흔적 없이 지울 수 있다</text>
+      </svg></div>
+      <figcaption><b>그림 8-6.</b> 제어 해저드. <code>beq</code>가 3번째 사이클 EX에서 “성립”으로 판정되면, 그사이 가져온 PC+4·PC+8의 명령을 폐기하고 4번째 사이클부터 목적지 L을 가져온다. 성립하는 분기마다 2사이클을 잃는다. 판정을 ID로 앞당기면 손해가 1사이클로 줄지만, 비교기를 ID에 두면 그쪽으로도 포워딩이 필요해 회로가 복잡해진다.</figcaption>
+    </figure>
+
+    <h3>정적 예측: 뒤로 가면 성립, 앞으로 가면 불성립</h3>
+    <p>루프의 맨 끝 분기는 대부분 성립해서 뒤(낮은 주소)로 간다. 반대로 <code>if</code> 문의 예외 처리 같은 앞쪽 분기는 대개 성립하지 않는다. 그래서 하드웨어 없이도 꽤 잘 맞는 규칙이 <span class="term">BTFN</span><span class="english">(backward taken, forward not taken)</span>이다. RISC-V의 B형 즉시값은 부호 비트가 언제나 <code>inst[31]</code>에 있으므로, 분기의 방향(앞이냐 뒤냐)을 해독 전에 비트 하나만 보고 알 수 있다. 규격은 소프트웨어에게 이 규칙을 전제로 코드를 배치하라고 권한다.</p>
+    <div class="callout spec"><strong>규격 원문에서</strong>
+      <blockquote>“Software should be optimized such that the sequential code path is the most common path, with less-frequently taken code paths placed out of line. Software should also assume that backward branches will be predicted taken and forward branches as not taken, at least the first time they are encountered.”</blockquote>
+      <p><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html" target="_blank" rel="noopener">Volume I, RV32I · Conditional Branches</a> — 같은 절은 무조건 점프에는 조건이 항상 참인 분기 대신 <code>jal x0</code>(j)을 쓰라고 한다. 그래야 조건 분기 예측 표를 더럽히지 않는다.</p></div>
+
+    <h3>동적 예측: 2비트 포화 카운터</h3>
+    <p>정적 규칙은 분기의 실제 행동을 배우지 못한다. <span class="term">분기 이력 표</span><span class="english">(BHT, branch history table)</span>는 분기 주소마다 작은 카운터를 두고, 실제 결과를 볼 때마다 갱신한다. 가장 유명한 것이 2비트 포화 카운터다. 한 번 틀렸다고 곧바로 예측을 뒤집지 않기 때문에, 루프 끝에서 한 번 빠져나가는 일 때문에 다음 루프 첫 반복을 또 틀리지 않는다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 880 280" role="img" aria-label="2비트 포화 카운터 상태 기계">
+        <defs>
+          <marker id="counter-arrow-taken" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent-2)"/></marker>
+          <marker id="counter-arrow-not-taken" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--teal)"/></marker>
+        </defs>
+        <circle cx="140" cy="140" r="48" class="f-teal-soft"/><text x="140" y="136" text-anchor="middle" class="t-mono t-bold">00</text><text x="140" y="156" text-anchor="middle" class="t-dim" style="font-size:12px">강한 불성립</text>
+        <circle cx="340" cy="140" r="48" class="f-teal-soft"/><text x="340" y="136" text-anchor="middle" class="t-mono t-bold">01</text><text x="340" y="156" text-anchor="middle" class="t-dim" style="font-size:12px">약한 불성립</text>
+        <circle cx="540" cy="140" r="48" class="f-gold-soft"/><text x="540" y="136" text-anchor="middle" class="t-mono t-bold">10</text><text x="540" y="156" text-anchor="middle" class="t-dim" style="font-size:12px">약한 성립</text>
+        <circle cx="740" cy="140" r="48" class="f-gold-soft"/><text x="740" y="136" text-anchor="middle" class="t-mono t-bold">11</text><text x="740" y="156" text-anchor="middle" class="t-dim" style="font-size:12px">강한 성립</text>
+        <!-- 성립(T): 오른쪽으로 -->
+        <path d="M176 108 Q 240 60 304 108" class="s-gold" marker-end="url(#counter-arrow-taken)"/><text x="240" y="74" text-anchor="middle" class="t-gold">T</text>
+        <path d="M376 108 Q 440 60 504 108" class="s-gold" marker-end="url(#counter-arrow-taken)"/><text x="440" y="74" text-anchor="middle" class="t-gold">T</text>
+        <path d="M576 108 Q 640 60 704 108" class="s-gold" marker-end="url(#counter-arrow-taken)"/><text x="640" y="74" text-anchor="middle" class="t-gold">T</text>
+        <path d="M772 104 C 820 50, 860 110, 790 132" class="s-gold" marker-end="url(#counter-arrow-taken)"/><text x="842" y="70" text-anchor="middle" class="t-gold">T</text>
+        <!-- 불성립(N): 왼쪽으로 -->
+        <path d="M304 172 Q 240 220 176 172" fill="none" stroke="var(--teal)" stroke-width="2" marker-end="url(#counter-arrow-not-taken)"/><text x="240" y="216" text-anchor="middle" class="t-teal">N</text>
+        <path d="M504 172 Q 440 220 376 172" fill="none" stroke="var(--teal)" stroke-width="2" marker-end="url(#counter-arrow-not-taken)"/><text x="440" y="216" text-anchor="middle" class="t-teal">N</text>
+        <path d="M704 172 Q 640 220 576 172" fill="none" stroke="var(--teal)" stroke-width="2" marker-end="url(#counter-arrow-not-taken)"/><text x="640" y="216" text-anchor="middle" class="t-teal">N</text>
+        <path d="M108 176 C 60 230, 20 170, 90 148" fill="none" stroke="var(--teal)" stroke-width="2" marker-end="url(#counter-arrow-not-taken)"/><text x="38" y="216" text-anchor="middle" class="t-teal">N</text>
+        <!-- 현재 상태 표시: 루프 분기가 성립을 반복하며 오른쪽 끝에 머문다 -->
+        <circle cx="740" cy="140" r="56" fill="none" stroke="var(--accent-2)" stroke-width="2" stroke-dasharray="6 5" class="pulse"/>
+        <text x="240" y="262" text-anchor="middle" class="t-teal" style="font-size:13px">← 불성립으로 예측</text>
+        <text x="640" y="262" text-anchor="middle" class="t-gold" style="font-size:13px">성립으로 예측 →</text>
+      </svg></div>
+      <figcaption><b>그림 8-7.</b> 2비트 포화 카운터. 성립(T)하면 오른쪽, 불성립(N)하면 왼쪽으로 한 칸 움직이고 양 끝에서는 머문다. 왼쪽 두 상태는 불성립, 오른쪽 두 상태는 성립으로 예측한다. 루프 분기는 “11”에 머물다가 루프를 빠져나올 때 한 번 틀려 “10”으로 내려가지만, 다음 루프에서도 여전히 성립으로 예측한다.</figcaption>
+    </figure>
+
+    <div class="sim" id="predictor-sim">
+      <div class="sim-head"><span class="sim-tag">EXPLORER</span><h3>분기 예측기 실험실</h3></div>
+      <div class="sim-pad">
+        <div class="predictor-table" id="predictor-table"></div>
+      </div>
+      <div class="sim-controls">
+        <div class="control"><span>분기 결과 패턴</span>
+          <div class="segmented" id="predictor-pattern">
+            <button data-value="loop" class="on">4회 루프 ×5</button>
+            <button data-value="alternate">번갈아 T/N</button>
+            <button data-value="rare">드물게 N</button>
+            <button data-value="custom">직접 입력</button>
+          </div>
+        </div>
+        <label class="control"><span>패턴 (T·N 문자열)</span><input type="text" id="predictor-input" value="TTTN" maxlength="40" spellcheck="false"></label>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">항상 불성립</span><span class="value" id="predictor-accuracy-never">—</span></div>
+        <div class="stat"><span class="key">항상 성립 (BTFN·뒤로)</span><span class="value" id="predictor-accuracy-always">—</span></div>
+        <div class="stat"><span class="key">1비트 (직전 결과)</span><span class="value" id="predictor-accuracy-one-bit">—</span></div>
+        <div class="stat"><span class="key">2비트 카운터</span><span class="value" id="predictor-accuracy-two-bit">—</span></div>
+      </div>
+      <div class="sim-note">맨 윗줄이 실제 결과이고, 그 아래 줄들이 각 예측기의 예측이다(초록 = 맞음, 빨강 = 틀림). “4회 루프”에서 1비트 예측기는 루프를 빠져나갈 때와 다시 들어갈 때 두 번 틀리지만, 2비트 카운터는 한 번만 틀린다. “번갈아”처럼 규칙은 있지만 카운터가 배우지 못하는 패턴에서는 어떤가? 실제 고성능 코어는 이런 패턴을 위해 과거 분기 결과(전역 이력)까지 함께 보는 예측기를 쓴다.</div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="pipeline-simulator">
+    <h2>5단 파이프라인 시뮬레이터</h2>
+    <p>이제 지금까지의 규칙을 모두 합쳐 보자. 아래 시뮬레이터는 프로그램을 먼저 이 책의 RV32I 에뮬레이터(<code>Riscv.Machine</code>)로 실제 실행해 <b>진짜 실행 순서</b>(어느 분기가 성립했는지)를 얻은 다음, 그 순서를 5단 파이프라인에 흘려보낸다. 따라서 표에 나타나는 분기 결과는 언제나 실제 실행과 같다. 모델의 가정은 이 장의 본문과 같다.</p>
+    <ul>
+      <li>분기(<code>beq</code> 등)와 <code>jalr</code>는 <b>EX에서 판정</b>한다. <code>jal</code>의 목적지는 ID에서 계산한다.</li>
+      <li>레지스터 파일은 앞 절반에 쓰고 뒤 절반에 읽는다. 포워딩 경로는 EX/MEM → EX와 MEM/WB → EX다.</li>
+      <li>분기 목적지 버퍼(BTB)가 없다고 가정한다. 그래서 “성립”으로 예측해도 목적지를 아는 ID 단계에서야 방향을 바꾸므로 1사이클을 잃는다. 예측이 틀리면 EX에서 바로잡으며 2사이클을 잃는다.</li>
+      <li>프로그램은 <code>ebreak</code>나 종료 시스템 호출(<code>li a7, 10</code> + <code>ecall</code>)로 끝낸다. 실행 명령은 최대 120개까지만 그린다.</li>
+    </ul>
+
+    <div class="sim" id="pipeline-sim">
+      <div class="sim-head"><span class="sim-tag">SIMULATOR</span><h3>RV32I 5단 파이프라인</h3></div>
+      <div class="sim-controls">
+        <div class="control"><span>예제 프로그램</span>
+          <div class="segmented" id="pipeline-preset">
+            <button data-value="chain" class="on">의존 사슬</button>
+            <button data-value="load-use">적재-사용</button>
+            <button data-value="loop">배열 합 루프</button>
+            <button data-value="scheduled">스케줄링한 루프</button>
+            <button data-value="call">함수 호출</button>
+          </div>
+        </div>
+        <div class="control"><span>포워딩</span>
+          <div class="segmented" id="pipeline-forwarding">
+            <button data-value="on" class="on">켬</button>
+            <button data-value="off">끔</button>
+          </div>
+        </div>
+        <div class="control"><span>분기 처리</span>
+          <div class="segmented" id="pipeline-policy">
+            <button data-value="stall">판정까지 멈춤</button>
+            <button data-value="not-taken" class="on">불성립 예측</button>
+            <button data-value="backward-taken">BTFN 정적 예측</button>
+            <button data-value="bimodal">2비트 BHT</button>
+          </div>
+        </div>
+      </div>
+      <div class="source-editor">
+        <textarea id="pipeline-source" spellcheck="false" aria-label="RV32I 어셈블리 프로그램"></textarea>
+        <div class="editor-row">
+          <button class="button" id="pipeline-assemble">고친 프로그램으로 다시 시작</button>
+          <span class="assemble-message" id="pipeline-message"></span>
+        </div>
+      </div>
+      <div class="sim-view"><div class="scroll-x"><svg viewBox="0 0 900 250" id="pipeline-view" role="img" aria-label="현재 사이클에 각 단계를 차지한 명령"></svg></div></div>
+      <div class="step-description" id="pipeline-description"></div>
+      <div class="pipeline-chart" id="pipeline-chart"></div>
+      <div class="chart-legend">
+        <span><i class="stage-cell stage-if"></i>IF</span><span><i class="stage-cell stage-id"></i>ID</span><span><i class="stage-cell stage-ex"></i>EX</span><span><i class="stage-cell stage-mem"></i>MEM</span><span><i class="stage-cell stage-wb"></i>WB</span>
+        <span><i class="stage-cell is-stalled"></i>멈춤(같은 단계 반복)</span><span><i class="stage-cell is-flushed"></i>폐기</span><span style="color:var(--bad);font-style:italic">빨간 기울임 = 잘못된 경로에서 가져온 명령</span>
+      </div>
+      <div class="sim-controls">
+        <div class="control"><span>실행</span>
+          <div class="button-row">
+            <button class="button primary" id="pipeline-step">한 사이클 ▶</button>
+            <button class="button" id="pipeline-back">◀ 한 사이클 뒤로</button>
+            <button class="button" id="pipeline-play">자동 재생</button>
+            <button class="button" id="pipeline-end">끝까지</button>
+            <button class="button" id="pipeline-reset">처음으로</button>
+          </div>
+        </div>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">사이클</span><span class="value" id="pipeline-cycle">0</span></div>
+        <div class="stat"><span class="key">완료한 명령</span><span class="value" id="pipeline-completed">0</span></div>
+        <div class="stat"><span class="key">CPI (전체 실행)</span><span class="value" id="pipeline-cpi">—</span></div>
+        <div class="stat"><span class="key">데이터 멈춤 (지금까지/전체)</span><span class="value" id="pipeline-stalls">0</span></div>
+        <div class="stat"><span class="key">폐기·제어 손실 (지금까지/전체)</span><span class="value" id="pipeline-flushes">0</span></div>
+        <div class="stat"><span class="key">분기 예측 적중 (전체)</span><span class="value" id="pipeline-accuracy">—</span></div>
+      </div>
+      <div class="sim-note">“의존 사슬”에서 포워딩을 끄고 켜며 멈춤 수를 비교해 보자(8 → 0). “배열 합 루프”에서는 분기 처리를 바꿔 가며 총 사이클을 비교하고, “스케줄링한 루프”로 바꾸면 적재-사용 멈춤 6번이 사라지는 것을 확인하자. CPI에는 처음 파이프라인을 채우는 4사이클이 포함되어 있어서, 명령이 적을수록 1보다 커 보인다.</div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="isa-design">
+    <h2>RISC-V의 설계가 파이프라인을 돕는 방법</h2>
+    <p>지금까지 본 해저드와 해법은 어느 ISA를 구현해도 만나는 것이다. 하지만 ISA가 어떻게 생겼느냐에 따라 같은 일을 하는 회로의 크기와 속도가 달라진다. RISC-V 규격은 비고(commentary)에서 이런 구현상의 이유를 여러 번 밝힌다.</p>
+
+    <h3>① 레지스터 칸은 언제나 같은 자리</h3>
+    <p>R·I·S·B 형식 모두 rs1은 <code>[19:15]</code>, rs2는 <code>[24:20]</code>, rd는(있다면) <code>[11:7]</code>이다. 그래서 ID 단계는 opcode가 무엇인지 알기 <b>전에</b> 이 두 칸으로 레지스터 파일을 읽기 시작할 수 있다. 쓰지 않는 칸을 읽었다면 결과를 버리면 그만이다. 해독과 레지스터 읽기가 병렬로 진행되는 것이다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 880 320" role="img" aria-label="고정된 레지스터 칸 덕분에 해독과 레지스터 읽기가 병렬로 진행되는 시간 비교">
+        <text x="20" y="24" class="t t-bold">RISC-V — rs1·rs2 위치 고정, 부호 비트는 언제나 inst[31]</text>
+        <line x1="230" y1="36" x2="230" y2="140" class="s-line"/>
+        <text x="220" y="62" text-anchor="end" class="t-dim">opcode 해독</text>
+        <rect x="230" y="48" width="220" height="20" rx="4" class="f-teal-soft"><animate attributeName="width" values="0;220;220" keyTimes="0;0.27;1" dur="5s" repeatCount="indefinite"/></rect>
+        <text x="220" y="92" text-anchor="end" class="t-dim">rs1·rs2 레지스터 읽기</text>
+        <rect x="230" y="78" width="293" height="20" rx="4" class="f-accent-soft"><animate attributeName="width" values="0;293;293" keyTimes="0;0.36;1" dur="5s" repeatCount="indefinite"/></rect>
+        <text x="220" y="122" text-anchor="end" class="t-dim">즉시값 부호 확장</text>
+        <rect x="230" y="108" width="122" height="20" rx="4" class="f-gold-soft"><animate attributeName="width" values="0;122;122" keyTimes="0;0.15;1" dur="5s" repeatCount="indefinite"/></rect>
+        <line x1="523" y1="40" x2="523" y2="140" class="s-ok s-dashed"/>
+        <text x="531" y="134" class="t-ok" style="font-size:12px">ID 끝: 피연산자 준비 완료</text>
+
+        <text x="20" y="174" class="t t-bold">가상의 ISA — 레지스터 칸 위치가 명령 형식마다 다름</text>
+        <line x1="230" y1="186" x2="230" y2="306" class="s-line"/>
+        <text x="220" y="212" text-anchor="end" class="t-dim">opcode 해독</text>
+        <rect x="230" y="198" width="220" height="20" rx="4" class="f-teal-soft"><animate attributeName="width" values="0;220;220" keyTimes="0;0.27;1" dur="5s" repeatCount="indefinite"/></rect>
+        <text x="220" y="242" text-anchor="end" class="t-dim">레지스터 칸 고르기 (mux)</text>
+        <rect x="450" y="228" width="73" height="20" rx="4" class="f-violet-soft"><animate attributeName="width" values="0;0;73;73" keyTimes="0;0.27;0.36;1" dur="5s" repeatCount="indefinite"/></rect>
+        <text x="220" y="272" text-anchor="end" class="t-dim">레지스터 읽기</text>
+        <rect x="523" y="258" width="293" height="20" rx="4" class="f-accent-soft"><animate attributeName="width" values="0;0;293;293" keyTimes="0;0.36;0.72;1" dur="5s" repeatCount="indefinite"/></rect>
+        <text x="220" y="300" text-anchor="end" class="t-dim">즉시값 부호 확장</text>
+        <rect x="450" y="286" width="122" height="18" rx="4" class="f-gold-soft"><animate attributeName="width" values="0;0;122;122" keyTimes="0;0.27;0.42;1" dur="5s" repeatCount="indefinite"/></rect>
+        <line x1="816" y1="190" x2="816" y2="306" class="s-bad s-dashed"/>
+        <text x="808" y="202" text-anchor="end" class="t-bad" style="font-size:12px">ID 끝</text>
+        <line x1="230" y1="36" x2="230" y2="306" stroke="var(--accent-2)" stroke-width="2">
+          <animate attributeName="x1" values="230;816;816" keyTimes="0;0.72;1" dur="5s" repeatCount="indefinite"/>
+          <animate attributeName="x2" values="230;816;816" keyTimes="0;0.72;1" dur="5s" repeatCount="indefinite"/>
+        </line>
+      </svg></div>
+      <figcaption><b>그림 8-8.</b> 왜 레지스터 칸을 고정했나. RISC-V에서는 명령이 도착하자마자 opcode 해독, 레지스터 읽기, 부호 확장이 동시에 출발한다. 레지스터 칸 위치가 형식마다 다른 ISA라면 먼저 opcode를 해독해 “이번엔 어느 비트가 레지스터 번호인지”를 골라야 레지스터 파일을 읽을 수 있다. 막대 길이는 개념을 보여 주기 위한 상대 값이다.</figcaption>
+    </figure>
+    <div class="callout spec"><strong>규격 원문에서</strong>
+      <blockquote>“Decoding register specifiers is usually on the critical paths in implementations, and so the instruction format was chosen to keep all register specifiers at the same position in all formats at the expense of having to move immediate bits across formats …”</blockquote>
+      <p><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html" target="_blank" rel="noopener">Volume I, RV32I · Base Instruction Formats</a> — 같은 절은 “the sign bit for all immediates is always in bit 31 of the instruction to speed sign-extension circuitry”라고도 적는다. 즉시값 비트가 뒤섞인 이유(<a href="encoding.html">4장</a>)가 바로 이 대가다.</p></div>
+
+    <h3>② 나머지 결정들</h3>
+    <div class="table-wrap"><table>
+      <thead><tr><th>RISC-V의 결정</th><th>파이프라인에서 얻는 것</th><th>다른 ISA의 예</th></tr></thead>
+      <tbody>
+        <tr><td><b>조건 코드(플래그) 없음</b> — 비교와 분기를 한 명령으로</td><td>산술 명령이 숨은 출력(플래그)을 만들지 않아 해저드 검출·포워딩·이름 바꾸기 대상이 범용 레지스터뿐이다. 분기가 프런트엔드에서 일찍 보인다.</td><td>x86·Arm·SPARC·PowerPC는 플래그 레지스터를 쓴다.</td></tr>
+        <tr><td><b>지연 슬롯 없음</b></td><td>분기 판정이 어느 단계에서 끝나든, 몇 개를 동시에 가져오든 ISA가 상관하지 않는다. 깊은 파이프라인과 슈퍼스칼라에 짐이 없다.</td><td>MIPS·SPARC는 분기 지연 슬롯을 ISA에 넣었다.</td></tr>
+        <tr><td><b>부호 비트는 언제나 inst[31]</b></td><td>즉시값 부호 확장을 해독과 병렬로 시작하고, 분기 방향(앞/뒤)을 비트 하나로 안다.</td><td>—</td></tr>
+        <tr><td><b>고정 32비트 명령, 4바이트 정렬</b> (C 확장 없을 때)</td><td>가져오기와 명령 경계 찾기가 쉽다. C 확장이 있어도 길이는 하위 2비트만 보고 안다(<a href="compressed.html">13장</a>).</td><td>x86은 1–15바이트 가변 길이라 경계를 찾는 일 자체가 어렵다.</td></tr>
+        <tr><td><b>메모리 접근은 적재·저장뿐</b>, 주소 방식 하나</td><td>MEM 단계를 지나는 명령이 적고, 정수 적재·저장 명령 하나는 메모리에 한 번만 접근한다(벡터 확장 등은 예외).</td><td>x86은 산술 명령도 메모리 피연산자를 가진다.</td></tr>
+        <tr><td><b>정수 명령은 소스 ≤ 2, 목적지 ≤ 1</b></td><td>레지스터 파일 포트(읽기 2, 쓰기 1)와 이름 바꾸기 회로를 작게 유지한다.</td><td>Arm의 일부 명령은 쓰는 레지스터가 둘 이상이다(예: 사후 증가 주소 방식).</td></tr>
+      </tbody>
+    </table></div>
+    <div class="callout spec"><strong>규격 원문에서</strong>
+      <blockquote>“Control transfer instructions in RV32I do not have architecturally visible delay slots.”</blockquote>
+      <p><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html" target="_blank" rel="noopener">Volume I, RV32I · Control Transfer Instructions</a> — 같은 장의 비고는 비교와 분기를 합친 이유로 “a combined compare-and-branch instruction fits into a regular pipeline, avoids additional condition code state”를 든다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="beyond">
+    <h2>더 나아가: 슈퍼스칼라와 비순차 실행</h2>
+    <p>5단 순차 파이프라인의 이상적인 CPI는 1이다. 그보다 빨라지려면 한 사이클에 여러 명령을 내보내는 <span class="term">슈퍼스칼라</span><span class="english">(superscalar)</span>, 그리고 준비된 명령부터 먼저 실행하는 <span class="term">비순차 실행</span><span class="english">(out-of-order execution)</span>이 필요하다. 비순차 코어의 핵심 부품은 <span class="term">레지스터 이름 바꾸기</span><span class="english">(register renaming)</span>다. 같은 아키텍처 레지스터(예: a0)에 쓰는 명령마다 새 물리 레지스터를 배정해, 진짜 의존성(RAW)만 남기고 가짜 의존성(WAR·WAW)을 없앤다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 880 320" role="img" aria-label="플래그가 있는 ISA와 RISC-V에서 이름 바꾸기 대상 비교">
+        <defs>
+          <marker id="rename-arrow-bad" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--bad)"/></marker>
+          <marker id="rename-arrow-ok" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--ok)"/></marker>
+        </defs>
+        <rect x="10" y="10" width="420" height="300" rx="14" class="f-surface"/>
+        <text x="30" y="38" class="t t-bold">조건 코드가 있는 ISA (x86 식)</text>
+        <rect x="30" y="56" width="230" height="30" rx="6" class="f-elev"/><text x="42" y="76" class="t-mono">add  eax, ebx</text>
+        <rect x="30" y="96" width="230" height="30" rx="6" class="f-elev"/><text x="42" y="116" class="t-mono">sub  ecx, 1</text>
+        <rect x="30" y="136" width="230" height="30" rx="6" class="f-elev"/><text x="42" y="156" class="t-mono">mov  edx, [esi]</text>
+        <rect x="30" y="176" width="230" height="30" rx="6" class="f-elev"/><text x="42" y="196" class="t-mono">jnz  loop</text>
+        <rect x="300" y="56" width="110" height="30" rx="6" class="f-bad-soft"/><text x="355" y="76" text-anchor="middle" class="t-bad" style="font-size:13px">FLAGS → p70</text>
+        <rect x="300" y="96" width="110" height="30" rx="6" class="f-bad-soft"/><text x="355" y="116" text-anchor="middle" class="t-bad" style="font-size:13px">FLAGS → p71</text>
+        <path d="M262 71 H298" class="s-bad s-dashed"/><path d="M262 111 H298" class="s-bad s-dashed"/>
+        <path d="M355 128 C 360 170, 320 190, 264 191" class="s-bad flow-dash" marker-end="url(#rename-arrow-bad)"/>
+        <text x="30" y="242" class="t-dim">산술 명령마다 숨은 출력 FLAGS가 하나 더 있다.</text>
+        <text x="30" y="262" class="t-dim">FLAGS도 이름을 바꾸고 의존성을 추적해야 하며,</text>
+        <text x="30" y="282" class="t-dim">일부 비트만 쓰는 명령은 이전 값과 합쳐야 한다.</text>
+
+        <rect x="450" y="10" width="420" height="300" rx="14" class="f-accent-soft"/>
+        <text x="470" y="38" class="t t-bold">RISC-V</text>
+        <rect x="470" y="56" width="230" height="30" rx="6" class="f-elev"/><text x="482" y="76" class="t-mono">add  a0, a0, a1</text>
+        <rect x="470" y="96" width="230" height="30" rx="6" class="f-elev"/><text x="482" y="116" class="t-mono">addi a2, a2, -1</text>
+        <rect x="470" y="136" width="230" height="30" rx="6" class="f-elev"/><text x="482" y="156" class="t-mono">lw   a3, 0(a4)</text>
+        <rect x="470" y="176" width="230" height="30" rx="6" class="f-elev"/><text x="482" y="196" class="t-mono">bnez a2, loop</text>
+        <rect x="740" y="56" width="110" height="30" rx="6" class="f-elev"/><text x="795" y="76" text-anchor="middle" class="t-mono">a0 → p41</text>
+        <rect x="740" y="96" width="110" height="30" rx="6" class="f-elev"/><text x="795" y="116" text-anchor="middle" class="t-mono">a2 → p42</text>
+        <rect x="740" y="136" width="110" height="30" rx="6" class="f-elev"/><text x="795" y="156" text-anchor="middle" class="t-mono">a3 → p43</text>
+        <path d="M702 111 C 730 130, 730 175, 702 190" class="s-ok flow-dash" marker-end="url(#rename-arrow-ok)"/>
+        <text x="738" y="196" class="t-ok" style="font-size:12px">a2만 읽는다 (p42)</text>
+        <text x="470" y="242" class="t-dim">읽고 쓰는 레지스터가 모두 명령어 칸에 드러난다.</text>
+        <text x="470" y="262" class="t-dim">이름 바꾸기 대상은 정수 레지스터 32개뿐이고,</text>
+        <text x="470" y="282" class="t-dim">x0는 이름을 바꿀 필요조차 없다.</text>
+      </svg></div>
+      <figcaption><b>그림 8-9.</b> 비순차 코어에서 플래그가 만드는 일. 왼쪽은 <code>jnz</code>가 두 줄 위 <code>sub</code>가 남긴 FLAGS를 읽는 숨은 의존성을 추적해야 하고, <code>add</code>·<code>sub</code>가 FLAGS를 쓸 때마다 새 물리 레지스터(p70, p71)를 배정해야 한다. 오른쪽 RISC-V는 <code>bnez</code>가 <code>a2</code>를 읽는다는 사실이 명령어에 적혀 있다.</figcaption>
+    </figure>
+    <p>그 밖에도 RISC-V 구현자들이 즐겨 쓰는 기법이 있다.</p>
+    <ul>
+      <li><b>매크로 연산 융합</b>(macro-op fusion): <code>lui</code>+<code>addi</code>, <code>auipc</code>+<code>jalr</code>, <code>slli</code>+<code>add</code>처럼 자주 붙어 다니는 두 명령을 해독 단계에서 내부 연산 하나로 합친다. ISA는 단순하게 두고 성능은 구현이 챙기는 방식이다. M 확장 규격이 <code>mulh</code>+<code>mul</code>의 권장 순서를 정해 둔 것도 융합을 염두에 둔 것이다(<a href="multiply.html">9장</a>).</li>
+      <li><b>반환 주소 스택</b>(RAS): <code>jalr</code>의 rd·rs1이 x1/x5인지에 따라 “호출”인지 “반환”인지 알려 주는 힌트가 규격에 정해져 있어, 반환 주소를 예측하는 하드웨어 스택이 이를 이용한다(<a href="rv32i.html">5장</a>).</li>
+      <li><b>가져오기 정렬</b>: C 확장을 넣으면 IALIGN이 16비트가 되어 32비트 명령이 4바이트 경계나 캐시 줄 경계를 걸칠 수 있다. 그래서 C를 지원하는 코어는 가져오기 버퍼에서 명령 경계를 다시 맞춘다. 대신 명령 길이를 하위 2비트만 보고 알 수 있어 경계 찾기는 x86보다 훨씬 쉽다(<a href="compressed.html">13장</a>).</li>
+    </ul>
+    <div class="callout deep"><strong>실제 RISC-V 코어들</strong><p>버클리의 교육용·연구용 코어만 봐도 범위가 넓다. 5단 순차 파이프라인 <b>Rocket</b>, 비순차 슈퍼스칼라 <b>BOOM</b>이 같은 ISA를 구현한다. 그 위로 중국과학원의 XiangShan 같은 고성능 비순차 코어, 아래로는 2–3단짜리 마이크로컨트롤러 코어가 있다. 이 장의 5단 모델은 그 중간쯤, 교과서의 표준 모델이다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="exceptions">
+    <h2>파이프라인 속의 예외: 정밀한 트랩</h2>
+    <p>파이프라인에는 여러 명령이 동시에 들어 있다. 그중 하나가 예외를 일으키면 어떻게 될까? 예를 들어 MEM 단계의 <code>lw</code>가 접근할 수 없는 주소를 읽으려 한다. 이때 그보다 <b>먼저</b> 들어온 명령은 끝까지 마쳐야 하고, 예외를 일으킨 <code>lw</code>와 그 <b>뒤에</b> 들어온 명령은 아무 흔적도 남기면 안 된다. 그래야 트랩 처리기가 보기에 “<code>lw</code> 직전까지 순서대로 실행된” 깨끗한 상태가 된다. 이것을 <span class="term">정밀한 예외</span><span class="english">(precise exception)</span>라 한다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 880 340" role="img" aria-label="MEM 단계에서 예외가 생겨 뒤 명령을 폐기하고 트랩 처리기를 가져오는 모습">
+        <g style="font-size:11px">
+          <text x="20" y="30" class="t-faint">사이클 →</text>
+          <text x="256" y="30" text-anchor="middle" class="t-faint">1</text><text x="338" y="30" text-anchor="middle" class="t-faint">2</text><text x="420" y="30" text-anchor="middle" class="t-faint">3</text><text x="502" y="30" text-anchor="middle" class="t-faint">4</text><text x="584" y="30" text-anchor="middle" class="t-faint">5</text><text x="666" y="30" text-anchor="middle" class="t-faint">6</text><text x="748" y="30" text-anchor="middle" class="t-faint">7</text><text x="830" y="30" text-anchor="middle" class="t-faint">8</text>
+        </g>
+        <text x="20" y="62" class="t-mono">add x5, x6, x7</text>
+        <rect x="220" y="44" width="72" height="28" rx="5" class="f-accent-soft"/><text x="256" y="63" text-anchor="middle" class="t-dim">IF</text>
+        <rect x="302" y="44" width="72" height="28" rx="5" class="f-teal-soft"/><text x="338" y="63" text-anchor="middle" class="t-dim">ID</text>
+        <rect x="384" y="44" width="72" height="28" rx="5" class="f-gold-soft"/><text x="420" y="63" text-anchor="middle" class="t-dim">EX</text>
+        <rect x="466" y="44" width="72" height="28" rx="5" class="f-violet-soft"/><text x="502" y="63" text-anchor="middle" class="t-dim">MEM</text>
+        <rect x="548" y="44" width="72" height="28" rx="5" class="f-ok-soft"/><text x="584" y="63" text-anchor="middle" class="t-ok" style="font-size:12px">WB ✓</text>
+        <text x="20" y="106" class="t-mono">lw  x1, 0(x2)</text>
+        <rect x="302" y="88" width="72" height="28" rx="5" class="f-accent-soft"/><text x="338" y="107" text-anchor="middle" class="t-dim">IF</text>
+        <rect x="384" y="88" width="72" height="28" rx="5" class="f-teal-soft"/><text x="420" y="107" text-anchor="middle" class="t-dim">ID</text>
+        <rect x="466" y="88" width="72" height="28" rx="5" class="f-gold-soft"/><text x="502" y="107" text-anchor="middle" class="t-dim">EX</text>
+        <rect x="548" y="88" width="72" height="28" rx="5" class="f-bad-soft blink-highlight"/><text x="584" y="107" text-anchor="middle" class="t-bad" style="font-size:12px">MEM ⚠</text>
+        <text x="630" y="107" class="t-bad" style="font-size:12px">접근 오류 → 쓰기 안 함</text>
+        <text x="20" y="150" class="t-mono t-faint">sub x3, x1, x4</text>
+        <rect x="384" y="132" width="72" height="28" rx="5" class="f-accent-soft"/><text x="420" y="151" text-anchor="middle" class="t-dim">IF</text>
+        <rect x="466" y="132" width="72" height="28" rx="5" class="f-teal-soft"/><text x="502" y="151" text-anchor="middle" class="t-dim">ID</text>
+        <rect x="548" y="132" width="72" height="28" rx="5" class="f-gold-soft"/><text x="584" y="151" text-anchor="middle" class="t-dim">EX</text>
+        <rect x="630" y="132" width="72" height="28" rx="5" class="f-bad-soft"/><text x="666" y="151" text-anchor="middle" class="t-bad">✕</text>
+        <text x="20" y="194" class="t-mono t-faint">or  x8, x9, x10</text>
+        <rect x="466" y="176" width="72" height="28" rx="5" class="f-accent-soft"/><text x="502" y="195" text-anchor="middle" class="t-dim">IF</text>
+        <rect x="548" y="176" width="72" height="28" rx="5" class="f-teal-soft"/><text x="584" y="195" text-anchor="middle" class="t-dim">ID</text>
+        <rect x="630" y="176" width="72" height="28" rx="5" class="f-bad-soft"/><text x="666" y="195" text-anchor="middle" class="t-bad">✕</text>
+        <text x="20" y="238" class="t-mono t-faint">and x11, x12, x13</text>
+        <rect x="548" y="220" width="72" height="28" rx="5" class="f-accent-soft"/><text x="584" y="239" text-anchor="middle" class="t-dim">IF</text>
+        <rect x="630" y="220" width="72" height="28" rx="5" class="f-bad-soft"/><text x="666" y="239" text-anchor="middle" class="t-bad">✕</text>
+        <text x="20" y="282" class="t-mono t-gold">mtvec: 트랩 처리기</text>
+        <rect x="630" y="264" width="72" height="28" rx="5" class="f-accent-soft"/><text x="666" y="283" text-anchor="middle" class="t-dim">IF</text>
+        <rect x="712" y="264" width="72" height="28" rx="5" class="f-teal-soft"/><text x="748" y="283" text-anchor="middle" class="t-dim">ID</text>
+        <rect x="794" y="264" width="72" height="28" rx="5" class="f-gold-soft"/><text x="830" y="283" text-anchor="middle" class="t-dim">EX</text>
+        <line x1="625" y1="38" x2="625" y2="300" class="s-bad s-dashed"/>
+        <text x="20" y="324" class="t-dim">트랩 시점: mepc ← lw의 주소, mcause ← 5 (load access fault), mtval ← 실패한 주소(구현이 기록할 때)</text>
+      </svg></div>
+      <figcaption><b>그림 8-10.</b> 5번째 사이클 MEM에서 <code>lw</code>가 접근 오류를 냈다. 앞선 <code>add</code>는 같은 사이클에 WB를 마치고, <code>lw</code> 자신과 뒤의 세 명령은 아무것도 쓰지 않은 채 사라진다. 6번째 사이클부터 <code>mtvec</code>이 가리키는 트랩 처리기를 가져온다. 빨간 점선이 “여기까지는 실행됐고, 여기부터는 실행되지 않았다”는 정밀한 경계다.</figcaption>
+    </figure>
+    <p>5단 파이프라인에서 정밀성을 지키는 요령은 간단하다. 예외는 발견된 단계에서 바로 처리하지 않고 <b>표시만 해서 파이프라인 레지스터에 실어 내려보낸다</b>. 그리고 한 지점(보통 MEM 끝 또는 WB 직전, <span class="term">커밋 지점</span><span class="english">(commit point)</span>)에서 프로그램 순서대로 확인한다. 그러면 ID에서 발견된 잘못된 명령 예외와 MEM에서 발견된 접근 오류가 동시에 생겨도, 더 앞선 명령의 예외가 먼저 처리된다. 레지스터와 메모리를 바꾸는 일이 모두 커밋 지점 뒤(MEM의 저장, WB의 쓰기)에 있다는 점이 이 방식을 가능하게 한다.</p>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>발견되는 단계 (전형적)</th><th>예외</th><th class="number">mcause 예외 코드</th></tr></thead>
+      <tbody>
+        <tr><td>IF</td><td>명령어 접근 오류 · 명령어 페이지 폴트</td><td class="number">1 · 12</td></tr>
+        <tr><td>ID</td><td>잘못된 명령(illegal instruction) · <code>ebreak</code> · <code>ecall</code>(U/S/M)</td><td class="number">2 · 3 · 8/9/11</td></tr>
+        <tr><td>EX</td><td>분기·점프 목적지 정렬 오류(instruction address misaligned) · 적재/저장 주소 정렬 오류</td><td class="number">0 · 4/6</td></tr>
+        <tr><td>MEM</td><td>적재 접근 오류 · 저장 접근 오류 · 적재/저장 페이지 폴트</td><td class="number">5 · 7 · 13/15</td></tr>
+      </tbody>
+    </table></div>
+    <p>표에서 눈여겨볼 점이 둘 있다. 첫째, 분기 목적지의 정렬 오류는 <b>목적지 명령이 아니라 분기 명령에서</b> 보고된다. 규격이 그렇게 정한 이유는 “IALIGN=32인 구현에서 정렬이 어긋날 수 있는 곳이 분기·점프뿐이라 하드웨어 설계가 단순해지고 디버깅도 쉽기 때문”이다. EX에서 목적지를 계산하는 순간 바로 알 수 있다. 둘째, 정렬되지 않은 적재·저장을 어떻게 처리할지는 실행 환경(EEI)이 정한다. 하드웨어가 두 번 나눠 접근해 처리할 수도, 보이지 않는 트랩으로 소프트웨어가 흉내 낼 수도, 예외를 낼 수도 있다. 자연 정렬된 접근만은 어떤 경우에도 정렬 예외를 내지 않는다.</p>
+    <div class="callout spec"><strong>규격 원문에서</strong>
+      <blockquote>“The EEI defines for each trap whether it is handled precisely, though the recommendation is to maintain preciseness where possible.”</blockquote>
+      <p><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/intro.html" target="_blank" rel="noopener">Volume I, Introduction · Exceptions, Traps, and Interrupts</a> — 트랩이 생겼을 때 mepc·mcause·mtval과 mstatus가 어떻게 바뀌는지는 <a href="trap.html">18장</a>에서 자세히 다룬다.</p></div>
+    <div class="callout warn"><strong>인터럽트도 같은 경계를 쓴다</strong><p>타이머 인터럽트처럼 바깥에서 오는 인터럽트는 특정 명령 때문이 아니므로, 구현은 파이프라인 안의 아무 명령 경계나 골라 그 앞까지 완료하고 나머지를 폐기하면 된다. 이때 mepc에는 “다시 실행할 첫 명령”의 주소가 기록된다. 파이프라인이 깊고 넓을수록 경계를 맞추는 일이 어려워지는데, 비순차 코어는 재정렬 버퍼(ROB)에서 명령을 순서대로 은퇴시키며 이 경계를 만든다.</p></div>
+  </section>
+
+  <section class="keypoints" id="summary">
+    <h2>핵심 정리</h2>
+    <ol>
+      <li><b>단일 사이클 데이터패스</b>는 PC·명령어 메모리·레지스터 파일·즉시값 생성기·ALU·데이터 메모리·선택기로 RV32I를 구현한다. 가장 긴 <code>lw</code>의 경로가 클럭 주기를 정한다.</li>
+      <li><b>5단 파이프라인</b>(IF·ID·EX·MEM·WB)은 파이프라인 레지스터로 단계를 나눠, 명령 하나의 지연은 그대로 두고 처리량을 높인다.</li>
+      <li><b>RAW 해저드</b>는 EX/MEM·MEM/WB → EX <b>포워딩</b>으로 대부분 없앤다. 비교에서 rd = x0인 경우는 제외한다.</li>
+      <li><b>적재-사용 해저드</b>는 포워딩이 있어도 1사이클 멈춤이 필요하다. 컴파일러 스케줄링으로 숨길 수 있다.</li>
+      <li>분기를 EX에서 판정하면 예측이 틀릴 때 2사이클을 잃는다. <b>BTFN</b> 정적 예측과 <b>2비트 BHT</b>가 이 손해를 줄인다.</li>
+      <li>고정된 rs1·rs2 위치, inst[31]의 부호 비트, 플래그 없음, 지연 슬롯 없음, 적재·저장 구조가 해독·포워딩·이름 바꾸기를 단순하게 만든다.</li>
+      <li><b>정밀한 예외</b>는 예외를 표시만 해서 내려보내고 커밋 지점에서 순서대로 처리하는 방식으로 지킨다.</li>
+    </ol>
+  </section>
+
+  <section id="quiz">
+    <h2>확인 퀴즈</h2>
+    <div class="quiz">
+      <div class="quiz-question"><p>단일 사이클 RV32I CPU의 클럭 주기를 결정하는 명령은 보통 무엇인가?</p><div class="options">
+        <button class="option">add</button>
+        <button class="option">beq</button>
+        <button class="option" data-correct>lw</button>
+        <button class="option">jal</button>
+      </div><div class="quiz-explanation">lw는 명령어 메모리, 레지스터 읽기, ALU(주소 계산), 데이터 메모리, 레지스터 쓰기를 모두 거쳐 가장 길다.</div></div>
+      <div class="quiz-question"><p>포워딩이 있는 5단 파이프라인에서 <code>lw x1, 0(x2)</code> 바로 다음에 <code>add x3, x1, x4</code>가 오면 몇 사이클 멈추는가?</p><div class="options">
+        <button class="option">0</button>
+        <button class="option" data-correct>1</button>
+        <button class="option">2</button>
+        <button class="option">3</button>
+      </div><div class="quiz-explanation">적재 값은 MEM 끝에야 나오므로 한 사이클 멈춘 뒤 MEM/WB → EX로 포워딩한다.</div></div>
+      <div class="quiz-question"><p>포워딩이 <b>없고</b>, 레지스터 파일이 같은 사이클에 앞 절반 쓰기·뒤 절반 읽기를 한다. <code>add x1, …</code> 바로 다음 <code>sub x4, x1, x5</code>는 몇 사이클 멈추는가?</p><div class="options">
+        <button class="option">0</button>
+        <button class="option">1</button>
+        <button class="option" data-correct>2</button>
+        <button class="option">4</button>
+      </div><div class="quiz-explanation">add의 WB(5번째 사이클)와 sub의 ID가 같은 사이클이 될 때까지 sub의 ID(원래 3번째 사이클)를 두 번 붙잡아야 한다.</div></div>
+      <div class="quiz-question"><p>분기를 EX에서 판정하고 “불성립”으로 예측하는 파이프라인에서, 실제로 성립한 분기 하나 때문에 폐기되는 명령은 몇 개인가?</p><div class="options">
+        <button class="option">0</button>
+        <button class="option">1</button>
+        <button class="option" data-correct>2</button>
+        <button class="option">3</button>
+      </div><div class="quiz-explanation">분기가 EX에 있을 때 IF와 ID에 있던 두 명령(PC+4, PC+8)이 폐기된다.</div></div>
+      <div class="quiz-question"><p>포워딩·해저드 검출 조건에 “rd ≠ 0”을 넣는 이유는?</p><div class="options">
+        <button class="option">x0는 존재하지 않는 레지스터라서</button>
+        <button class="option" data-correct>x0에 쓴 값은 버려지고 x0는 언제나 0으로 읽히므로 진짜 의존성이 생기지 않아서</button>
+        <button class="option">x0는 스택 포인터라서</button>
+        <button class="option">rd가 0이면 명령이 잘못된 것이라서</button>
+      </div><div class="quiz-explanation">nop(addi x0, x0, 0)이나 j(jal x0, …) 같은 명령이 가짜 멈춤이나 엉뚱한 포워딩을 만들지 않게 한다.</div></div>
+      <div class="quiz-question"><p>RISC-V에서 ID 단계가 opcode 해독이 끝나기 전에 레지스터 파일을 읽기 시작할 수 있는 이유는?</p><div class="options">
+        <button class="option">모든 명령이 레지스터 세 개를 쓰기 때문에</button>
+        <button class="option" data-correct>rs1·rs2 칸이 모든 형식에서 같은 비트 위치에 있기 때문에</button>
+        <button class="option">레지스터 파일이 명령어 메모리 안에 있기 때문에</button>
+        <button class="option">즉시값이 항상 0이기 때문에</button>
+      </div><div class="quiz-explanation">규격 비고가 직접 밝힌 이유다. 그 대가로 즉시값 비트가 형식마다 흩어졌다.</div></div>
+      <div class="quiz-question"><p>조건 코드(플래그)가 없다는 점이 비순차 코어에 주는 이점으로 가장 알맞은 것은?</p><div class="options">
+        <button class="option">명령어 캐시가 작아진다</button>
+        <button class="option" data-correct>산술 명령마다 생기는 숨은 출력이 없어 이름 바꾸기와 의존성 추적 대상이 범용 레지스터뿐이다</button>
+        <button class="option">분기 예측이 필요 없어진다</button>
+        <button class="option">적재-사용 해저드가 사라진다</button>
+      </div><div class="quiz-explanation">플래그가 있으면 FLAGS도 이름을 바꾸고 추적해야 한다. RISC-V 분기는 비교할 레지스터를 명시적으로 읽는다.</div></div>
+      <div class="quiz-question"><p>파이프라인에서 “정밀한 예외”가 뜻하는 것은?</p><div class="options">
+        <button class="option">예외를 일으킨 명령까지 모두 완료한 뒤 트랩한다</button>
+        <button class="option">파이프라인의 모든 명령을 버리고 처음부터 다시 실행한다</button>
+        <button class="option" data-correct>예외를 일으킨 명령보다 앞선 명령은 모두 완료되고, 그 명령과 뒤 명령은 상태를 전혀 바꾸지 않은 상태에서 트랩한다</button>
+        <button class="option">예외가 생긴 사이클 번호를 정확히 기록한다</button>
+      </div><div class="quiz-explanation">그래서 mepc가 가리키는 명령부터 다시 실행하면 아무 일도 없었던 것처럼 이어 갈 수 있다.</div></div>
+    </div>
+  </section>
+
+  <section id="references">
+    <h2>더 읽을거리</h2>
+    <ul class="references">
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html" target="_blank" rel="noopener">The RISC-V Instruction Set Manual, Volume I — RV32I Base Integer Instruction Set</a> (v20260120): 형식 설계, 지연 슬롯, 비교-분기, 정적 예측에 관한 비고</li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/intro.html" target="_blank" rel="noopener">Volume I — Introduction: Exceptions, Traps, and Interrupts</a> (v20260120)</li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/priv/machine.html" target="_blank" rel="noopener">Volume II — Machine-Level ISA: mcause 예외 코드와 예외 우선순위</a> (v20260120)</li>
+      <li>David A. Patterson, John L. Hennessy, <i>Computer Organization and Design RISC-V Edition: The Hardware/Software Interface</i>, Morgan Kaufmann — 4장(프로세서)이 이 장의 단일 사이클·5단 모델의 원형이다.</li>
+      <li>John L. Hennessy, David A. Patterson, <i>Computer Architecture: A Quantitative Approach</i>, 6th ed. (2017) — 분기 예측, 비순차 실행, 이름 바꾸기</li>
+      <li>Andrew Waterman, “Design of the RISC-V Instruction Set Architecture”, UC Berkeley 박사 논문 (2016)</li>
+      <li>James E. Smith, “A Study of Branch Prediction Strategies”, ISCA (1981) — 2비트 포화 카운터</li>
+      <li>James E. Smith, Andrew R. Pleszkun, “Implementation of Precise Interrupts in Pipelined Processors”, ISCA (1985)</li>
+    </ul>
+  </section>
+</main>
+
+<script>
+/* ---------------------------------------------------------------------------
+   단일 사이클 데이터패스: 선택한 명령 분류가 쓰는 선과 부품만 밝힌다.
+   좌표는 viewBox(940 × 500) 기준이다. 선마다 "이 선을 쓰는 명령 분류" 목록을 둔다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const Riscv = window.Riscv;
+  const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
+  const ALL_CLASSES = ["r", "i", "load", "store", "branch", "jal"];
+  const USES_IMMEDIATE = ["i", "load", "store", "branch", "jal"];
+  const USES_ALU = ["r", "i", "load", "store", "branch"];
+  const NEXT_PC_IS_SEQUENTIAL = ["r", "i", "load", "store", "branch"];
+  const CHANGES_PC = ["branch", "jal"];
+
+  const PARTS = [
+    { key: "pc-mux", shape: "mux", x: 40, y: 230, width: 26, height: 80, classes: ALL_CLASSES },
+    { key: "pc", x: 84, y: 240, width: 44, height: 60, lines: ["PC"], isBold: true, classes: ALL_CLASSES },
+    { key: "add-four", x: 175, y: 110, width: 50, height: 50, lines: ["+4"], isBold: true, classes: ALL_CLASSES },
+    { key: "instruction-memory", x: 165, y: 220, width: 110, height: 120, lines: ["명령어", "메모리"], textY: 300, classes: ALL_CLASSES },
+    { key: "control", x: 330, y: 70, width: 120, height: 44, lines: ["제어 유닛"], isSurface: true, classes: ALL_CLASSES },
+    { key: "register-file", x: 360, y: 210, width: 130, height: 170, lines: ["레지스터", "파일"], textY: 284, classes: ALL_CLASSES },
+    { key: "immediate", x: 360, y: 405, width: 130, height: 40, lines: ["즉시값 생성"], classes: USES_IMMEDIATE },
+    { key: "branch-adder", x: 570, y: 95, width: 56, height: 56, lines: ["+"], isBold: true, classes: CHANGES_PC },
+    { key: "alu-mux", shape: "mux", x: 540, y: 300, width: 24, height: 70, classes: USES_ALU },
+    { key: "alu", shape: "alu", classes: USES_ALU },
+    { key: "branch-logic", x: 600, y: 160, width: 100, height: 28, lines: ["분기 판정"], isSurface: true, classes: ["branch"] },
+    { key: "data-memory", x: 720, y: 240, width: 110, height: 130, lines: ["데이터", "메모리"], textY: 262, classes: ["load", "store"] },
+    { key: "write-back-mux", shape: "mux", x: 870, y: 245, width: 26, height: 100, classes: ["r", "i", "load", "jal"] },
+  ];
+
+  const WIRES = [
+    { path: "M66 270 H84", classes: ALL_CLASSES },
+    { path: "M128 270 H165", classes: ALL_CLASSES },
+    { path: "M142 270 V135 H175", classes: ALL_CLASSES },
+    { path: "M225 135 H245 V40", classes: ALL_CLASSES },
+    { path: "M245 40 H20 V252 H40", classes: NEXT_PC_IS_SEQUENTIAL },
+    { path: "M245 40 H858 V262 H870", classes: ["jal"] },
+    { path: "M142 270 V190 H550 V110 H570", classes: CHANGES_PC },
+    { path: "M626 123 H645 V25 H12 V288 H40", classes: CHANGES_PC },
+    { path: "M275 280 H300", classes: ALL_CLASSES },
+    { path: "M300 92 V425", classes: ALL_CLASSES },
+    { path: "M300 92 H330", classes: ALL_CLASSES },
+    { path: "M300 235 H360", classes: USES_ALU },
+    { path: "M300 265 H360", classes: ["r", "store", "branch"] },
+    { path: "M300 300 H360", classes: ["r", "i", "load", "jal"] },
+    { path: "M300 425 H360", classes: USES_IMMEDIATE },
+    { path: "M490 245 H600", classes: USES_ALU },
+    { path: "M490 320 H500", classes: ["r", "store", "branch"] },
+    { path: "M500 320 H540", classes: ["r", "branch"] },
+    { path: "M500 320 V392 H705 V345 H720", classes: ["store"] },
+    { path: "M490 425 H515 V355", classes: USES_IMMEDIATE },
+    { path: "M515 355 H540", classes: ["i", "load", "store"] },
+    { path: "M515 355 V140 H570", classes: CHANGES_PC },
+    { path: "M564 335 H600", classes: USES_ALU },
+    { path: "M670 285 H690", classes: ["r", "i", "load", "store"] },
+    { path: "M690 285 H720", classes: ["load", "store"] },
+    { path: "M690 285 V222 H845 V295 H870", classes: ["r", "i"] },
+    { path: "M830 328 H870", classes: ["load"] },
+    { path: "M896 295 H932 V480 H340 V345 H360", classes: ["r", "i", "load", "jal"] },
+    { path: "M650 241 V188", classes: ["branch"], isControl: true },
+    { path: "M700 174 H760 V8 H53 V230", classes: CHANGES_PC, isControl: true },
+  ];
+
+  const JUNCTIONS = [
+    { x: 142, y: 270, classes: ALL_CLASSES },
+    { x: 245, y: 40, classes: ALL_CLASSES },
+    { x: 300, y: 280, classes: ALL_CLASSES },
+    { x: 500, y: 320, classes: ["r", "store", "branch"] },
+    { x: 515, y: 355, classes: USES_IMMEDIATE },
+    { x: 690, y: 285, classes: ["r", "i", "load", "store"] },
+  ];
+
+  const LABELS = [
+    { x: 296, y: 88, text: "opcode", anchor: "end", kind: "wire" },
+    { x: 305, y: 231, text: "rs1", kind: "wire" },
+    { x: 305, y: 261, text: "rs2", kind: "wire" },
+    { x: 305, y: 296, text: "rd", kind: "wire" },
+    { x: 305, y: 421, text: "imm", kind: "wire" },
+    { x: 520, y: 53, text: "PC+4", kind: "wire" },
+    { x: 330, y: 20, text: "분기·점프 목적지 (PC+imm)", kind: "wire" },
+    { x: 598, y: 89, text: "PC+imm", anchor: "middle", kind: "wire" },
+    { x: 366, y: 239, text: "rs1", kind: "port" },
+    { x: 366, y: 269, text: "rs2", kind: "port" },
+    { x: 366, y: 304, text: "rd", kind: "port" },
+    { x: 366, y: 349, text: "쓰기 값", kind: "port" },
+    { x: 484, y: 249, text: "읽기 1", anchor: "end", kind: "port" },
+    { x: 484, y: 324, text: "읽기 2", anchor: "end", kind: "port" },
+    { x: 171, y: 274, text: "주소", kind: "port" },
+    { x: 726, y: 289, text: "주소", kind: "port" },
+    { x: 726, y: 349, text: "쓰기 값", kind: "port" },
+    { x: 824, y: 332, text: "읽은 값", anchor: "end", kind: "port" },
+  ];
+
+  // 제어 신호 표시 위치와 분류별 값 (본문 표와 같은 값)
+  const SIGNAL_POSITIONS = {
+    PCSel: { x: 14, y: 330, anchor: "start" },
+    RegWrite: { x: 425, y: 204, anchor: "middle" },
+    ALUSrc: { x: 522, y: 292, anchor: "start" },
+    ImmSel: { x: 425, y: 462, anchor: "middle" },
+    ALUOp: { x: 640, y: 370, anchor: "middle" },
+    Mem: { x: 775, y: 390, anchor: "middle" },
+    WBSel: { x: 926, y: 364, anchor: "end" },
+  };
+  const INACTIVE_SIGNAL_VALUES = ["0", "—", "읽기 0 · 쓰기 0"];
+  const CLASS_DETAILS = {
+    r: {
+      example: "add a0, a1, a2", format: "R", delay: "600 ps",
+      signals: { PCSel: "PC+4", RegWrite: "1", ALUSrc: "rs2", ImmSel: "—", ALUOp: "R형", Mem: "읽기 0 · 쓰기 0", WBSel: "ALU" },
+      description: "<b>R형</b>: rs1·rs2 두 칸으로 레지스터 파일을 읽고, ALU가 funct3·funct7이 정한 연산을 한다. 결과는 WB 선택기의 ALU 입력을 거쳐 rd에 쓰인다. 즉시값 생성기와 데이터 메모리는 쉰다.",
+    },
+    i: {
+      example: "addi a0, a1, 5", format: "I", delay: "600 ps",
+      signals: { PCSel: "PC+4", RegWrite: "1", ALUSrc: "imm", ImmSel: "I", ALUOp: "I형", Mem: "읽기 0 · 쓰기 0", WBSel: "ALU" },
+      description: "<b>I형 산술</b>: R형과 거의 같지만 ALU 두 번째 입력이 rs2 대신 즉시값이다(ALUSrc = imm). 즉시값 생성기는 inst[31:20]을 꺼내 inst[31]로 부호 확장한다.",
+    },
+    load: {
+      example: "lw a0, 8(sp)", format: "I", delay: "800 ps",
+      signals: { PCSel: "PC+4", RegWrite: "1", ALUSrc: "imm", ImmSel: "I", ALUOp: "더하기", Mem: "읽기 1 · 쓰기 0", WBSel: "메모리" },
+      description: "<b>적재</b>: ALU가 rs1 + 즉시값으로 주소를 계산하고, 데이터 메모리가 그 주소를 읽어 WB 선택기의 메모리 입력으로 보낸다. 명령어 메모리 → 레지스터 파일 → ALU → 데이터 메모리 → 레지스터 파일, <b>가장 긴 경로</b>다.",
+    },
+    store: {
+      example: "sw a1, 8(sp)", format: "S", delay: "700 ps",
+      signals: { PCSel: "PC+4", RegWrite: "0", ALUSrc: "imm", ImmSel: "S", ALUOp: "더하기", Mem: "읽기 0 · 쓰기 1", WBSel: "—" },
+      description: "<b>저장</b>: 주소 계산은 적재와 같지만 rs2 값이 데이터 메모리의 쓰기 포트로 간다. 레지스터에 쓰는 값이 없으니 RegWrite = 0이고 WB 선택기는 쓰이지 않는다. S형은 rd 칸 자리에 즉시값 하위 5비트를 둔다.",
+    },
+    branch: {
+      example: "beq a0, a1, 16", format: "B", delay: "500 ps",
+      signals: { PCSel: "판정에 따라", RegWrite: "0", ALUSrc: "rs2", ImmSel: "B", ALUOp: "비교", Mem: "읽기 0 · 쓰기 0", WBSel: "—" },
+      description: "<b>분기</b>: ALU가 rs1과 rs2를 비교하고, 동시에 별도 덧셈기가 PC + B형 즉시값으로 목적지를 계산한다. 분기 판정 결과(금색 점선)가 PC 선택기를 움직여 PC+4와 목적지 중 하나를 고른다. 레지스터에는 아무것도 쓰지 않는다.",
+    },
+    jal: {
+      example: "jal ra, 64", format: "J", delay: "—",
+      signals: { PCSel: "PC+imm", RegWrite: "1", ALUSrc: "—", ImmSel: "J", ALUOp: "—", Mem: "읽기 0 · 쓰기 0", WBSel: "PC+4" },
+      description: "<b>점프</b>: 덧셈기가 PC + J형 즉시값으로 목적지를 만들어 PC에 넣고, 복귀 주소 PC+4는 WB 선택기를 거쳐 rd(ra)에 쓰인다. ALU와 데이터 메모리는 쉰다.",
+    },
+  };
+
+  const svg = document.getElementById("single-datapath-svg");
+  const description = document.getElementById("single-description");
+  const wireElements = [];
+  const partElements = [];
+  const junctionElements = [];
+  const signalElements = {};
+
+  function createSvgElement(tagName, attributes) {
+    const element = document.createElementNS(SVG_NAMESPACE, tagName);
+    Object.entries(attributes || {}).forEach(([name, value]) => element.setAttribute(name, value));
+    return element;
+  }
+
+  // 화살표 머리: 활성 선은 강조색, 비활성 선은 흐린 색
+  const definitions = createSvgElement("defs");
+  definitions.innerHTML =
+    '<marker id="single-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--text-faint)"/></marker>' +
+    '<marker id="single-arrow-active" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker>' +
+    '<marker id="single-arrow-control" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent-2)"/></marker>';
+  svg.appendChild(definitions);
+
+  WIRES.forEach((wire) => {
+    const element = createSvgElement("path", { d: wire.path, class: "datapath-wire" + (wire.isControl ? " is-control" : "") });
+    svg.appendChild(element);
+    wireElements.push({ element, wire });
+  });
+  JUNCTIONS.forEach((junction) => {
+    const element = createSvgElement("circle", { cx: junction.x, cy: junction.y, r: 3.5, class: "datapath-junction" });
+    svg.appendChild(element);
+    junctionElements.push({ element, junction });
+  });
+
+  PARTS.forEach((part) => {
+    const group = createSvgElement("g", { class: "datapath-part" });
+    let shape;
+    if (part.shape === "alu") {
+      shape = createSvgElement("polygon", { points: "600,220 670,250 670,320 600,350 600,300 615,285 600,270", class: "part-shape f-gold-soft" });
+      group.appendChild(shape);
+      const text = createSvgElement("text", { x: 645, y: 290, "text-anchor": "middle", class: "t t-bold" });
+      text.textContent = "ALU";
+      group.appendChild(text);
+    } else {
+      const isMux = part.shape === "mux";
+      const shapeClass = isMux || part.isSurface ? "f-surface" : "f-elev";
+      shape = createSvgElement("rect", { x: part.x, y: part.y, width: part.width, height: part.height, rx: isMux ? part.width / 2 : 8, class: "part-shape " + shapeClass });
+      group.appendChild(shape);
+      const lines = part.lines || [];
+      const centerY = part.textY !== undefined ? part.textY : part.y + part.height / 2 - (lines.length - 1) * 9 + 5;
+      lines.forEach((line, index) => {
+        const text = createSvgElement("text", { x: part.x + part.width / 2, y: centerY + index * 18, "text-anchor": "middle", class: part.isBold ? "t t-bold" : "t" });
+        text.textContent = line;
+        group.appendChild(text);
+      });
+    }
+    svg.appendChild(group);
+    partElements.push({ element: group, part });
+  });
+
+  LABELS.forEach((label) => {
+    const text = createSvgElement("text", { x: label.x, y: label.y, "text-anchor": label.anchor || "start", class: label.kind === "port" ? "port-label" : "wire-label" });
+    text.textContent = label.text;
+    svg.appendChild(text);
+  });
+  Object.entries(SIGNAL_POSITIONS).forEach(([name, position]) => {
+    const text = createSvgElement("text", { x: position.x, y: position.y, "text-anchor": position.anchor, class: "signal-label" });
+    svg.appendChild(text);
+    signalElements[name] = text;
+  });
+
+  function show(classKey) {
+    const details = CLASS_DETAILS[classKey];
+    wireElements.forEach(({ element, wire }) => {
+      const isActive = wire.classes.includes(classKey);
+      element.classList.toggle("is-active", isActive);
+      element.classList.toggle("is-dim", !isActive);
+      element.classList.toggle("flow-dash", isActive);
+      let marker = "url(#single-arrow)";
+      if (isActive) marker = wire.isControl ? "url(#single-arrow-control)" : "url(#single-arrow-active)";
+      element.setAttribute("marker-end", marker);
+    });
+    junctionElements.forEach(({ element, junction }) => {
+      const isActive = junction.classes.includes(classKey);
+      element.classList.toggle("is-active", isActive);
+      element.classList.toggle("is-dim", !isActive);
+    });
+    partElements.forEach(({ element, part }) => {
+      const isActive = part.classes.includes(classKey);
+      element.classList.toggle("is-active", isActive);
+      element.classList.toggle("is-dim", !isActive);
+    });
+    Object.entries(details.signals).forEach(([name, value]) => {
+      signalElements[name].textContent = name + " = " + value;
+      signalElements[name].classList.toggle("is-on", !INACTIVE_SIGNAL_VALUES.includes(value));
+    });
+    description.innerHTML = details.description;
+    document.getElementById("single-example").textContent = details.example;
+    const assembled = Riscv.assemble(details.example);
+    const machineCode = assembled.words.length ? book.toHex(assembled.words[0].word) : "—";
+    document.getElementById("single-machine-code").textContent = machineCode;
+    document.getElementById("single-format").textContent = details.format + "형";
+    document.getElementById("single-delay").textContent = details.delay;
+  }
+  book.segmented("single-class", show);
+})();
+
+/* ---------------------------------------------------------------------------
+   분기 예측기 실험실: 같은 결과 열을 네 가지 예측기로 예측해 보고 적중률을 비교한다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const PATTERN_REPEAT_COUNT = 5;
+  const PRESET_PATTERNS = { loop: "TTTN", alternate: "TN", rare: "TTTTTTTTTN" };
+  const CUSTOM_MAXIMUM_LENGTH = 40;
+  const COUNTER_INITIAL_STATE = 1;
+  const COUNTER_MAXIMUM_STATE = 3;
+  const COUNTER_TAKEN_THRESHOLD = 2;
+  const PERCENT = 100;
+  const table = document.getElementById("predictor-table");
+  const input = document.getElementById("predictor-input");
+  let currentPattern = "loop";
+
+  // 반복 패턴은 짧게 입력해도 여러 번 돌려야 예측기가 "배우는" 모습이 보인다
+  function outcomeSequence() {
+    if (currentPattern === "custom") {
+      const cleaned = input.value.toUpperCase().replace(/[^TN]/g, "").slice(0, CUSTOM_MAXIMUM_LENGTH);
+      return cleaned.split("").map((letter) => letter === "T");
+    }
+    const unit = PRESET_PATTERNS[currentPattern];
+    const repeatCount = currentPattern === "rare" ? 2 : PATTERN_REPEAT_COUNT;
+    return unit.repeat(repeatCount).split("").map((letter) => letter === "T");
+  }
+
+  function runPredictors(outcomes) {
+    const predictions = { never: [], always: [], oneBit: [], twoBit: [] };
+    let lastOutcome = false;
+    let counterState = COUNTER_INITIAL_STATE;
+    outcomes.forEach((isTaken) => {
+      predictions.never.push(false);
+      predictions.always.push(true);
+      predictions.oneBit.push(lastOutcome);
+      predictions.twoBit.push(counterState >= COUNTER_TAKEN_THRESHOLD);
+      lastOutcome = isTaken;
+      if (isTaken) counterState = Math.min(COUNTER_MAXIMUM_STATE, counterState + 1);
+      else counterState = Math.max(0, counterState - 1);
+    });
+    return predictions;
+  }
+
+  function cellsHtml(values, outcomes) {
+    return values.map((isTakenPrediction, index) => {
+      const letter = isTakenPrediction ? "T" : "N";
+      if (!outcomes) return '<span class="' + (isTakenPrediction ? "is-taken" : "") + '">' + letter + "</span>";
+      const isCorrect = isTakenPrediction === outcomes[index];
+      return '<span class="' + (isCorrect ? "is-correct" : "is-wrong") + '">' + letter + "</span>";
+    }).join("");
+  }
+
+  function accuracyText(values, outcomes) {
+    if (!outcomes.length) return "—";
+    const correctCount = values.filter((value, index) => value === outcomes[index]).length;
+    return Math.round((correctCount / outcomes.length) * PERCENT) + "% (" + correctCount + "/" + outcomes.length + ")";
+  }
+
+  function render() {
+    const outcomes = outcomeSequence();
+    const predictions = runPredictors(outcomes);
+    const rows = [
+      ["실제 결과", cellsHtml(outcomes, null)],
+      ["항상 불성립", cellsHtml(predictions.never, outcomes)],
+      ["항상 성립", cellsHtml(predictions.always, outcomes)],
+      ["1비트", cellsHtml(predictions.oneBit, outcomes)],
+      ["2비트 카운터", cellsHtml(predictions.twoBit, outcomes)],
+    ];
+    table.innerHTML = rows.map(([name, cells]) => '<div class="predictor-name">' + name + '</div><div class="predictor-cells">' + cells + "</div>").join("");
+    document.getElementById("predictor-accuracy-never").textContent = accuracyText(predictions.never, outcomes);
+    document.getElementById("predictor-accuracy-always").textContent = accuracyText(predictions.always, outcomes);
+    document.getElementById("predictor-accuracy-one-bit").textContent = accuracyText(predictions.oneBit, outcomes);
+    document.getElementById("predictor-accuracy-two-bit").textContent = accuracyText(predictions.twoBit, outcomes);
+  }
+
+  book.segmented("predictor-pattern", (value) => {
+    currentPattern = value;
+    if (value !== "custom") input.value = PRESET_PATTERNS[value];
+    render();
+  });
+  input.addEventListener("input", () => {
+    currentPattern = "custom";
+    document.querySelectorAll("#predictor-pattern button").forEach((button) => button.classList.toggle("on", button.dataset.value === "custom"));
+    render();
+  });
+})();
+
+/* PIPELINE-MODEL-START */
+/*
+ * 5단 파이프라인 시간 모델.
+ * 실제 실행 흐름(trace)은 Riscv.Machine 이 만들고, 이 모델은 "그 흐름을 5단 파이프라인이
+ * 사이클마다 어떻게 처리하는가"만 계산한다. 그래서 분기 결과는 항상 실제 실행과 일치한다.
+ * 가정 (본문과 같다):
+ *  - 분기(beq 등)와 jalr 은 EX 단계에서 판정한다. jal 의 목적지는 ID 단계에서 계산된다.
+ *  - 레지스터 파일은 앞 절반에 쓰고 뒤 절반에 읽는다 (WB 와 ID 가 같은 사이클이어도 된다).
+ *  - 포워딩 경로는 EX/MEM → EX, MEM/WB → EX 두 가지다. 적재 값은 MEM 끝에야 나오므로 1사이클 멈춘다.
+ *  - BTB가 없다고 보므로 "성립"으로 예측해도 목적지는 ID 에서야 알 수 있어 1사이클을 잃는다.
+ */
+const PipelineModel = (function () {
+  "use strict";
+  const STAGE_NAMES = ["IF", "ID", "EX", "MEM", "WB"];
+  const INSTRUCTION_BYTES = 4;
+  const MAXIMUM_CYCLES = 900;
+  const MAXIMUM_TRACE_LENGTH = 120;
+  const LOAD_OPCODE = 0b0000011;
+  const POLICY = { STALL: "stall", NOT_TAKEN: "not-taken", BACKWARD_TAKEN: "backward-taken", BIMODAL: "bimodal" };
+  // 2비트 포화 카운터: 0·1 은 불성립, 2·3 은 성립으로 예측한다. 처음에는 "약한 불성립"에서 출발한다.
+  const COUNTER_INITIAL_STATE = 1;
+  const COUNTER_MAXIMUM_STATE = 3;
+  const COUNTER_TAKEN_THRESHOLD = 2;
+  const SYSTEM_INSTRUCTIONS_WITHOUT_OPERANDS = ["ecall", "ebreak", "fence", "fence.i"];
+
+  /** 명령이 읽는 레지스터(x0 제외)와 쓰는 레지스터를 정리한다. 해저드 검사의 재료다. */
+  function describeInstruction(decoded) {
+    const information = { sources: [], destination: 0, isLoad: false, isStore: false, isConditionalBranch: false, isJal: false, isJalr: false, isControl: false };
+    if (!decoded || !decoded.name) return information;
+    const name = decoded.name;
+    const format = decoded.format;
+    let sources = [];
+    let hasDestination = false;
+    if (format === "R") { sources = [decoded.rs1, decoded.rs2]; hasDestination = true; }
+    else if (format === "I" || format === "I-shift") {
+      if (!SYSTEM_INSTRUCTIONS_WITHOUT_OPERANDS.includes(name)) { sources = [decoded.rs1]; hasDestination = true; }
+    } else if (format === "I-csr") {
+      // 즉시값 형식(csrrwi 등)은 rs1 칸이 레지스터가 아니라 5비트 상수다
+      sources = name.endsWith("i") ? [] : [decoded.rs1];
+      hasDestination = true;
+    } else if (format === "S" || format === "B") { sources = [decoded.rs1, decoded.rs2]; }
+    else if (format === "U" || format === "J") { hasDestination = true; }
+    // x0 은 언제나 0이라 읽어도 기다릴 값이 없고, 써도 아무 일이 없다
+    information.sources = [...new Set(sources.filter((register) => register !== 0))];
+    information.destination = hasDestination ? decoded.rd : 0;
+    information.isLoad = decoded.opcode === LOAD_OPCODE;
+    information.isStore = format === "S";
+    information.isConditionalBranch = format === "B";
+    information.isJal = name === "jal";
+    information.isJalr = name === "jalr";
+    information.isControl = information.isConditionalBranch || information.isJal || information.isJalr;
+    return information;
+  }
+
+  /** riscv.js 에뮬레이터로 실제로 실행된 명령의 순서를 얻는다. */
+  function buildTrace(Riscv, program) {
+    const machine = new Riscv.Machine();
+    machine.load(program);
+    const trace = [];
+    let errorMessage = null;
+    while (!machine.isHalted && trace.length < MAXIMUM_TRACE_LENGTH) {
+      const record = machine.step();
+      if (record.error) { errorMessage = record.error; break; }
+      trace.push({ pc: record.pc, word: record.word, text: record.text, decoded: record.decoded, nextPc: record.nextPc, isBranchTaken: record.isBranchTaken });
+    }
+    const isTruncated = !machine.isHalted && !errorMessage && trace.length >= MAXIMUM_TRACE_LENGTH;
+    return { trace, errorMessage, isTruncated };
+  }
+
+  const isInstruction = (entry) => Boolean(entry) && !entry.isBubble;
+
+  /**
+   * 파이프라인을 사이클 단위로 흉내 낸다.
+   * staticWords: 주소 → { decoded, text } (잘못된 경로에서 가져오는 명령을 보여 주기 위해)
+   * 반환: { snapshots, rows, totals }
+   */
+  function simulate(trace, staticWords, options) {
+    const isForwardingEnabled = Boolean(options.isForwardingEnabled);
+    const policy = options.branchPolicy || POLICY.NOT_TAKEN;
+    const rows = [];
+    const snapshots = [];
+    const predictorCounters = new Map();
+    const totals = { cycles: 0, completed: 0, dataStalls: 0, flushed: 0, controlStalls: 0, conditionalBranches: 0, correctPredictions: 0 };
+    let fetchPc = trace.length ? trace[0].pc : 0;
+    let nextTraceIndex = 0;
+    let isOnCorrectPath = true;
+    let isFetchBlocked = false;
+
+    function makeEntry(isReal, traceIndex, pc, cycle) {
+      let decoded = null;
+      let text = "(빈 주소)";
+      if (isReal) { decoded = trace[traceIndex].decoded; text = trace[traceIndex].text; }
+      else if (staticWords.has(pc)) { const word = staticWords.get(pc); decoded = word.decoded; text = word.text; }
+      const entry = { rowIndex: rows.length, isReal, traceIndex, pc, decoded, text, information: describeInstruction(decoded), followedPc: pc + INSTRUCTION_BYTES, predictedTaken: null };
+      rows.push({ pc, text, isReal, fetchCycle: cycle, cells: {}, flushedAtCycle: null });
+      return entry;
+    }
+
+    function fetchNext(cycle) {
+      if (isFetchBlocked) return null;
+      if (isOnCorrectPath) {
+        if (nextTraceIndex >= trace.length) return null;
+        const traceIndex = nextTraceIndex;
+        const entry = makeEntry(true, traceIndex, trace[traceIndex].pc, cycle);
+        nextTraceIndex += 1;
+        fetchPc = entry.pc + INSTRUCTION_BYTES;
+        if (entry.information.isControl) {
+          // "멈춤" 정책은 판정이 끝날 때까지 다음 명령을 아예 가져오지 않는다
+          if (policy === POLICY.STALL) isFetchBlocked = true;
+          else if (trace[traceIndex].nextPc !== fetchPc) isOnCorrectPath = false;
+        }
+        return entry;
+      }
+      // 앞선 분기의 예측이 틀린 상태: 판정이 날 때까지 잘못된 경로의 명령을 가져온다
+      const entry = makeEntry(false, -1, fetchPc, cycle);
+      fetchPc += INSTRUCTION_BYTES;
+      return entry;
+    }
+
+    function predictTaken(entry) {
+      if (policy === POLICY.NOT_TAKEN) return false;
+      if (policy === POLICY.BACKWARD_TAKEN) return entry.decoded.immediate < 0;
+      const state = predictorCounters.has(entry.pc) ? predictorCounters.get(entry.pc) : COUNTER_INITIAL_STATE;
+      return state >= COUNTER_TAKEN_THRESHOLD;
+    }
+    function trainPredictor(pc, isTaken) {
+      const state = predictorCounters.has(pc) ? predictorCounters.get(pc) : COUNTER_INITIAL_STATE;
+      const nextState = isTaken ? Math.min(COUNTER_MAXIMUM_STATE, state + 1) : Math.max(0, state - 1);
+      predictorCounters.set(pc, nextState);
+    }
+
+    let stages = { IF: fetchNext(1), ID: null, EX: null, MEM: null, WB: null };
+    let previousPositions = new Map();
+    for (let cycle = 1; cycle <= MAXIMUM_CYCLES; cycle += 1) {
+      const isEmpty = STAGE_NAMES.every((stageName) => !stages[stageName]);
+      if (isEmpty) break;
+      totals.cycles = cycle;
+      const fetchEntry = stages.IF;
+      const decodeEntry = stages.ID;
+      const executeEntry = stages.EX;
+      const memoryEntry = stages.MEM;
+      const writeBackEntry = stages.WB;
+      const events = [];
+
+      // 이번 사이클에 각 명령이 어느 단계에 있는지 표에 적는다
+      const positions = new Map();
+      STAGE_NAMES.forEach((stageName) => {
+        const entry = stages[stageName];
+        if (!isInstruction(entry)) return;
+        const isStalled = previousPositions.get(entry.rowIndex) === stageName;
+        rows[entry.rowIndex].cells[cycle] = { stage: stageName, isStalled };
+        positions.set(entry.rowIndex, stageName);
+      });
+      previousPositions = positions;
+      if (isInstruction(writeBackEntry) && writeBackEntry.isReal) totals.completed += 1;
+
+      // (1) EX 단계 명령이 어디서 피연산자를 받는가 (포워딩 표시용)
+      const forwardings = [];
+      if (isInstruction(executeEntry) && isForwardingEnabled) {
+        executeEntry.information.sources.forEach((register) => {
+          // 같은 레지스터를 두 명령이 썼다면 더 최근 것(EX/MEM)이 이긴다
+          if (isInstruction(memoryEntry) && memoryEntry.information.destination === register) forwardings.push({ register, path: "EX/MEM", producer: memoryEntry });
+          else if (isInstruction(writeBackEntry) && writeBackEntry.information.destination === register) forwardings.push({ register, path: "MEM/WB", producer: writeBackEntry });
+        });
+      }
+
+      // (2) 데이터 해저드: ID 의 명령이 아직 준비되지 않은 값을 읽으려 하는가
+      let dataStall = null;
+      if (isInstruction(decodeEntry)) {
+        for (const register of decodeEntry.information.sources) {
+          if (isForwardingEnabled) {
+            if (isInstruction(executeEntry) && executeEntry.information.isLoad && executeEntry.information.destination === register) {
+              dataStall = { register, producer: executeEntry, producerStage: "EX", isLoadUse: true };
+              break;
+            }
+          } else {
+            if (isInstruction(executeEntry) && executeEntry.information.destination === register) {
+              dataStall = { register, producer: executeEntry, producerStage: "EX", isLoadUse: executeEntry.information.isLoad };
+              break;
+            }
+            if (isInstruction(memoryEntry) && memoryEntry.information.destination === register) {
+              dataStall = { register, producer: memoryEntry, producerStage: "MEM", isLoadUse: memoryEntry.information.isLoad };
+              break;
+            }
+          }
+        }
+      }
+
+      // (3) EX 단계 판정: 분기·jalr 의 실제 결과가 프런트엔드가 따라간 길과 같은가
+      let executeRedirect = null;
+      if (isInstruction(executeEntry) && executeEntry.isReal && executeEntry.information.isControl) {
+        const actualNextPc = trace[executeEntry.traceIndex].nextPc;
+        const isTaken = actualNextPc !== executeEntry.pc + INSTRUCTION_BYTES;
+        if (executeEntry.information.isConditionalBranch) {
+          totals.conditionalBranches += 1;
+          if (policy !== POLICY.STALL && executeEntry.predictedTaken === isTaken) totals.correctPredictions += 1;
+          if (policy === POLICY.BIMODAL) trainPredictor(executeEntry.pc, isTaken);
+        }
+        if (policy === POLICY.STALL) {
+          if (!executeEntry.information.isJal) executeRedirect = { target: actualNextPc, isRelease: true, entry: executeEntry, isTaken };
+        } else if (executeEntry.followedPc !== actualNextPc) {
+          executeRedirect = { target: actualNextPc, isRelease: false, entry: executeEntry, isTaken };
+        } else if (!executeEntry.information.isJal) {
+          events.push({ kind: "branch-correct", entry: executeEntry, isTaken });
+        }
+      }
+
+      // (4) ID 단계: jal 목적지 계산, 분기 예측
+      let decodeRedirect = null;
+      if (!executeRedirect && !dataStall && isInstruction(decodeEntry) && decodeEntry.isReal && decodeEntry.information.isControl) {
+        const target = (decodeEntry.pc + decodeEntry.decoded.immediate) >>> 0;
+        if (policy === POLICY.STALL) {
+          if (decodeEntry.information.isJal) decodeRedirect = { target, isRelease: true, entry: decodeEntry };
+        } else if (decodeEntry.information.isJal) {
+          decodeRedirect = { target, isRelease: false, entry: decodeEntry };
+        } else if (decodeEntry.information.isConditionalBranch) {
+          decodeEntry.predictedTaken = predictTaken(decodeEntry);
+          if (decodeEntry.predictedTaken) decodeRedirect = { target, isRelease: false, entry: decodeEntry, isPrediction: true };
+          else events.push({ kind: "predict-not-taken", entry: decodeEntry });
+        }
+        if (decodeRedirect && !decodeRedirect.isRelease) decodeEntry.followedPc = target;
+      }
+
+      // (5) 다음 사이클 상태
+      const nextStages = { IF: null, ID: null, EX: null, MEM: executeEntry, WB: memoryEntry };
+      const flushedEntries = [];
+      if (executeRedirect) {
+        [decodeEntry, fetchEntry].forEach((entry) => { if (isInstruction(entry)) flushedEntries.push(entry); });
+        // 폐기된 명령 자리는 아무 일도 하지 않는 거품이 되어 뒤로 흘러간다
+        if (isInstruction(decodeEntry)) nextStages.EX = { isBubble: true, reason: "flush" };
+        else nextStages.EX = decodeEntry || null;
+        nextStages.ID = isInstruction(fetchEntry) ? { isBubble: true, reason: "flush" } : null;
+        fetchPc = executeRedirect.target;
+        nextTraceIndex = executeRedirect.entry.traceIndex + 1;
+        isOnCorrectPath = true;
+        isFetchBlocked = false;
+        nextStages.IF = fetchNext(cycle + 1);
+      } else if (dataStall) {
+        totals.dataStalls += 1;
+        nextStages.EX = { isBubble: true, reason: "stall" };
+        nextStages.ID = decodeEntry;
+        nextStages.IF = fetchEntry;
+      } else if (decodeRedirect) {
+        nextStages.EX = decodeEntry;
+        if (isInstruction(fetchEntry)) {
+          flushedEntries.push(fetchEntry);
+          nextStages.ID = { isBubble: true, reason: "flush" };
+        }
+        fetchPc = decodeRedirect.target;
+        nextTraceIndex = decodeRedirect.entry.traceIndex + 1;
+        isOnCorrectPath = decodeRedirect.target === trace[decodeRedirect.entry.traceIndex].nextPc;
+        isFetchBlocked = false;
+        nextStages.IF = fetchNext(cycle + 1);
+      } else {
+        nextStages.EX = decodeEntry;
+        nextStages.ID = fetchEntry;
+        nextStages.IF = fetchNext(cycle + 1);
+      }
+      // "멈춤" 정책에서 가져오기를 쉬는 사이클을 제어 손실로 센다
+      if (policy === POLICY.STALL && !nextStages.IF && isFetchBlocked) totals.controlStalls += 1;
+
+      flushedEntries.forEach((entry) => { rows[entry.rowIndex].flushedAtCycle = cycle; });
+      totals.flushed += flushedEntries.length;
+
+      snapshots.push({
+        cycle, stages: Object.assign({}, stages), forwardings, dataStall, executeRedirect, decodeRedirect, flushedEntries, events,
+        totals: Object.assign({}, totals),
+      });
+      stages = nextStages;
+    }
+    return { snapshots, rows, totals, policy, isForwardingEnabled };
+  }
+
+  return { STAGE_NAMES, POLICY, MAXIMUM_TRACE_LENGTH, describeInstruction, buildTrace, simulate, isInstruction };
+})();
+/* PIPELINE-MODEL-END */
+
+/* ---------------------------------------------------------------------------
+   5단 파이프라인 시뮬레이터 화면: 위의 모델이 만든 사이클별 기록을 그린다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const Riscv = window.Riscv;
+  const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
+  const AUTO_PLAY_INTERVAL_MILLISECONDS = 650;
+  const MAXIMUM_INSTRUCTION_TEXT_LENGTH = 19;
+  const STAGE_BOX_LEFT = 20;
+  const STAGE_BOX_SPACING = 176;
+  const STAGE_BOX_WIDTH = 150;
+  const PRESET_PROGRAMS = {
+    chain: [
+      "# 바로 앞 명령의 결과를 계속 이어 쓰는 사슬",
+      "    addi t0, zero, 5",
+      "    addi t1, t0, 3       # t0 필요 (거리 1)",
+      "    add  t2, t0, t1      # t1 필요 (거리 1)",
+      "    sub  t3, t2, t0      # t2 필요 (거리 1)",
+      "    and  t4, t3, t1      # t3 필요 (거리 1)",
+      "    ebreak",
+    ].join("\n"),
+    "load-use": [
+      ".data",
+      "array: .word 3, 1, 4, 1, 5",
+      ".text",
+      "    la   a0, array       # auipc + addi",
+      "    lw   t0, 0(a0)",
+      "    add  t1, t0, t0      # 바로 앞 lw 의 값 → 적재-사용",
+      "    lw   t2, 4(a0)",
+      "    addi a0, a0, 8",
+      "    add  t3, t2, t1      # lw 와 거리 2 → 포워딩으로 해결",
+      "    ebreak",
+    ].join("\n"),
+    loop: [
+      ".data",
+      "array: .word 1, 2, 3, 4, 5, 6",
+      ".text",
+      "      la   a0, array",
+      "      li   a1, 6           # 남은 개수",
+      "      li   a2, 0           # 합계",
+      "loop: lw   t0, 0(a0)",
+      "      add  a2, a2, t0      # 적재-사용",
+      "      addi a0, a0, 4",
+      "      addi a1, a1, -1",
+      "      bnez a1, loop        # 뒤로 가는 분기",
+      "      ebreak",
+    ].join("\n"),
+    scheduled: [
+      ".data",
+      "array: .word 1, 2, 3, 4, 5, 6",
+      ".text",
+      "      la   a0, array",
+      "      li   a1, 6",
+      "      li   a2, 0",
+      "loop: lw   t0, 0(a0)",
+      "      addi a0, a0, 4       # 독립 명령을 사이에 끼움",
+      "      addi a1, a1, -1",
+      "      add  a2, a2, t0      # lw 와 거리 3",
+      "      bnez a1, loop",
+      "      ebreak",
+    ].join("\n"),
+    call: [
+      "        li   a0, 3",
+      "        jal  ra, double    # 목적지는 ID 에서 계산",
+      "        addi a1, a0, 1",
+      "        ebreak",
+      "double: add  a0, a0, a0",
+      "        ret                # jalr: EX 에서 판정",
+    ].join("\n"),
+  };
+  const PERCENT = 100;
+
+  const sourceInput = document.getElementById("pipeline-source");
+  const message = document.getElementById("pipeline-message");
+  const view = document.getElementById("pipeline-view");
+  const description = document.getElementById("pipeline-description");
+  const chart = document.getElementById("pipeline-chart");
+  const playButton = document.getElementById("pipeline-play");
+
+  let trace = [];
+  let staticWords = new Map();
+  let traceNote = "";
+  let result = null;
+  let currentCycle = 0;
+  let isForwardingEnabled = true;
+  let branchPolicy = "not-taken";
+  let playTimer = null;
+
+  /* ---------------- 현재 사이클 그림의 뼈대 (한 번만 만든다) ---------------- */
+  function createSvgElement(tagName, attributes, text) {
+    const element = document.createElementNS(SVG_NAMESPACE, tagName);
+    Object.entries(attributes || {}).forEach(([name, value]) => element.setAttribute(name, value));
+    if (text !== undefined) element.textContent = text;
+    return element;
+  }
+  const STAGE_SUBTITLES = { IF: "가져오기", ID: "해독·레지스터 읽기", EX: "실행·분기 판정", MEM: "메모리", WB: "레지스터 쓰기" };
+  const viewParts = {};
+  const definitions = createSvgElement("defs");
+  definitions.innerHTML =
+    '<marker id="pipeline-view-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent-2)"/></marker>' +
+    '<marker id="pipeline-view-arrow-teal" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--teal)"/></marker>';
+  view.appendChild(definitions);
+  // 되돌아가는 길: WB → 레지스터 파일, EX/MEM → EX, MEM/WB → EX
+  viewParts.writeBackPath = createSvgElement("path", { d: "M799 66 V34 H283 V64", class: "bypass-path is-writeback", "marker-end": "url(#pipeline-view-arrow-teal)" });
+  viewParts.writeBackLabel = createSvgElement("text", { x: 541, y: 27, "text-anchor": "middle", class: "t-faint" }, "WB → 레지스터 파일 (앞 절반 쓰기, 뒤 절반 읽기)");
+  viewParts.forwardMemoryPath = createSvgElement("path", { d: "M535 168 V196 H448 V166", class: "bypass-path", "marker-end": "url(#pipeline-view-arrow)" });
+  viewParts.forwardWriteBackPath = createSvgElement("path", { d: "M711 168 V222 H428 V166", class: "bypass-path", "marker-end": "url(#pipeline-view-arrow)" });
+  viewParts.forwardMemoryLabel = createSvgElement("text", { x: 491, y: 212, "text-anchor": "middle", class: "t-faint", style: "font-size:11px" }, "EX/MEM → EX");
+  viewParts.forwardWriteBackLabel = createSvgElement("text", { x: 600, y: 238, "text-anchor": "middle", class: "t-faint", style: "font-size:11px" }, "MEM/WB → EX");
+  [viewParts.writeBackPath, viewParts.writeBackLabel, viewParts.forwardMemoryPath, viewParts.forwardWriteBackPath, viewParts.forwardMemoryLabel, viewParts.forwardWriteBackLabel].forEach((element) => view.appendChild(element));
+  viewParts.stages = {};
+  PipelineModel.STAGE_NAMES.forEach((stageName, index) => {
+    const left = STAGE_BOX_LEFT + index * STAGE_BOX_SPACING;
+    const center = left + STAGE_BOX_WIDTH / 2;
+    const box = createSvgElement("rect", { x: left, y: 66, width: STAGE_BOX_WIDTH, height: 100, rx: 10, class: "stage-box" });
+    const name = createSvgElement("text", { x: center, y: 88, "text-anchor": "middle", class: "t-accent" }, stageName);
+    const subtitle = createSvgElement("text", { x: center, y: 104, "text-anchor": "middle", class: "t-faint" }, STAGE_SUBTITLES[stageName]);
+    const instruction = createSvgElement("text", { x: center, y: 130, "text-anchor": "middle", class: "stage-instruction" }, "—");
+    const status = createSvgElement("text", { x: center, y: 154, "text-anchor": "middle", class: "stage-status" }, "");
+    [box, name, subtitle, instruction, status].forEach((element) => view.appendChild(element));
+    viewParts.stages[stageName] = { box, instruction, status };
+    if (index < PipelineModel.STAGE_NAMES.length - 1) {
+      const barX = left + STAGE_BOX_WIDTH + (STAGE_BOX_SPACING - STAGE_BOX_WIDTH) / 2 - 4;
+      view.appendChild(createSvgElement("rect", { x: barX, y: 58, width: 8, height: 116, rx: 2, class: "f-gold-soft" }));
+      view.appendChild(createSvgElement("text", { x: barX + 4, y: 52, "text-anchor": "middle", class: "t-faint", style: "font-size:10.5px" }, stageName + "/" + PipelineModel.STAGE_NAMES[index + 1]));
+    }
+  });
+
+  /* ---------------- 도우미 ---------------- */
+  const toHexadecimal = (value) => "0x" + (value >>> 0).toString(16);
+  const registerName = (number) => Riscv.ABI_NAMES[number];
+  function shortText(text) {
+    if (text.length <= MAXIMUM_INSTRUCTION_TEXT_LENGTH) return text;
+    return text.slice(0, MAXIMUM_INSTRUCTION_TEXT_LENGTH - 1) + "…";
+  }
+  function codeText(entry) {
+    return "<code>" + entry.text + "</code>";
+  }
+
+  /* ---------------- 프로그램 준비 ---------------- */
+  function loadProgram(source) {
+    const program = Riscv.assemble(source);
+    if (program.errors.length) {
+      const firstError = program.errors[0];
+      message.textContent = firstError.line + "번째 줄: " + firstError.message;
+      message.classList.add("is-error");
+      return false;
+    }
+    if (!program.words.length) {
+      message.textContent = "명령이 하나도 없습니다.";
+      message.classList.add("is-error");
+      return false;
+    }
+    staticWords = new Map(program.words.map((word) => [word.address, { decoded: Riscv.decode(word.word), text: word.text }]));
+    const traceResult = PipelineModel.buildTrace(Riscv, program);
+    trace = traceResult.trace;
+    traceNote = "";
+    if (traceResult.errorMessage) traceNote = "에뮬레이터가 멈춘 이유: " + traceResult.errorMessage + " (그 앞까지만 그린다)";
+    if (traceResult.isTruncated) traceNote = "실행 명령이 " + PipelineModel.MAXIMUM_TRACE_LENGTH + "개를 넘어 앞부분만 그린다.";
+    message.textContent = "어셈블 성공 · 실제 실행 명령 " + trace.length + "개" + (traceNote ? " · " + traceNote : "");
+    message.classList.remove("is-error");
+    return true;
+  }
+
+  function resimulate(shouldKeepCycle) {
+    result = PipelineModel.simulate(trace, staticWords, { isForwardingEnabled, branchPolicy });
+    if (shouldKeepCycle) currentCycle = Math.min(currentCycle, result.snapshots.length);
+    else currentCycle = 0;
+    render();
+  }
+
+  /* ---------------- 그리기 ---------------- */
+  function renderView(snapshot) {
+    const stageNames = PipelineModel.STAGE_NAMES;
+    const flushedRows = new Set(snapshot ? snapshot.flushedEntries.map((entry) => entry.rowIndex) : []);
+    stageNames.forEach((stageName) => {
+      const parts = viewParts.stages[stageName];
+      const entry = snapshot ? snapshot.stages[stageName] : null;
+      parts.box.setAttribute("class", "stage-box");
+      parts.instruction.setAttribute("class", "stage-instruction");
+      parts.status.setAttribute("class", "stage-status");
+      parts.status.textContent = "";
+      if (!entry) {
+        parts.instruction.textContent = "—";
+        parts.instruction.classList.add("is-faint");
+        return;
+      }
+      if (entry.isBubble) {
+        parts.box.classList.add("is-bubble");
+        parts.instruction.textContent = "거품 (nop)";
+        parts.instruction.classList.add("is-faint");
+        parts.status.textContent = entry.reason === "stall" ? "멈춤이 넣은 거품" : "폐기된 자리";
+        return;
+      }
+      parts.instruction.textContent = shortText(entry.text);
+      if (!entry.isReal) {
+        parts.box.classList.add("is-wrong-path");
+        parts.status.textContent = "잘못된 경로";
+        parts.status.classList.add("is-bad");
+      }
+      if (stageName === "MEM" && entry.information.isLoad) parts.status.textContent = "메모리 읽기";
+      if (stageName === "MEM" && entry.information.isStore) parts.status.textContent = "메모리 쓰기";
+      if (stageName === "WB" && entry.information.destination) parts.status.textContent = registerName(entry.information.destination) + " 에 기록";
+    });
+    if (!snapshot) {
+      viewParts.forwardMemoryPath.classList.remove("is-active");
+      viewParts.forwardWriteBackPath.classList.remove("is-active");
+      viewParts.writeBackPath.classList.remove("is-active");
+      return;
+    }
+    const executeParts = viewParts.stages.EX;
+    const decodeParts = viewParts.stages.ID;
+    if (snapshot.forwardings.length) {
+      executeParts.status.textContent = "포워딩: " + snapshot.forwardings.map((forwarding) => registerName(forwarding.register) + "←" + forwarding.path).join(", ");
+      executeParts.status.classList.add("is-gold");
+    }
+    if (snapshot.executeRedirect) {
+      executeParts.box.classList.add("is-redirect");
+      const redirect = snapshot.executeRedirect;
+      if (redirect.isRelease) executeParts.status.textContent = "판정 끝 → " + toHexadecimal(redirect.target);
+      else executeParts.status.textContent = (redirect.isTaken ? "성립" : "불성립") + " · 예측 틀림!";
+      executeParts.status.setAttribute("class", "stage-status " + (redirect.isRelease ? "is-gold" : "is-bad"));
+    } else {
+      const correctEvent = snapshot.events.find((event) => event.kind === "branch-correct");
+      if (correctEvent) {
+        executeParts.status.textContent = (correctEvent.isTaken ? "성립" : "불성립") + " · 예측 맞음";
+        executeParts.status.setAttribute("class", "stage-status is-good");
+      }
+    }
+    if (snapshot.dataStall) {
+      decodeParts.box.classList.add("is-stalled");
+      decodeParts.status.textContent = "⏸ 멈춤: " + registerName(snapshot.dataStall.register) + " 기다림";
+      decodeParts.status.setAttribute("class", "stage-status is-warn");
+      viewParts.stages.IF.box.classList.add("is-stalled");
+    } else if (snapshot.decodeRedirect) {
+      decodeParts.box.classList.add("is-redirect");
+      decodeParts.status.textContent = snapshot.decodeRedirect.isPrediction ? "성립 예측 → " + toHexadecimal(snapshot.decodeRedirect.target) : "목적지 " + toHexadecimal(snapshot.decodeRedirect.target);
+      decodeParts.status.setAttribute("class", "stage-status is-gold");
+    } else if (snapshot.events.some((event) => event.kind === "predict-not-taken")) {
+      decodeParts.status.textContent = "불성립으로 예측";
+      decodeParts.status.setAttribute("class", "stage-status is-gold");
+    }
+    ["IF", "ID"].forEach((stageName) => {
+      const entry = snapshot.stages[stageName];
+      if (PipelineModel.isInstruction(entry) && flushedRows.has(entry.rowIndex)) {
+        const parts = viewParts.stages[stageName];
+        parts.box.setAttribute("class", "stage-box is-flushed");
+        parts.status.textContent = "✕ 폐기";
+        parts.status.setAttribute("class", "stage-status is-bad");
+      }
+    });
+    const hasMemoryForward = snapshot.forwardings.some((forwarding) => forwarding.path === "EX/MEM");
+    const hasWriteBackForward = snapshot.forwardings.some((forwarding) => forwarding.path === "MEM/WB");
+    viewParts.forwardMemoryPath.classList.toggle("is-active", hasMemoryForward);
+    viewParts.forwardMemoryPath.classList.toggle("flow-dash", hasMemoryForward);
+    viewParts.forwardWriteBackPath.classList.toggle("is-active", hasWriteBackForward);
+    viewParts.forwardWriteBackPath.classList.toggle("flow-dash", hasWriteBackForward);
+    const writeBackEntry = snapshot.stages.WB;
+    const isWriting = PipelineModel.isInstruction(writeBackEntry) && writeBackEntry.information.destination !== 0;
+    viewParts.writeBackPath.classList.toggle("is-active", isWriting);
+    viewParts.writeBackPath.classList.toggle("flow-dash", isWriting);
+  }
+
+  function describeSnapshot(snapshot) {
+    if (!snapshot) {
+      return "<b>한 사이클 ▶</b>을 눌러 시작하자. 첫 사이클에는 첫 명령이 IF에 들어온다." + (traceNote ? "<br>" + traceNote : "");
+    }
+    const sentences = [];
+    const stages = snapshot.stages;
+    if (snapshot.executeRedirect) {
+      const redirect = snapshot.executeRedirect;
+      if (redirect.isRelease) {
+        sentences.push("EX에서 " + codeText(redirect.entry) + "의 판정이 끝났다(" + (redirect.isTaken ? "성립" : "불성립") + "). 멈춰 있던 가져오기를 다음 사이클 " + toHexadecimal(redirect.target) + "에서 다시 시작한다.");
+      } else {
+        const flushCount = snapshot.flushedEntries.length;
+        sentences.push("EX에서 " + codeText(redirect.entry) + "가 <b>" + (redirect.isTaken ? "성립" : "불성립") + "</b>으로 판정됐다. 앞서 따라간 길이 틀렸으므로 IF·ID의 명령 " + flushCount + "개를 <b>폐기</b>하고 다음 사이클 " + toHexadecimal(redirect.target) + "부터 다시 가져온다.");
+      }
+    }
+    if (snapshot.dataStall) {
+      const stall = snapshot.dataStall;
+      let reason = "포워딩이 꺼져 있어 WB가 레지스터 파일에 쓸 때까지 기다린다";
+      if (isForwardingEnabled) reason = "적재 값은 MEM이 끝나야 나오므로 포워딩으로도 제때 받을 수 없다(적재-사용)";
+      sentences.push("ID의 " + codeText(stages.ID) + "가 " + registerName(stall.register) + "를 읽어야 하는데, " + stall.producerStage + "의 " + codeText(stall.producer) + "가 아직 값을 쓰지 않았다. " + reason + ". → ID·IF를 붙잡고 EX에 <b>거품</b>을 넣는다.");
+    }
+    if (snapshot.decodeRedirect) {
+      const redirect = snapshot.decodeRedirect;
+      const flushText = snapshot.flushedEntries.length ? " IF에 막 들어온 명령 1개는 버린다." : "";
+      if (redirect.isRelease) sentences.push("ID에서 " + codeText(redirect.entry) + "의 목적지 " + toHexadecimal(redirect.target) + "를 계산했다. 다음 사이클부터 가져오기를 재개한다.");
+      else if (redirect.isPrediction) sentences.push("ID의 " + codeText(redirect.entry) + "를 <b>성립</b>으로 예측해 목적지 " + toHexadecimal(redirect.target) + "로 방향을 바꾼다." + flushText);
+      else sentences.push("ID에서 " + codeText(redirect.entry) + "의 목적지 " + toHexadecimal(redirect.target) + "를 계산해 방향을 바꾼다." + flushText);
+    }
+    snapshot.events.forEach((event) => {
+      if (event.kind === "predict-not-taken") sentences.push("ID의 " + codeText(event.entry) + "는 <b>불성립</b>으로 예측되어 그대로 다음 주소를 가져온다.");
+      if (event.kind === "branch-correct") sentences.push("EX 판정: " + codeText(event.entry) + "는 " + (event.isTaken ? "성립" : "불성립") + ", 예측이 맞았다. 손해 없음.");
+    });
+    if (snapshot.forwardings.length) {
+      sentences.push("EX의 " + codeText(stages.EX) + "는 " + snapshot.forwardings.map((forwarding) => registerName(forwarding.register) + " 값을 " + forwarding.path + " 레지스터에서").join(", ") + " 바로 받는다(포워딩).");
+    }
+    if (branchPolicy === "stall" && !stages.IF && !snapshot.executeRedirect) {
+      const isWaiting = ["ID", "EX"].some((stageName) => PipelineModel.isInstruction(stages[stageName]) && stages[stageName].information.isControl);
+      if (isWaiting) sentences.push("분기·점프의 판정을 기다리느라 IF가 쉰다.");
+    }
+    if (!sentences.length) {
+      if (PipelineModel.isInstruction(stages.WB) && stages.WB.isReal) sentences.push("해저드 없이 모든 단계가 앞으로 한 칸씩 나아간다. WB의 " + codeText(stages.WB) + "가 완료된다.");
+      else sentences.push("해저드 없이 모든 단계가 앞으로 한 칸씩 나아간다.");
+    }
+    return "<b>사이클 " + snapshot.cycle + ".</b> " + sentences.join(" ");
+  }
+
+  function renderChart() {
+    const totalCycles = result.totals.cycles;
+    let html = '<table><thead><tr><th class="instruction-name">명령 \\ 사이클</th>';
+    for (let cycle = 1; cycle <= totalCycles; cycle += 1) {
+      html += '<th class="' + (cycle === currentCycle ? "current-cycle" : "") + '">' + cycle + "</th>";
+    }
+    html += "</tr></thead><tbody>";
+    result.rows.forEach((row) => {
+      if (row.fetchCycle > currentCycle) return;
+      html += '<tr class="' + (row.isReal ? "" : "wrong-path") + '"><td class="instruction-name"><span class="address">' + row.pc.toString(16).padStart(4, "0") + "</span>" + row.text + "</td>";
+      for (let cycle = 1; cycle <= totalCycles; cycle += 1) {
+        const columnClass = cycle === currentCycle ? " current-column" : "";
+        const cell = cycle <= currentCycle ? row.cells[cycle] : null;
+        if (cell) {
+          html += '<td class="stage-cell stage-' + cell.stage.toLowerCase() + (cell.isStalled ? " is-stalled" : "") + columnClass + '">' + cell.stage + "</td>";
+        } else if (row.flushedAtCycle !== null && cycle === row.flushedAtCycle + 1 && cycle <= currentCycle) {
+          html += '<td class="stage-cell is-flushed' + columnClass + '">✕</td>';
+        } else {
+          html += '<td class="' + columnClass.trim() + '"></td>';
+        }
+      }
+      html += "</tr>";
+    });
+    html += "</tbody></table>";
+    chart.innerHTML = html;
+    // 지금 사이클 열이 보이도록 가로로 스크롤한다
+    const currentHeader = chart.querySelector("th.current-cycle");
+    const nameHeader = chart.querySelector("th.instruction-name");
+    if (currentHeader && nameHeader) {
+      const visibleLeft = chart.scrollLeft + nameHeader.offsetWidth;
+      const visibleRight = chart.scrollLeft + chart.clientWidth;
+      const columnLeft = currentHeader.offsetLeft;
+      const columnRight = columnLeft + currentHeader.offsetWidth;
+      if (columnRight > visibleRight || columnLeft < visibleLeft) chart.scrollLeft = Math.max(0, columnRight - chart.clientWidth + currentHeader.offsetWidth * 2);
+    }
+    chart.scrollTop = chart.scrollHeight;
+  }
+
+  // "지금까지 / 전체 실행" 꼴로 보여 주어, 한 사이클씩 가면서도 최종 결과와 비교할 수 있게 한다
+  function renderReadout(snapshot) {
+    const totals = result.totals;
+    const soFar = snapshot ? snapshot.totals : { completed: 0, dataStalls: 0, flushed: 0, controlStalls: 0, conditionalBranches: 0, correctPredictions: 0 };
+    document.getElementById("pipeline-cycle").textContent = currentCycle + " / " + totals.cycles;
+    document.getElementById("pipeline-completed").textContent = soFar.completed + " / " + trace.length;
+    document.getElementById("pipeline-cpi").textContent = totals.completed ? (totals.cycles / totals.completed).toFixed(2) : "—";
+    document.getElementById("pipeline-stalls").textContent = soFar.dataStalls + " / " + totals.dataStalls;
+    let controlLoss = soFar.flushed + " / " + totals.flushed;
+    if (branchPolicy === "stall") controlLoss = soFar.controlStalls + " / " + totals.controlStalls;
+    document.getElementById("pipeline-flushes").textContent = controlLoss;
+    let accuracy = "—";
+    if (branchPolicy === "stall") accuracy = "예측 안 함";
+    else if (totals.conditionalBranches) accuracy = totals.correctPredictions + "/" + totals.conditionalBranches + " · " + Math.round((totals.correctPredictions / totals.conditionalBranches) * PERCENT) + "%";
+    document.getElementById("pipeline-accuracy").textContent = accuracy;
+  }
+
+  function render() {
+    const snapshot = currentCycle > 0 ? result.snapshots[currentCycle - 1] : null;
+    renderView(snapshot);
+    description.innerHTML = describeSnapshot(snapshot);
+    renderChart();
+    renderReadout(snapshot);
+  }
+
+  /* ---------------- 조작 ---------------- */
+  function stopPlaying() {
+    if (playTimer) clearInterval(playTimer);
+    playTimer = null;
+    playButton.textContent = "자동 재생";
+  }
+  function stepForward() {
+    if (!result || currentCycle >= result.snapshots.length) { stopPlaying(); return; }
+    currentCycle += 1;
+    render();
+    if (currentCycle >= result.snapshots.length) stopPlaying();
+  }
+  function startFromSource(source) {
+    stopPlaying();
+    if (loadProgram(source)) resimulate(false);
+  }
+
+  book.segmented("pipeline-preset", (value) => {
+    sourceInput.value = PRESET_PROGRAMS[value];
+    startFromSource(sourceInput.value);
+  });
+  book.segmented("pipeline-forwarding", (value) => {
+    isForwardingEnabled = value === "on";
+    if (trace.length || result) resimulate(true);
+  });
+  book.segmented("pipeline-policy", (value) => {
+    branchPolicy = value;
+    if (trace.length || result) resimulate(true);
+  });
+  document.getElementById("pipeline-assemble").addEventListener("click", () => startFromSource(sourceInput.value));
+  document.getElementById("pipeline-step").addEventListener("click", () => { stopPlaying(); stepForward(); });
+  document.getElementById("pipeline-back").addEventListener("click", () => {
+    stopPlaying();
+    if (currentCycle > 0) { currentCycle -= 1; render(); }
+  });
+  playButton.addEventListener("click", () => {
+    if (playTimer) { stopPlaying(); return; }
+    if (currentCycle >= result.snapshots.length) currentCycle = 0;
+    playTimer = setInterval(stepForward, AUTO_PLAY_INTERVAL_MILLISECONDS);
+    playButton.textContent = "멈춤";
+  });
+  document.getElementById("pipeline-end").addEventListener("click", () => {
+    stopPlaying();
+    currentCycle = result.snapshots.length;
+    render();
+  });
+  document.getElementById("pipeline-reset").addEventListener("click", () => {
+    stopPlaying();
+    currentCycle = 0;
+    render();
+  });
+})();
+</script>
+</body>
+</html>

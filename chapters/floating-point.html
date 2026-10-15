@@ -1,0 +1,1414 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>12 F·D·Q·Zfh: 부동소수점 · RISC-V Book</title>
+<meta name="description" content="IEEE 754 위에 얹은 RISC-V 부동소수점: f0–f31과 fcsr, 다섯 반올림 모드, R4 형식의 FMA, 정규 NaN과 플래그, NaN 박싱, D·Q·Zfh·BF16, Zfa, Zfinx를 비트 편집기와 시뮬레이터로 익힌다.">
+<link rel="icon" href="../assets/img/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/style.css">
+<script src="../assets/js/book.js"></script>
+<script src="../assets/js/riscv.js"></script>
+<style>
+  /* Pretendard 의 합자(ligature)가 "0x" 를 "0×" 로 바꿔 16진수가 곱셈처럼 보이지 않게 한다 */
+  .chapter, .chapter svg text { font-variant-ligatures: none; }
+  .float-bits { gap: 3px; }
+  .float-bits .bit { width: 24px; height: 30px; font-size: 13px; }
+  .float-bits.is-wide .bit { width: 17px; height: 26px; font-size: 11.5px; border-radius: 4px; }
+  .float-bits .bit.field-sign { background: var(--violet-soft); }
+  .float-bits .bit.field-exponent { background: var(--accent-2-soft); }
+  .float-bits .bit.field-fraction { background: var(--accent-soft); }
+  .float-bits .bit.field-sign.on { background: var(--violet); color: var(--on-accent); border-color: var(--violet); }
+  .float-bits .bit.field-exponent.on { background: var(--accent-2); color: var(--on-accent); border-color: var(--accent-2); }
+  .float-bits .bit.field-fraction.on { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+  .field-legend { display: flex; flex-wrap: wrap; gap: 8px 16px; justify-content: center; margin-top: 10px; font-size: 13px; color: var(--text-dim); }
+  .field-legend span::before { content: ""; display: inline-block; width: 11px; height: 11px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
+  .field-legend .legend-sign::before { background: var(--violet); }
+  .field-legend .legend-exponent::before { background: var(--accent-2); }
+  .field-legend .legend-fraction::before { background: var(--accent); }
+  #bit-editor-sim .stat .value, #fcsr-sim .stat .value, #nan-boxing-sim .stat .value { font-size: 15px; }
+  /* 좁은 화면에서 세 번째 열이 한 글자 폭으로 찌그러지지 않도록 가로 스크롤을 준다 */
+  .scrolling-table { min-width: 640px; }
+  .preset-row { display: flex; flex-wrap: wrap; gap: 6px; }
+  .preset-row .button { font-size: 13px; padding: 5px 10px; }
+  .float-formula { font-family: var(--mono); font-size: 14px; overflow-x: auto; white-space: nowrap; }
+  .rounding-table td, .rounding-table th { font-size: 13.5px; }
+  .rounding-table td.mode-name { font-family: var(--mono); font-weight: 700; color: var(--accent); }
+  .fcsr-bits .bit { width: 46px; }
+  .fcsr-bits .bit.flag-raised { animation: flag-flash 0.9s ease-out; }
+  @keyframes flag-flash { from { box-shadow: 0 0 0 6px var(--accent-2-soft); } to { box-shadow: 0 0 0 0 transparent; } }
+  .fcsr-labels { display: flex; flex-wrap: wrap; gap: 3px; justify-content: center; font-family: var(--mono); font-size: 11px; color: var(--text-faint); }
+  .fcsr-labels span { width: 46px; text-align: center; }
+  .operation-grid { display: grid; gap: 6px; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); }
+  .operation-grid .button { text-align: left; font-size: 13px; line-height: 1.4; }
+  .operation-grid .button small { display: block; font-family: var(--mono); color: var(--text-faint); font-size: 11.5px; }
+</style>
+</head>
+<body data-chapter="floating-point">
+<main class="chapter">
+  <header class="chapter-hero">
+    <div class="eyebrow">Chapter 12</div>
+    <h1>F·D·Q·Zfh: 부동소수점</h1>
+    <p class="lead">RISC-V의 부동소수점은 새로 발명한 것이 아니다. <strong>IEEE 754-2008 표준을 그대로 따르고</strong>, 그 위에 레지스터 파일 f0–f31, 상태 레지스터 fcsr, 그리고 몇 가지 RISC-V다운 결정을 얹었다. 예외가 생겨도 트랩하지 않고 플래그만 세우며, NaN은 언제나 하나의 정해진 모양(정규 NaN)으로 만들고, 좁은 값을 넓은 레지스터에 넣을 때는 위쪽을 1로 채우는 <strong>NaN 박싱</strong>을 쓴다. 이 장에서는 비트 하나하나를 직접 눌러 보며 F·D·Q·Zfh와 BF16, Zfa, Zfinx까지 정리한다.</p>
+    <ul class="objectives">
+      <li>binary16·bfloat16·binary32·binary64·binary128의 부호·지수·가수 배치를 읽고 값과 FCLASS 분류를 계산한다.</li>
+      <li>f0–f31, FLEN, fcsr(frm 7:5, fflags 4:0)과 CSR 주소 0x001–0x003을 안다.</li>
+      <li>RNE·RTZ·RDN·RUP·RMM 다섯 반올림 모드와 rm = 111(DYN)의 뜻을 구별한다.</li>
+      <li>R4 형식의 FMA 네 명령, 부호 주입, 비교, 변환, FCLASS 명령을 정리한다.</li>
+      <li>NV·DZ·OF·UF·NX 플래그가 언제 서는지, 정규 NaN 0x7fc00000이 무엇인지 안다.</li>
+      <li>NaN 박싱 규칙과, 박싱이 깨진 값을 읽을 때 무슨 일이 일어나는지 설명한다.</li>
+      <li>Zfh/Zfhmin, BF16(Zfbfmin·Zvfbfmin·Zvfbfwma), Zfa, Zfinx/Zdinx/Zhinx의 역할을 비교한다.</li>
+    </ul>
+    <div class="spec-meta">
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/unpriv/f-st-ext.html" target="_blank" rel="noopener">F v2.2</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/unpriv/d-st-ext.html" target="_blank" rel="noopener">D v2.2</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/unpriv/q-st-ext.html" target="_blank" rel="noopener">Q v2.2</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/unpriv/zfh.html" target="_blank" rel="noopener">Zfh v1.0</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/unpriv/bfloat16.html" target="_blank" rel="noopener">BF16 v1.0</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/unpriv/zfa.html" target="_blank" rel="noopener">Zfa v1.0</a>
+      <a class="spec-link" href="https://docs.riscv.org/reference/isa/v20260120/unpriv/zfinx.html" target="_blank" rel="noopener">Zfinx v1.0</a>
+    </div>
+  </header>
+
+  <!-- ============================================================ -->
+  <section id="ieee754">
+    <h2>IEEE 754 형식: 부호, 지수, 가수</h2>
+    <p>IEEE 754 이진 부동소수점 수는 세 부분으로 이루어진다. <b>부호</b> 1비트, 치우침(bias)을 더해 저장하는 <b>지수</b>, 그리고 맨 앞의 1을 생략하고 저장하는 <b>가수</b>(fraction)다. 정규수의 값은 <code>(−1)^s × 1.f × 2^(E − bias)</code>다. 지수 비트가 모두 0이면 0 또는 <span class="term">비정규수</span><span class="english">(subnormal)</span>, 모두 1이면 무한대 또는 NaN이다. RISC-V의 다섯 가지 형식은 이 틀의 폭만 다르다.</p>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 320" role="img" aria-label="RISC-V가 쓰는 다섯 부동소수점 형식의 비트 배치">
+        <g class="t-faint" font-size="11"><text x="140" y="18">부호</text><text x="200" y="18">지수 (bias = 2^(e−1) − 1)</text><text x="440" y="18">가수 (맨 앞 1은 생략)</text></g>
+        <!-- binary16: 1,5,10 -->
+        <text x="20" y="48" class="t t-bold">binary16</text><text x="20" y="64" class="t-faint">Zfh · Zfhmin</text>
+        <rect x="140" y="34" width="16" height="34" class="f-violet-soft"/><rect x="156" y="34" width="27" height="34" class="f-gold-soft"/><rect x="183" y="34" width="54" height="34" class="f-accent-soft"/>
+        <text x="169" y="56" text-anchor="middle" class="t-mono" style="font-size:12px">5</text><text x="210" y="56" text-anchor="middle" class="t-mono" style="font-size:12px">10</text>
+        <text x="250" y="56" class="t-dim">16비트 · 유효 11비트 · 최댓값 65504</text>
+        <!-- bfloat16: 1,8,7 -->
+        <text x="20" y="104" class="t t-bold">bfloat16</text><text x="20" y="120" class="t-faint">Zfbfmin (BF16)</text>
+        <rect x="140" y="90" width="16" height="34" class="f-violet-soft"/><rect x="156" y="90" width="43" height="34" class="f-gold-soft"/><rect x="199" y="90" width="38" height="34" class="f-accent-soft"/>
+        <text x="177" y="112" text-anchor="middle" class="t-mono" style="font-size:12px">8</text><text x="218" y="112" text-anchor="middle" class="t-mono" style="font-size:12px">7</text>
+        <text x="250" y="112" class="t-dim">16비트 · 유효 8비트 · 지수 범위는 binary32와 같음</text>
+        <!-- binary32: 1,8,23 -->
+        <text x="20" y="160" class="t t-bold">binary32</text><text x="20" y="176" class="t-faint">F (단정도)</text>
+        <rect x="140" y="146" width="16" height="34" class="f-violet-soft"/><rect x="156" y="146" width="43" height="34" class="f-gold-soft"/><rect x="199" y="146" width="124" height="34" class="f-accent-soft"/>
+        <text x="177" y="168" text-anchor="middle" class="t-mono" style="font-size:12px">8</text><text x="261" y="168" text-anchor="middle" class="t-mono" style="font-size:12px">23</text>
+        <text x="336" y="168" class="t-dim">32비트 · 유효 24비트 · bias 127</text>
+        <!-- binary64: 1,11,52 -->
+        <text x="20" y="216" class="t t-bold">binary64</text><text x="20" y="232" class="t-faint">D (배정도)</text>
+        <rect x="140" y="202" width="16" height="34" class="f-violet-soft"/><rect x="156" y="202" width="59" height="34" class="f-gold-soft"/><rect x="215" y="202" width="281" height="34" class="f-accent-soft"/>
+        <text x="185" y="224" text-anchor="middle" class="t-mono" style="font-size:12px">11</text><text x="355" y="224" text-anchor="middle" class="t-mono" style="font-size:12px">52</text>
+        <text x="508" y="224" class="t-dim">64비트 · 유효 53비트 · bias 1023</text>
+        <!-- binary128: 1,15,112 -->
+        <text x="20" y="272" class="t t-bold">binary128</text><text x="20" y="288" class="t-faint">Q (4배 정도)</text>
+        <rect x="140" y="258" width="16" height="34" class="f-violet-soft"/><rect x="156" y="258" width="81" height="34" class="f-gold-soft"/><rect x="237" y="258" width="605" height="34" class="f-accent-soft"/>
+        <text x="196" y="280" text-anchor="middle" class="t-mono" style="font-size:12px">15</text><text x="539" y="280" text-anchor="middle" class="t-mono" style="font-size:12px">112 · 유효 113비트 · bias 16383</text>
+        <text x="430" y="314" text-anchor="middle" class="t-faint">가로 길이는 비트 수에 비례 (부호 칸만 보기 쉽게 넓혔다)</text>
+      </svg></div>
+      <figcaption><b>그림 12-1.</b> RISC-V 부동소수점 형식. 명령어의 2비트 <b>fmt</b> 필드는 S = 00, D = 01, H = 10, Q = 11로 형식을 고른다. bfloat16은 binary32의 위쪽 16비트를 잘라 낸 모양이라 지수 범위는 같고 정밀도만 낮다.</figcaption>
+    </figure>
+
+    <div class="sim" id="bit-editor-sim">
+      <div class="sim-head"><span class="sim-tag">SIMULATOR</span><h3>IEEE 754 비트 편집기</h3></div>
+      <div class="sim-pad">
+        <div class="bit-row float-bits" id="bit-editor-bits" aria-label="비트를 눌러 0과 1을 바꾼다"></div>
+        <div class="field-legend"><span class="legend-sign">부호</span><span class="legend-exponent">지수</span><span class="legend-fraction">가수</span></div>
+      </div>
+      <div class="step-description"><div class="float-formula" id="bit-editor-formula"></div></div>
+      <div class="sim-controls">
+        <div class="control"><span>형식</span>
+          <div class="segmented" id="bit-editor-format">
+            <button data-value="binary16">binary16</button><button data-value="bfloat16">bfloat16</button><button data-value="binary32" class="on">binary32</button><button data-value="binary64">binary64</button>
+          </div>
+        </div>
+        <div class="control"><span>10진수 입력 (RNE로 반올림)</span>
+          <div class="button-row"><input type="text" id="bit-editor-input" value="0.1" spellcheck="false" style="width:150px"><button class="button" id="bit-editor-apply">적용</button></div>
+        </div>
+        <div class="control wide"><span>미리 정한 값</span>
+          <div class="preset-row" id="bit-editor-presets"></div>
+        </div>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">비트 (16진수)</span><span class="value" id="bit-editor-hex">—</span></div>
+        <div class="stat"><span class="key">값</span><span class="value" id="bit-editor-value">—</span></div>
+        <div class="stat"><span class="key">FCLASS 결과</span><span class="value" id="bit-editor-class">—</span></div>
+        <div class="stat"><span class="key">지수</span><span class="value" id="bit-editor-exponent">—</span></div>
+      </div>
+      <div class="sim-note">“0.1”을 binary32와 binary16에서 비교해 보자. 0.1은 2진수로 정확히 쓸 수 없어서 형식마다 가장 가까운 값이 다르다. “가장 작은 비정규수”에서 지수 비트를 하나 켜면 정규수가 되고, “정규 NaN”의 가수 최상위 비트를 끄면(다른 비트 하나는 켜 둔 채) 신호 NaN으로 바뀌어 FCLASS 비트가 9에서 8로 옮겨 간다.</div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="registers">
+    <h2>f 레지스터와 fcsr</h2>
+    <p>F 확장은 32개의 부동소수점 레지스터 <b>f0–f31</b>을 더한다. 정수 레지스터와 달리 <b>f0도 평범한 레지스터</b>다(늘 0이 아니다). 레지스터 폭을 <b>FLEN</b>이라 부르는데, F만 있으면 32, D가 있으면 64, Q가 있으면 128이다. 정수와 부동소수점 레지스터를 따로 둔 이유를 규격은 이렇게 설명한다. 같은 명령 폭으로 더 많은 레지스터를 쓸 수 있고, 슈퍼스칼라에서 레지스터 포트를 나눠 달기 쉽고, 부동소수점 유닛을 분리해 설계하거나 내부 재부호화(recoding)를 쓰기 쉽다. F 확장은 CSR 접근을 위해 Zicsr에 의존한다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 270" role="img" aria-label="fcsr 레지스터의 비트 배치와 세 CSR 주소">
+        <g class="t-faint" font-size="11"><text x="40" y="34">31</text><text x="430" y="34" text-anchor="end">8</text><text x="440" y="34">7</text><text x="566" y="34" text-anchor="end">5</text><text x="576" y="34">4</text><text x="628" y="34">3</text><text x="680" y="34">2</text><text x="732" y="34">1</text><text x="784" y="34">0</text></g>
+        <rect x="36" y="42" width="400" height="56" class="f-surface"/><text x="236" y="66" text-anchor="middle" class="t t-bold">예약 (다른 확장용)</text><text x="236" y="86" text-anchor="middle" class="t-faint">없으면 쓰기 무시, 읽으면 0</text>
+        <rect x="436" y="42" width="134" height="56" class="f-violet-soft"/><text x="503" y="66" text-anchor="middle" class="t t-bold">frm</text><text x="503" y="86" text-anchor="middle" class="t-faint">동적 반올림 모드</text>
+        <rect x="570" y="42" width="52" height="56" class="f-gold-soft"/><text x="596" y="75" text-anchor="middle" class="t t-bold">NV</text>
+        <rect x="622" y="42" width="52" height="56" class="f-gold-soft"/><text x="648" y="75" text-anchor="middle" class="t t-bold">DZ</text>
+        <rect x="674" y="42" width="52" height="56" class="f-gold-soft"/><text x="700" y="75" text-anchor="middle" class="t t-bold">OF</text>
+        <rect x="726" y="42" width="52" height="56" class="f-gold-soft"/><text x="752" y="75" text-anchor="middle" class="t t-bold">UF</text>
+        <rect x="778" y="42" width="52" height="56" class="f-gold-soft"/><text x="804" y="75" text-anchor="middle" class="t t-bold">NX</text>
+        <!-- 괄호 -->
+        <path d="M570 108 V118 H830 V108" class="s-gold"/><text x="700" y="136" text-anchor="middle" class="t-gold">fflags · CSR 0x001</text>
+        <text x="700" y="154" text-anchor="middle" class="t-faint">frflags / fsflags</text>
+        <path d="M436 108 V118 H568 V108" class="s-accent"/><text x="503" y="136" text-anchor="middle" class="t-accent">frm · CSR 0x002</text>
+        <text x="503" y="154" text-anchor="middle" class="t-faint">frrm / fsrm</text>
+        <path d="M436 176 V186 H830 V176" class="s-line"/><text x="633" y="206" text-anchor="middle" class="t t-bold">fcsr · CSR 0x003 = frm + fflags</text>
+        <text x="633" y="224" text-anchor="middle" class="t-faint">frcsr / fscsr</text>
+        <text x="36" y="132" class="t-dim">NV 잘못된 연산 (Invalid)</text>
+        <text x="36" y="152" class="t-dim">DZ 0으로 나누기 (Divide by Zero)</text>
+        <text x="36" y="172" class="t-dim">OF 넘침 (Overflow)</text>
+        <text x="36" y="192" class="t-dim">UF 아래 넘침 (Underflow)</text>
+        <text x="36" y="212" class="t-dim">NX 부정확 (Inexact)</text>
+        <text x="430" y="258" text-anchor="middle" class="t-faint">플래그는 “쌓이기만” 한다(sticky). 소프트웨어가 지울 때까지 1로 남는다.</text>
+      </svg></div>
+      <figcaption><b>그림 12-2.</b> fcsr은 32비트 읽기/쓰기 CSR이다. 같은 비트를 세 개의 CSR 주소로 나눠 접근할 수 있어서, 플래그만(0x001) 또는 반올림 모드만(0x002) 바꾸는 코드가 짧아진다. 괄호 아래는 어셈블러 의사 명령이다.</figcaption>
+    </figure>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>CSR</th><th>주소</th><th>내용</th><th>의사 명령</th></tr></thead>
+      <tbody>
+        <tr><td><code>fflags</code></td><td><code>0x001</code></td><td>누적 예외 플래그 (fcsr[4:0])</td><td><code>frflags rd</code> / <code>fsflags rd, rs1</code></td></tr>
+        <tr><td><code>frm</code></td><td><code>0x002</code></td><td>동적 반올림 모드 (fcsr[7:5])</td><td><code>frrm rd</code> / <code>fsrm rd, rs1</code></td></tr>
+        <tr><td><code>fcsr</code></td><td><code>0x003</code></td><td>frm + fflags</td><td><code>frcsr rd</code> / <code>fscsr rd, rs1</code></td></tr>
+      </tbody>
+    </table></div>
+    <div class="callout tip"><strong>운영체제는 f 레지스터를 언제 저장할까</strong><p>f 레지스터 32개와 fcsr은 문맥 교환 때 저장해야 할 상태가 꽤 크다. 특권 규격의 <code>mstatus.FS</code> 필드가 부동소수점 상태가 Off·Initial·Clean·Dirty 중 무엇인지 추적해, 쓰지 않은 프로세스의 f 레지스터 저장을 건너뛸 수 있게 한다(<a href="privilege.html">17장</a>).</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="rounding">
+    <h2>다섯 반올림 모드</h2>
+    <p>정확한 결과가 표현 가능한 두 값 사이에 떨어지면 하나를 골라야 한다. 반올림을 하는 명령에는 3비트 <b>rm</b> 필드가 있어서 명령마다 정적으로 모드를 정할 수 있고, rm = 111(DYN)이면 fcsr의 <b>frm</b>에 든 동적 모드를 쓴다.</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>rm</th><th>이름</th><th>뜻</th></tr></thead>
+      <tbody>
+        <tr><td><code>000</code></td><td><b>RNE</b></td><td>가장 가까운 값, 정확히 중간이면 짝수(가수 최하위 비트 0) 쪽 — IEEE 기본값</td></tr>
+        <tr><td><code>001</code></td><td><b>RTZ</b></td><td>0 쪽으로 (버림)</td></tr>
+        <tr><td><code>010</code></td><td><b>RDN</b></td><td>−∞ 쪽으로 (내림)</td></tr>
+        <tr><td><code>011</code></td><td><b>RUP</b></td><td>+∞ 쪽으로 (올림)</td></tr>
+        <tr><td><code>100</code></td><td><b>RMM</b></td><td>가장 가까운 값, 정확히 중간이면 크기가 큰 쪽</td></tr>
+        <tr><td><code>101</code>, <code>110</code></td><td>—</td><td>예약</td></tr>
+        <tr><td><code>111</code></td><td><b>DYN</b></td><td>명령의 rm에서는 “frm을 써라”. frm 레지스터에 이 값을 넣는 것은 예약</td></tr>
+      </tbody>
+    </table></div>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 300" role="img" aria-label="세 가지 경우에 다섯 반올림 모드가 고르는 값">
+        <defs><marker id="rounding-figure-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--text-faint)"/></marker></defs>
+        <!-- (a) 양수 -->
+        <g transform="translate(0,10)">
+          <text x="20" y="40" class="t t-bold">(a) 양수</text><text x="20" y="58" class="t-faint">아래 쪽에 가까움</text>
+          <line x1="180" y1="50" x2="760" y2="50" class="s-line"/>
+          <circle cx="240" cy="50" r="7" class="f-accent"/><circle cx="700" cy="50" r="7" class="f-accent"/>
+          <line x1="470" y1="38" x2="470" y2="62" class="s-line s-dashed"/>
+          <path d="M378 30 L378 70" stroke="var(--accent-2)" stroke-width="3"/><text x="378" y="22" text-anchor="middle" class="t-gold" style="font-size:13px">x</text>
+          <text x="240" y="84" text-anchor="middle" class="t-mono" style="font-size:12px">RNE RTZ RDN RMM</text>
+          <text x="700" y="84" text-anchor="middle" class="t-mono" style="font-size:12px">RUP</text>
+        </g>
+        <!-- (b) 음수 -->
+        <g transform="translate(0,105)">
+          <text x="20" y="40" class="t t-bold">(b) 음수</text><text x="20" y="58" class="t-faint">0 쪽(오른쪽)에 가까움</text>
+          <line x1="180" y1="50" x2="760" y2="50" class="s-line"/>
+          <circle cx="240" cy="50" r="7" class="f-accent"/><circle cx="700" cy="50" r="7" class="f-accent"/>
+          <line x1="470" y1="38" x2="470" y2="62" class="s-line s-dashed"/>
+          <path d="M562 30 L562 70" stroke="var(--accent-2)" stroke-width="3"/><text x="562" y="22" text-anchor="middle" class="t-gold" style="font-size:13px">x</text>
+          <text x="240" y="84" text-anchor="middle" class="t-mono" style="font-size:12px">RDN</text>
+          <text x="700" y="84" text-anchor="middle" class="t-mono" style="font-size:12px">RNE RTZ RUP RMM</text>
+          <path d="M770 50 H820" class="s-line" marker-end="url(#rounding-figure-arrow)"/><text x="826" y="54" class="t-faint">0</text>
+        </g>
+        <!-- (c) 정확히 중간 -->
+        <g transform="translate(0,200)">
+          <text x="20" y="40" class="t t-bold">(c) 정확히 중간</text><text x="20" y="58" class="t-faint">양수, 왼쪽이 짝수</text>
+          <line x1="180" y1="50" x2="760" y2="50" class="s-line"/>
+          <circle cx="240" cy="50" r="7" class="f-accent"/><circle cx="700" cy="50" r="7" class="f-accent"/>
+          <text x="240" y="30" text-anchor="middle" class="t-faint">…0 (짝수)</text><text x="700" y="30" text-anchor="middle" class="t-faint">…1 (홀수)</text>
+          <path d="M470 34 L470 66" stroke="var(--accent-2)" stroke-width="3" class="pulse"/><text x="470" y="22" text-anchor="middle" class="t-gold" style="font-size:13px">x</text>
+          <text x="240" y="84" text-anchor="middle" class="t-mono" style="font-size:12px">RNE RTZ RDN</text>
+          <text x="700" y="84" text-anchor="middle" class="t-mono" style="font-size:12px">RUP RMM</text>
+        </g>
+      </svg></div>
+      <figcaption><b>그림 12-3.</b> 파란 점은 이웃한 두 표현 가능한 값, 금색 선은 정확한 결과 x, 가운데 점선은 중간점이다. RDN·RUP는 부호에 따라 “크기”를 줄이기도 늘리기도 한다. RNE와 RMM은 중간이 아닐 때는 같고, 정확히 중간일 때만 갈린다.</figcaption>
+    </figure>
+
+    <div class="sim" id="rounding-sim">
+      <div class="sim-head"><span class="sim-tag">SIMULATOR</span><h3>반올림 모드 시각화 (binary32)</h3></div>
+      <div class="sim-view"><canvas id="rounding-canvas" aria-label="입력 값과 이웃한 두 binary32 값, 각 반올림 모드의 선택을 보여 주는 수직선"></canvas></div>
+      <div class="sim-pad" style="padding-top:8px"><div class="table-wrap" style="margin:0"><table class="rounding-table compact" id="rounding-table"></table></div></div>
+      <div class="step-description" id="rounding-description"></div>
+      <div class="sim-controls">
+        <div class="control"><span>10진수 값</span>
+          <div class="button-row"><input type="text" id="rounding-input" value="0.1" spellcheck="false" style="width:170px"><button class="button primary" id="rounding-apply">계산</button></div>
+        </div>
+        <div class="control wide"><span>예제</span>
+          <div class="preset-row">
+            <button class="button" data-rounding-preset="0.1">0.1</button>
+            <button class="button" data-rounding-preset="-0.1">−0.1</button>
+            <button class="button" data-rounding-preset="16777217">16777217 (중간)</button>
+            <button class="button" data-rounding-preset="16777219">16777219 (중간)</button>
+            <button class="button" data-rounding-preset="2.5">2.5 (정확)</button>
+            <button class="button" data-rounding-preset="1e-45">1e-45 (비정규)</button>
+            <button class="button" data-rounding-preset="3.5e38">3.5e38 (넘침)</button>
+          </div>
+        </div>
+      </div>
+      <div class="sim-note">16777217(= 2^24 + 1)은 binary32의 두 이웃 16777216과 16777218의 정확히 가운데다. RNE는 가수가 짝수인 16777216을, RMM은 크기가 큰 16777218을 고른다. 16777219에서는 짝수 쪽이 위(16777220)라서 RNE도 올라간다. 3.5e38에서는 RTZ가 무한대 대신 가장 큰 유한값을 고르는 것도 확인하자.</div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="instructions">
+    <h2>명령어 한눈에 보기</h2>
+    <p>F 확장의 명령은 정수 쪽과 거의 같은 형식을 쓴다. load/store는 I형·S형과 같은 “기준 + 12비트 오프셋” 주소 방식이고, 연산은 OP-FP 주 opcode(<code>1010011</code>)의 R형이다. 예외는 세 피연산자를 읽는 FMA로, 이를 위해 <b>R4 형식</b>이 새로 만들어졌다.</p>
+    <div class="table-wrap"><table class="compact scrolling-table">
+      <thead><tr><th>무리</th><th>명령 (.S 기준, .D/.Q/.H 도 같은 꼴)</th><th>요점</th></tr></thead>
+      <tbody>
+        <tr><td>load/store</td><td><code>flw</code> · <code>fsw</code> (LOAD-FP <code>0000111</code> / STORE-FP <code>0100111</code>)</td><td>비트를 바꾸지 않는다(비정규 NaN 페이로드도 보존). width: H 001, W 010, D 011, Q 100</td></tr>
+        <tr><td>산술</td><td><code>fadd</code> · <code>fsub</code> · <code>fmul</code> · <code>fdiv</code> · <code>fsqrt</code></td><td>rm 필드로 반올림</td></tr>
+        <tr><td>융합 곱셈-덧셈</td><td><code>fmadd</code> · <code>fmsub</code> · <code>fnmsub</code> · <code>fnmadd</code></td><td>R4 형식, rs3, 반올림 1번</td></tr>
+        <tr><td>최소/최대</td><td><code>fmin</code> · <code>fmax</code></td><td>−0 &lt; +0. NaN 하나면 다른 쪽, 둘 다 NaN이면 정규 NaN</td></tr>
+        <tr><td>부호 주입</td><td><code>fsgnj</code> · <code>fsgnjn</code> · <code>fsgnjx</code></td><td>의사 명령 <code>fmv.s</code> · <code>fneg.s</code> · <code>fabs.s</code>. 플래그 없음, NaN 정규화 없음</td></tr>
+        <tr><td>비교</td><td><code>feq</code> · <code>flt</code> · <code>fle</code></td><td>결과는 <b>정수</b> 레지스터에 0/1. flt/fle는 NaN이면 NV, feq는 sNaN일 때만 NV</td></tr>
+        <tr><td>변환</td><td><code>fcvt.w.s</code> · <code>fcvt.wu.s</code> · <code>fcvt.s.w</code> · <code>fcvt.s.wu</code> (RV64: <code>.l</code>/<code>.lu</code>)</td><td>범위 밖이면 가장 가까운 값으로 자르고 NV</td></tr>
+        <tr><td>비트 이동</td><td><code>fmv.x.w</code> · <code>fmv.w.x</code></td><td>해석 없이 32비트 그대로. 옛 이름 fmv.x.s / fmv.s.x</td></tr>
+        <tr><td>분류</td><td><code>fclass.s</code></td><td>정수 rd에 10비트 마스크, 정확히 한 비트만 1</td></tr>
+      </tbody>
+    </table></div>
+
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 330" role="img" aria-label="R4 형식과 융합 곱셈-덧셈 데이터 경로">
+        <defs>
+          <path id="fma-path-product" d="M190 200 H300"/>
+          <path id="fma-path-addend" d="M190 280 H420 V236"/>
+          <path id="fma-path-sum" d="M470 200 H560"/>
+          <path id="fma-path-result" d="M690 200 H780"/>
+          <marker id="fma-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--text-faint)"/></marker>
+        </defs>
+        <!-- R4 형식 -->
+        <g class="t-faint" font-size="11"><text x="30" y="22">31</text><text x="118" y="22" text-anchor="end">27</text><text x="128" y="22">26</text><text x="170" y="22" text-anchor="end">25</text><text x="180" y="22">24</text><text x="286" y="22" text-anchor="end">20</text><text x="296" y="22">19</text><text x="402" y="22" text-anchor="end">15</text><text x="412" y="22">14</text><text x="476" y="22" text-anchor="end">12</text><text x="486" y="22">11</text><text x="592" y="22" text-anchor="end">7</text><text x="602" y="22">6</text><text x="720" y="22" text-anchor="end">0</text></g>
+        <rect x="26" y="28" width="96" height="44" class="f-violet-soft"/><text x="74" y="55" text-anchor="middle" class="t t-bold">rs3</text>
+        <rect x="122" y="28" width="52" height="44" class="f-surface"/><text x="148" y="55" text-anchor="middle" class="t t-bold">fmt</text>
+        <rect x="174" y="28" width="116" height="44" class="f-teal-soft"/><text x="232" y="55" text-anchor="middle" class="t t-bold">rs2</text>
+        <rect x="290" y="28" width="116" height="44" class="f-teal-soft"/><text x="348" y="55" text-anchor="middle" class="t t-bold">rs1</text>
+        <rect x="406" y="28" width="74" height="44" class="f-gold-soft"/><text x="443" y="55" text-anchor="middle" class="t t-bold">rm</text>
+        <rect x="480" y="28" width="116" height="44" class="f-teal-soft"/><text x="538" y="55" text-anchor="middle" class="t t-bold">rd</text>
+        <rect x="596" y="28" width="128" height="44" class="f-accent-soft"/><text x="660" y="55" text-anchor="middle" class="t t-bold">opcode</text>
+        <text x="736" y="40" class="t-mono" style="font-size:11.5px">1000011 FMADD</text>
+        <text x="736" y="56" class="t-mono" style="font-size:11.5px">1000111 FMSUB</text>
+        <text x="736" y="72" class="t-mono" style="font-size:11.5px">1001011 FNMSUB</text>
+        <text x="736" y="88" class="t-mono" style="font-size:11.5px">1001111 FNMADD</text>
+        <text x="26" y="104" class="t-dim">R4 형식은 rs3 자리를 만들려고 funct7을 rs3 + fmt로 나눴다. FMA 네 개가 주 opcode 네 개를 통째로 쓴다.</text>
+        <!-- 데이터 경로 -->
+        <rect x="40" y="176" width="150" height="48" rx="10" class="f-teal-soft"/><text x="115" y="205" text-anchor="middle" class="t-mono">rs1 × rs2</text>
+        <rect x="40" y="258" width="150" height="44" rx="10" class="f-violet-soft"/><text x="115" y="285" text-anchor="middle" class="t-mono">rs3</text>
+        <rect x="300" y="166" width="170" height="70" rx="12" class="f-elev"/><text x="385" y="192" text-anchor="middle" class="t t-bold">정확한 곱 + rs3</text><text x="385" y="214" text-anchor="middle" class="t-faint">곱셈 결과는 반올림 안 함</text>
+        <rect x="560" y="170" width="130" height="62" rx="12" class="f-gold-soft"/><text x="625" y="196" text-anchor="middle" class="t t-bold">반올림 1번</text><text x="625" y="216" text-anchor="middle" class="t-faint">rm / frm</text>
+        <rect x="780" y="176" width="64" height="48" rx="10" class="f-accent-soft"/><text x="812" y="205" text-anchor="middle" class="t-mono">rd</text>
+        <use href="#fma-path-product" class="s-line flow-dash" marker-end="url(#fma-arrow)"/>
+        <use href="#fma-path-addend" class="s-line flow-dash" marker-end="url(#fma-arrow)"/>
+        <use href="#fma-path-sum" class="s-line flow-dash" marker-end="url(#fma-arrow)"/>
+        <use href="#fma-path-result" class="s-line flow-dash" marker-end="url(#fma-arrow)"/>
+        <circle r="6" fill="var(--teal)"><animateMotion dur="2.6s" begin="-0.3s" repeatCount="indefinite"><mpath href="#fma-path-product"/></animateMotion></circle>
+        <circle r="6" fill="var(--violet)"><animateMotion dur="2.6s" begin="-0.3s" repeatCount="indefinite"><mpath href="#fma-path-addend"/></animateMotion></circle>
+        <circle r="6" fill="var(--accent-2)"><animateMotion dur="2.6s" begin="-1.3s" repeatCount="indefinite"><mpath href="#fma-path-sum"/></animateMotion></circle>
+        <circle r="6" fill="var(--accent)"><animateMotion dur="2.6s" begin="-2.0s" repeatCount="indefinite"><mpath href="#fma-path-result"/></animateMotion></circle>
+        <text x="430" y="320" text-anchor="middle" class="t-dim">fmadd = (rs1×rs2)+rs3 · fmsub = (rs1×rs2)−rs3 · fnmsub = −(rs1×rs2)+rs3 · fnmadd = −(rs1×rs2)−rs3</text>
+      </svg></div>
+      <figcaption><b>그림 12-4.</b> R4 형식과 융합 곱셈-덧셈(FMA). 곱과 합을 따로 반올림하면 오차가 두 번 생기지만, FMA는 정확한 곱에 rs3를 더한 뒤 <b>한 번만</b> 반올림한다. 이름이 헷갈리는 FNMSUB·FNMADD는 MIPS-IV에서 물려받은 것으로, RISC-V는 합이 아니라 <b>곱</b>의 부호를 바꾼다(x86·Arm의 FMA와 같은 동작).</figcaption>
+    </figure>
+
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>FCLASS rd 비트</th><th>뜻</th><th>비트</th><th>뜻</th></tr></thead>
+      <tbody>
+        <tr><td>0</td><td>−∞</td><td>5</td><td>양의 비정규수</td></tr>
+        <tr><td>1</td><td>음의 정규수</td><td>6</td><td>양의 정규수</td></tr>
+        <tr><td>2</td><td>음의 비정규수</td><td>7</td><td>+∞</td></tr>
+        <tr><td>3</td><td>−0</td><td>8</td><td>신호 NaN (sNaN)</td></tr>
+        <tr><td>4</td><td>+0</td><td>9</td><td>조용한 NaN (qNaN)</td></tr>
+      </tbody>
+    </table></div>
+    <div class="callout deep"><strong>왜 f 레지스터에서 정수 레지스터로 바로 쓰는가</strong><p>비교(<code>feq/flt/fle</code>), 분류(<code>fclass</code>), 정수 변환(<code>fcvt.w.s</code>)은 결과를 곧장 <b>정수 레지스터</b>에 쓴다. 규격은 이것을 의도된 설계로 설명한다. 구현이 f 레지스터 안에서 값을 내부 형식으로 재부호화해 둘 수 있게 하려고 f 레지스터에 정수를 두지 않으며, 덕분에 레지스터 사이 이동 명령도 줄어든다. 플래그 대신 정수 비교 결과를 써서 분기하는 것도 같은 철학이다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="exceptions">
+    <h2>예외는 트랩이 아니라 플래그로, NaN은 정규 NaN으로</h2>
+    <p>IEEE 754는 예외 상황(0으로 나누기 등)에서 트랩할지 기본값을 돌려줄지를 구현에 맡긴다. RISC-V는 <b>트랩하지 않는다</b>. 표준이 정한 기본 결과(무한대, NaN 등)를 돌려주고 fflags의 해당 비트만 세운다. 플래그를 직접 보고 분기하는 명령도 일부러 넣지 않았다. 필요하면 소프트웨어가 <code>frflags</code>로 읽어 확인한다.</p>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>플래그</th><th>서는 경우 (예)</th></tr></thead>
+      <tbody>
+        <tr><td><b>NV</b></td><td>0/0, ∞−∞, √(음수), sNaN 입력, 정수 변환 범위 밖·NaN, flt/fle에 NaN, ∞×0 (FMA에서는 덧셈항이 qNaN이어도)</td></tr>
+        <tr><td><b>DZ</b></td><td>유한한 0 아닌 수 ÷ 0 → ±∞</td></tr>
+        <tr><td><b>OF</b></td><td>반올림한 결과의 크기가 가장 큰 유한값을 넘음 (항상 NX도 함께)</td></tr>
+        <tr><td><b>UF</b></td><td>결과가 아주 작고(tiny) 부정확함. RISC-V는 tininess를 <b>반올림 뒤</b>에 판단</td></tr>
+        <tr><td><b>NX</b></td><td>반올림한 결과가 정확한 값과 다름</td></tr>
+      </tbody>
+    </table></div>
+    <div class="callout spec"><strong>규격 원문에서</strong>
+      <blockquote>“Except when otherwise stated, if the result of a floating-point operation is NaN, it is the canonical NaN. The canonical NaN has a positive sign and all significand bits clear except the MSB, a.k.a. the quiet bit. For single-precision floating-point, this corresponds to the pattern 0x7fc00000.”</blockquote>
+      <p><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/f-st-ext.html" target="_blank" rel="noopener">"F" Extension, NaN Generation and Propagation</a> — 표준이 권장하는 NaN 페이로드 전파는 하드웨어 비용 때문에 하지 않는다. 표준에서도 선택 사항이라 이식성 있는 코드가 기댈 수 없기 때문이다.</p></div>
+    <p>정수 변환이 범위를 벗어나면 결과는 가장 가까운 표현 가능한 정수로 잘리고 NV가 선다. NaN은 “가장 큰 양수”로 간다는 점이 특이하다.</p>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th></th><th>FCVT.W.S</th><th>FCVT.WU.S</th><th>FCVT.L.S</th><th>FCVT.LU.S</th></tr></thead>
+      <tbody>
+        <tr><td>유효 입력 최소 (반올림 후)</td><td>−2<sup>31</sup></td><td>0</td><td>−2<sup>63</sup></td><td>0</td></tr>
+        <tr><td>유효 입력 최대 (반올림 후)</td><td>2<sup>31</sup>−1</td><td>2<sup>32</sup>−1</td><td>2<sup>63</sup>−1</td><td>2<sup>64</sup>−1</td></tr>
+        <tr><td>범위 밖 음수, −∞</td><td>−2<sup>31</sup></td><td>0</td><td>−2<sup>63</sup></td><td>0</td></tr>
+        <tr><td>범위 밖 양수, +∞, NaN</td><td>2<sup>31</sup>−1</td><td>2<sup>32</sup>−1</td><td>2<sup>63</sup>−1</td><td>2<sup>64</sup>−1</td></tr>
+      </tbody>
+    </table></div>
+
+    <div class="sim" id="fcsr-sim">
+      <div class="sim-head"><span class="sim-tag">SIMULATOR</span><h3>fcsr 플래그 놀이터</h3></div>
+      <div class="sim-pad">
+        <div class="fcsr-labels"><span>7</span><span>6</span><span>5</span><span>4</span><span>3</span><span>2</span><span>1</span><span>0</span></div>
+        <div class="bit-row fcsr-bits" id="fcsr-bits"></div>
+        <div class="fcsr-labels" style="margin-top:4px"><span>frm</span><span>frm</span><span>frm</span><span>NV</span><span>DZ</span><span>OF</span><span>UF</span><span>NX</span></div>
+        <div style="margin-top:16px" class="operation-grid" id="fcsr-operations"></div>
+      </div>
+      <div class="step-description" id="fcsr-description">명령 버튼을 눌러 보자. 결과와 함께, 그 명령이 세운 플래그가 fflags에 <b>누적</b>된다.</div>
+      <div class="sim-controls">
+        <div class="control"><span>frm (동적 반올림 모드, rm = 111인 명령이 사용)</span>
+          <div class="segmented" id="fcsr-rounding-mode">
+            <button data-value="RNE" class="on">000 RNE</button><button data-value="RTZ">001 RTZ</button><button data-value="RDN">010 RDN</button><button data-value="RUP">011 RUP</button><button data-value="RMM">100 RMM</button>
+          </div>
+        </div>
+        <div class="control"><span>플래그</span>
+          <div class="button-row"><button class="button" id="fcsr-clear">csrwi fflags, 0</button></div>
+        </div>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">마지막 결과</span><span class="value" id="fcsr-result">—</span></div>
+        <div class="stat"><span class="key">이번에 선 플래그</span><span class="value" id="fcsr-new-flags">—</span></div>
+        <div class="stat"><span class="key">frflags (0x001)</span><span class="value" id="fcsr-fflags">0x00</span></div>
+        <div class="stat"><span class="key">frcsr (0x003)</span><span class="value" id="fcsr-value">0x00</span></div>
+      </div>
+      <div class="log-box" id="fcsr-log"></div>
+      <div class="sim-note">“1.0 / 3.0”을 frm을 바꿔 가며 실행해 결과의 마지막 비트가 어떻게 달라지는지 보자. “최댓값 × 2”는 RNE에서 +∞, RTZ에서 가장 큰 유한값이 되지만 OF·NX는 둘 다 선다. <code>flt</code>와 <code>feq</code>에 같은 qNaN을 넣으면 앞의 것만 NV를 세운다. 플래그는 지우기 전까지 남아 있다(sticky).</div>
+    </div>
+    <div class="callout warn"><strong>FMIN/FMAX는 v2.2에서 바뀌었다</strong><p>F v2.2부터 FMIN.S·FMAX.S는 IEEE 754-2008의 minNum/maxNum이 아니라 당시 제안된 754-201x의 <b>minimumNumber/maximumNumber</b>를 따른다. 둘은 신호 NaN 처리에서 다르다. 지금 규칙은 “NaN이 하나면 다른 쪽 값, 둘 다 NaN이면 정규 NaN, sNaN 입력은 결과가 NaN이 아니어도 NV”다. NaN이 하나라도 있으면 NaN을 내는 IEEE 754-2019 minimum/maximum은 Zfa의 FMINM/FMAXM이 제공한다.</p></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="nan-boxing">
+    <h2>D 확장과 NaN 박싱</h2>
+    <p>D 확장은 f 레지스터를 64비트(FLEN = 64)로 넓히고 배정도 명령을 더한다. 이제 한 레지스터에 단정도 값과 배정도 값이 모두 들어갈 수 있다. 그렇다면 32비트 값을 64비트 레지스터에 넣을 때 위쪽 32비트는 무엇으로 채울까? RISC-V의 답은 <span class="term">NaN 박싱</span><span class="english">(NaN-boxing)</span>이다. <b>위쪽 비트를 모두 1로 채운다.</b></p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 270" role="img" aria-label="FLEN이 64와 128일 때의 NaN 박싱 배치">
+        <text x="20" y="44" class="t t-bold">FLEN = 64</text><text x="20" y="62" class="t-faint">단정도 1.0</text>
+        <rect x="150" y="30" width="330" height="40" class="f-violet-soft"/><text x="315" y="55" text-anchor="middle" class="t-mono">1111 … 1111 (32비트 모두 1)</text>
+        <rect x="480" y="30" width="330" height="40" class="f-accent-soft"/><text x="645" y="55" text-anchor="middle" class="t-mono">0x3f800000 (1.0f)</text>
+        <text x="150" y="88" class="t-faint">63</text><text x="480" y="88" class="t-faint">31</text><text x="810" y="88" text-anchor="end" class="t-faint">0</text>
+        <text x="20" y="124" class="t t-bold">FLEN = 64</text><text x="20" y="142" class="t-faint">반정도 (Zfh)</text>
+        <rect x="150" y="110" width="495" height="40" class="f-violet-soft"/><text x="398" y="135" text-anchor="middle" class="t-mono">위쪽 48비트 모두 1</text>
+        <rect x="645" y="110" width="165" height="40" class="f-accent-soft"/><text x="728" y="135" text-anchor="middle" class="t-mono">16비트 값</text>
+        <text x="20" y="194" class="t t-bold">FLEN = 128</text><text x="20" y="212" class="t-faint">단정도 (Q)</text>
+        <rect x="150" y="180" width="330" height="40" class="f-violet-soft"/><text x="315" y="205" text-anchor="middle" class="t-mono">위쪽 64비트 모두 1</text>
+        <rect x="480" y="180" width="165" height="40" class="f-violet-soft"/><text x="563" y="205" text-anchor="middle" class="t-mono">32비트 1</text>
+        <rect x="645" y="180" width="165" height="40" class="f-accent-soft"/><text x="728" y="205" text-anchor="middle" class="t-mono">단정도 값</text>
+        <text x="430" y="252" text-anchor="middle" class="t-dim">넓은 형식으로 읽으면: 부호 1, 지수 모두 1, 가수 최상위 1 → <tspan class="t-bad">음의 조용한 NaN</tspan></text>
+      </svg></div>
+      <figcaption><b>그림 12-5.</b> NaN 박싱. 좁은 값은 레지스터의 아래쪽에 두고 위쪽을 모두 1로 채운다. Q 확장에서는 단정도가 배정도 안에, 배정도가 4배 정도 안에 재귀적으로 박싱된다. 넓은 명령으로 읽으면 늘 NaN이 보이므로, 잘못 쓴 값이 조용히 엉뚱한 숫자가 되지 않고 NaN으로 드러난다.</figcaption>
+    </figure>
+    <ul>
+      <li><b>전송 명령</b>(FLn/FSn, FMV.n.X/FMV.X.n): n비트 값을 f 레지스터로 들일 때는 올바르게 박싱한다. 내보낼 때는 아래 n비트만 쓰고 위쪽은 무시한다.</li>
+      <li><b>그 밖의 모든 n비트 연산</b>: 입력의 위쪽 FLEN−n비트가 모두 1인지 검사한다. 맞으면 아래 n비트를 값으로 쓰고, 아니면 입력을 <b>n비트 정규 NaN</b>으로 취급한다.</li>
+      <li>n비트 결과를 f 레지스터에 쓰는 연산은 반드시 위쪽을 모두 1로 채운다.</li>
+    </ul>
+    <div class="callout spec"><strong>규격 원문에서</strong>
+      <blockquote>“The upper bits of a valid NaN-boxed value must be all 1s. Valid NaN-boxed n-bit values therefore appear as negative quiet NaNs (qNaNs) when viewed as any wider m-bit value, n &lt; m ≤ FLEN.”</blockquote>
+      <p><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/d-st-ext.html" target="_blank" rel="noopener">"D" Extension, NaN Boxing of Narrower Values</a> — 예전 규격은 이 경우를 정하지 않았다. 지금 규칙은 구현마다 다른 동작을 없애면서도, 값을 내부 형식으로 재부호화하는 구현과 그렇지 않은 구현을 모두 수용한다.</p></div>
+
+    <div class="sim" id="nan-boxing-sim">
+      <div class="sim-head"><span class="sim-tag animation">ANIMATION</span><h3>NaN 박싱 따라가기 (FLEN = 64)</h3></div>
+      <div class="sim-view"><canvas id="nan-boxing-canvas" aria-label="64비트 f 레지스터에 값이 채워지고 검사되는 애니메이션"></canvas></div>
+      <div class="step-description" id="nan-boxing-description"></div>
+      <div class="sim-controls">
+        <div class="control"><span>시나리오</span>
+          <div class="segmented" id="nan-boxing-scenario">
+            <button data-value="boxed" class="on">flw → fadd.s</button>
+            <button data-value="unboxed">fld → fadd.s</button>
+            <button data-value="wide">flw → fadd.d</button>
+          </div>
+        </div>
+        <div class="control"><span>진행</span>
+          <div class="button-row"><button class="button primary" id="nan-boxing-step">한 단계</button><button class="button" id="nan-boxing-play">자동 재생</button><button class="button" id="nan-boxing-reset">처음으로</button></div>
+        </div>
+      </div>
+      <div class="sim-readout">
+        <div class="stat"><span class="key">f1</span><span class="value" id="nan-boxing-first">—</span></div>
+        <div class="stat"><span class="key">f2</span><span class="value" id="nan-boxing-second">—</span></div>
+        <div class="stat"><span class="key">f2 해석</span><span class="value" id="nan-boxing-meaning">—</span></div>
+      </div>
+      <div class="sim-note">첫 시나리오는 정상 경로다. 두 번째에서는 배정도 1.0을 단정도 명령이 읽는다. 위쪽 32비트가 모두 1이 아니므로 입력이 정규 NaN으로 바뀐다(조용한 NaN이라 NV는 서지 않는다). 세 번째에서는 박싱된 단정도 1.0을 배정도 명령이 읽어 음의 qNaN으로 보고, 결과는 배정도 정규 NaN 0x7ff8000000000000이 된다.</div>
+    </div>
+    <p>D 확장의 나머지는 F와 거의 대칭이다. <code>fcvt.s.d</code>는 rm에 따라 반올림하고, <code>fcvt.d.s</code>는 언제나 정확하다. <code>fcvt.d.w[u]</code>도 늘 정확하다. 정수 레지스터와 64비트 비트 패턴을 주고받는 <code>fmv.x.d</code>·<code>fmv.d.x</code>는 XLEN ≥ 64(RV64)에서만 있다. RV32에서는 메모리를 거치거나, Zfa의 <code>fmvh.x.d</code>·<code>fmvp.d.x</code>를 쓴다. FLD·FSD는 주소가 자연 정렬되어 있고 XLEN ≥ 64일 때만 원자적으로 실행된다고 보장된다.</p>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="more-formats">
+    <h2>Q, Zfh/Zfhmin, 그리고 BF16</h2>
+    <p><b>Q</b>(v2.2)는 128비트 4배 정도를 더한다(FLEN = 128, D에 의존). 새 load/store <code>flq</code>/<code>fsq</code>는 width 100을 쓰고, RV32·RV64 어디에도 <code>fmv.x.q</code>/<code>fmv.q.x</code>는 없어서 정수 레지스터로 옮기려면 메모리를 거친다. <b>Zfh</b>(v1.0)는 16비트 반정도 연산 전부를, <b>Zfhmin</b>은 그중 저장과 변환만(<code>flh, fsh, fmv.x.h, fmv.h.x, fcvt.s.h, fcvt.h.s</code>, D가 있으면 <code>fcvt.d.h, fcvt.h.d</code>, Q가 있으면 <code>fcvt.q.h, fcvt.h.q</code>) 담는다. 둘 다 F에 의존한다. Zfhmin 소프트웨어는 반정도를 “저장 형식”으로만 쓰고 계산은 단정도로 하는 경우를 겨냥한다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 300" role="img" aria-label="binary32에서 bfloat16과 binary16으로의 관계">
+        <defs><marker id="bfloat-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker></defs>
+        <text x="20" y="44" class="t t-bold">binary32</text>
+        <rect x="140" y="26" width="20" height="30" class="f-violet-soft"/><rect x="160" y="26" width="160" height="30" class="f-gold-soft"/><rect x="320" y="26" width="140" height="30" class="f-accent-soft"/><rect x="460" y="26" width="320" height="30" class="f-surface"/>
+        <text x="240" y="46" text-anchor="middle" class="t-mono" style="font-size:12px">지수 8</text><text x="390" y="46" text-anchor="middle" class="t-mono" style="font-size:12px">가수 상위 7</text><text x="620" y="46" text-anchor="middle" class="t-mono" style="font-size:12px">가수 하위 16 (bfloat16에선 버림)</text>
+        <path d="M140 66 V76 H460 V66" class="s-accent"/>
+        <path d="M300 78 V110" class="s-accent flow-dash" marker-end="url(#bfloat-arrow)"/>
+        <text x="312" y="100" class="t-accent" style="font-size:12.5px">fcvt.bf16.s (반올림) · fcvt.s.bf16 (정확)</text>
+        <text x="20" y="134" class="t t-bold">bfloat16</text>
+        <rect x="140" y="116" width="20" height="30" class="f-violet-soft"/><rect x="160" y="116" width="160" height="30" class="f-gold-soft"/><rect x="320" y="116" width="140" height="30" class="f-accent-soft"/>
+        <text x="20" y="194" class="t t-bold">binary16</text>
+        <rect x="140" y="176" width="20" height="30" class="f-violet-soft"/><rect x="160" y="176" width="100" height="30" class="f-gold-soft"/><rect x="260" y="176" width="200" height="30" class="f-accent-soft"/>
+        <text x="210" y="196" text-anchor="middle" class="t-mono" style="font-size:12px">지수 5</text><text x="360" y="196" text-anchor="middle" class="t-mono" style="font-size:12px">가수 10</text>
+        <!-- 비교 표 -->
+        <g transform="translate(480,108)">
+          <rect width="360" height="112" rx="10" class="f-elev"/>
+          <text x="16" y="24" class="t-faint">형식</text><text x="120" y="24" class="t-faint">최댓값</text><text x="230" y="24" class="t-faint">정밀도</text>
+          <text x="16" y="50" class="t-mono">binary32</text><text x="120" y="50" class="t-mono">≈3.40e38</text><text x="230" y="50" class="t-mono">24비트 ≈7.2자리</text>
+          <text x="16" y="74" class="t-mono">bfloat16</text><text x="120" y="74" class="t-mono">≈3.39e38</text><text x="230" y="74" class="t-mono">8비트 ≈2.4자리</text>
+          <text x="16" y="98" class="t-mono">binary16</text><text x="120" y="98" class="t-mono">65504</text><text x="230" y="98" class="t-mono">11비트 ≈3.3자리</text>
+        </g>
+        <text x="20" y="250" class="t-dim">bfloat16: 범위는 넓고 정밀도는 낮다 → 기계 학습의 가중치·기울기처럼 크기 변화가 큰 값에 맞는다.</text>
+        <text x="20" y="274" class="t-dim">binary16: 정밀도가 조금 높지만 범위가 좁다 → 그래픽, 신호 처리, 저장 형식.</text>
+      </svg></div>
+      <figcaption><b>그림 12-6.</b> bfloat16은 binary32의 위쪽 16비트와 같은 배치다. 그래서 binary32 → bfloat16은 아래 16비트를 반올림해 버리는 것이고, 반대 방향은 0을 붙이기만 하면 되는 정확한 변환이다.</figcaption>
+    </figure>
+    <p><b>BF16</b>(v1.0) 규격은 세 확장으로 나뉜다. 모두 F에 의존하며, 이 규격의 BF16 명령은 비정규수를 완전히 지원한다.</p>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>확장</th><th>명령</th><th>의존</th></tr></thead>
+      <tbody>
+        <tr><td><b>Zfbfmin</b></td><td><code>fcvt.bf16.s</code>, <code>fcvt.s.bf16</code> + Zfh의 <code>flh, fsh, fmv.x.h, fmv.h.x</code> (6개)</td><td>F</td></tr>
+        <tr><td><b>Zvfbfmin</b></td><td><code>vfncvtbf16.f.f.w</code>, <code>vfwcvtbf16.f.f.v</code> (벡터 변환)</td><td>Zve32f (또는 V)</td></tr>
+        <tr><td><b>Zvfbfwma</b></td><td><code>vfwmaccbf16</code> (BF16 × BF16을 FP32에 누적하는 넓히기 곱셈-덧셈)</td><td>Zvfbfmin, Zfbfmin</td></tr>
+      </tbody>
+    </table></div>
+    <p>BF16 값도 f 레지스터에서는 반정도와 똑같이 NaN 박싱된다. 변환은 BF16 ↔ FP32만 제공한다. 규격은 이 확장들이 “BF16을 FP32의 정밀도를 줄인 형태로 쓰는” 용도를 겨냥한다고 밝히며, 다른 형식과의 변환은 FP32를 거쳐 흉내 낼 수 있다고 설명한다. 벡터 쪽 이야기는 <a href="vector.html">15장</a>에서 이어진다.</p>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="zfa">
+    <h2>Zfa: 자주 쓰는 연산을 한 명령으로</h2>
+    <p><b>Zfa</b>(v1.0)는 F에 의존하며, 라이브러리와 컴파일러가 여러 명령으로 흉내 내던 연산을 더한다. 가장 눈에 띄는 것은 <code>fli</code>(load immediate)다. 상수 하나를 쓰려고 메모리에서 읽거나 정수 레지스터를 거칠 필요 없이, rs1 필드의 5비트로 32개 상수 중 하나를 고른다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 260" role="img" aria-label="fli.s가 rs1 값으로 고르는 32개 상수" id="fli-figure-svg"></svg></div>
+      <figcaption><b>그림 12-7.</b> <code>fli.s</code> 상수표(rs1 = 0–31). 1번은 “가장 작은 양의 정규수”로 형식마다 값이 다르다(binary32: 2<sup>−126</sup>). 30·31번은 +∞와 정규 NaN이다. 8–22번은 규칙적인 무늬를 이루고, 어떤 항목도 가수의 위쪽 두 비트 밖을 쓰지 않는다. <code>fli.h</code>에서는 2<sup>16</sup>을 표현할 수 없어 29번이 +∞가 된다. fli는 어떤 플래그도 세우지 않는다.</figcaption>
+    </figure>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>명령</th><th>하는 일</th><th>인코딩 단서</th></tr></thead>
+      <tbody>
+        <tr><td><code>fli.{s|d|h|q}</code></td><td>32개 상수 중 하나를 rd에</td><td>FMV.W.X 꼴, rs2 = 1</td></tr>
+        <tr><td><code>fminm</code> · <code>fmaxm</code></td><td>IEEE 754-2019 minimum/maximum: NaN이 하나라도 있으면 정규 NaN</td><td>FMIN/FMAX와 같고 비트 13 = 1</td></tr>
+        <tr><td><code>fround</code> · <code>froundnx</code></td><td>rm에 따라 정수로 반올림(결과는 부동소수점). nx 버전은 값이 바뀌면 NX</td><td>FCVT.S.D 꼴, rs2 = 4 / 5</td></tr>
+        <tr><td><code>fcvtmod.w.d</code></td><td>늘 RTZ, 결과의 아래 32비트를 취해(모듈러) 부호 확장. ±∞·NaN → 0. JavaScript의 정수 변환 가속용</td><td>FCVT.W.D 꼴, rs2 = 8, rm = 001</td></tr>
+        <tr><td><code>fleq</code> · <code>fltq</code></td><td>FLE/FLT와 같지만 조용한 NaN에는 NV를 세우지 않음</td><td>FLE/FLT와 같고 비트 14 = 1</td></tr>
+        <tr><td><code>fmvh.x.d</code> · <code>fmvp.d.x</code></td><td>RV32+D: 배정도의 위쪽 32비트 읽기 / 정수 레지스터 두 개로 배정도 만들기</td><td>funct7 1110001 / 1011001</td></tr>
+        <tr><td><code>fmvh.x.q</code> · <code>fmvp.q.x</code></td><td>RV64+Q: 같은 일을 128비트에 대해</td><td>funct7 1110011 / 1011011</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="zfinx">
+    <h2>Zfinx: f 레지스터 없는 부동소수점</h2>
+    <p>작은 마이크로컨트롤러에게 32개짜리 레지스터 파일을 하나 더 두는 것은 큰 비용이다. <b>Zfinx</b>(v1.0, “z-f-in-x”)는 F의 연산 명령을 그대로 두되, f 레지스터를 읽고 쓰던 자리에서 <b>같은 번호의 x 레지스터</b>를 쓴다. f 레지스터가 없으니 전송 명령 <code>flw, fsw, fmv.w.x, fmv.x.w, c.flw[sp], c.fsw[sp]</code>는 빠진다. 메모리와는 정수 load/store로, 레지스터 사이는 정수 연산이나 부호 주입 명령으로 옮긴다. 문맥 교환 비용도 줄어든다.</p>
+    <figure class="diagram">
+      <div class="scroll-x"><svg viewBox="0 0 860 300" role="img" aria-label="F 확장과 Zfinx의 레지스터 구성 비교">
+        <defs><marker id="zfinx-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker></defs>
+        <g transform="translate(20,20)">
+          <text x="190" y="0" text-anchor="middle" class="t-accent">F 확장</text>
+          <rect x="10" y="16" width="160" height="150" rx="10" class="f-surface"/><text x="90" y="44" text-anchor="middle" class="t t-bold">x0–x31</text><text x="90" y="66" text-anchor="middle" class="t-faint">정수</text>
+          <rect x="210" y="16" width="160" height="150" rx="10" class="f-accent-soft"/><text x="290" y="44" text-anchor="middle" class="t t-bold">f0–f31</text><text x="290" y="66" text-anchor="middle" class="t-faint">부동소수점 (FLEN)</text>
+          <text x="290" y="120" text-anchor="middle" class="t-mono" style="font-size:12px">fadd.s f1, f2, f3</text>
+          <path d="M172 100 H206" class="s-accent flow-dash" marker-end="url(#zfinx-arrow)"/><text x="190" y="92" text-anchor="middle" class="t-faint" style="font-size:10.5px">fmv</text>
+          <rect x="110" y="182" width="160" height="34" rx="8" class="f-gold-soft"/><text x="190" y="204" text-anchor="middle" class="t t-bold">fcsr</text>
+          <text x="190" y="246" text-anchor="middle" class="t-dim">misa.F = 1 · mstatus.FS 로 상태 추적</text>
+        </g>
+        <g transform="translate(450,20)">
+          <text x="190" y="0" text-anchor="middle" class="t-accent">Zfinx (+ Zdinx · Zhinx)</text>
+          <rect x="10" y="16" width="360" height="150" rx="10" class="f-teal-soft"/><text x="190" y="44" text-anchor="middle" class="t t-bold">x0–x31 하나로 정수와 부동소수점 모두</text>
+          <text x="190" y="80" text-anchor="middle" class="t-mono" style="font-size:12px">fadd.s a1, a2, a3   # x11 ← x12 + x13</text>
+          <text x="190" y="110" text-anchor="middle" class="t-dim" style="font-size:12px">RV32 Zdinx: 배정도는 짝수 쌍</text>
+          <rect x="70" y="122" width="110" height="30" rx="6" class="f-elev"/><text x="125" y="142" text-anchor="middle" class="t-mono" style="font-size:12px">x15 [63:32]</text>
+          <rect x="190" y="122" width="110" height="30" rx="6" class="f-elev"/><text x="245" y="142" text-anchor="middle" class="t-mono" style="font-size:12px">x14 [31:0]</text>
+          <rect x="110" y="182" width="160" height="34" rx="8" class="f-gold-soft"/><text x="190" y="204" text-anchor="middle" class="t t-bold">fcsr (그대로)</text>
+          <text x="190" y="246" text-anchor="middle" class="t-dim">misa.F·D·Q = 0 · mstatus.FS = 0 고정</text>
+        </g>
+        <text x="430" y="292" text-anchor="middle" class="t-faint">F를 가정한 소프트웨어와 Zfinx를 가정한 소프트웨어는 서로 호환되지 않는다</text>
+      </svg></div>
+      <figcaption><b>그림 12-8.</b> F와 Zfinx. Zfinx에서는 부동소수점 값이 정수 레지스터에 산다. 그래서 NaN 박싱 대신, w비트 결과를 쓸 때 위쪽 비트를 <b>부호 비트로 채운다</b>(부호 확장). 이는 32비트 부동소수점 값을 x 레지스터로 넘길 때 위쪽을 정의하지 않는 기존 RV64 호출 규약과도 맞는다.</figcaption>
+    </figure>
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>확장</th><th>내용</th><th>빠지는 전송 명령</th></tr></thead>
+      <tbody>
+        <tr><td><b>Zfinx</b></td><td>F의 연산을 x 레지스터에서 (Zicsr 의존)</td><td>FLW, FSW, FMV.W.X, FMV.X.W, C.FLW[SP], C.FSW[SP]</td></tr>
+        <tr><td><b>Zdinx</b></td><td>D의 연산 (Zfinx 의존). RV32는 짝수 레지스터 쌍, 아래 번호가 하위 비트</td><td>FLD, FSD, FMV.D.X, FMV.X.D, C.FLD[SP], C.FSD[SP]</td></tr>
+        <tr><td><b>Zhinx</b></td><td>Zfh의 연산 (Zfinx 의존)</td><td>FLH, FSH, FMV.H.X, FMV.X.H</td></tr>
+        <tr><td><b>Zhinxmin</b></td><td>FCVT.S.H, FCVT.H.S (Zdinx가 있으면 FCVT.D.H, FCVT.H.D)</td><td>—</td></tr>
+      </tbody>
+    </table></div>
+    <p>RV32 Zdinx에서 배정도 결과를 x0에 쓰면 쓰기 전체가 무시되어 x1이 바뀌지 않고, x0을 배정도 피연산자로 쓰면 (x1을 읽지 않고) 전체가 0이다. 홀수 번호 레지스터를 배정도 피연산자로 쓰는 인코딩은 예약되어 있다.</p>
+  </section>
+
+  <section class="keypoints" id="summary">
+    <h2>핵심 정리</h2>
+    <ol>
+      <li>RISC-V 부동소수점은 IEEE 754-2008을 따른다. F(v2.2)는 f0–f31(FLEN = 32)과 fcsr을, D·Q(v2.2)는 FLEN을 64·128로 넓힌다. fmt 필드는 S 00, D 01, H 10, Q 11.</li>
+      <li>fcsr = frm[7:5] + fflags[4:0](NV DZ OF UF NX). CSR 주소는 fflags 0x001, frm 0x002, fcsr 0x003.</li>
+      <li>rm: RNE 000, RTZ 001, RDN 010, RUP 011, RMM 100, 101·110 예약, 111 DYN(frm 사용).</li>
+      <li>FMA 네 명령은 rs3를 가진 <b>R4 형식</b>을 쓰고 반올림을 한 번만 한다. 비교·분류·정수 변환은 결과를 정수 레지스터에 쓴다. FCLASS는 10비트 중 한 비트를 세운다.</li>
+      <li>예외는 트랩하지 않고 <b>누적 플래그</b>만 세운다. NaN 결과는 늘 <b>정규 NaN</b>(binary32: 0x7fc00000)이며 페이로드를 전파하지 않는다. tininess는 반올림 뒤에 판단한다.</li>
+      <li><b>NaN 박싱</b>: 좁은 값을 넣을 때 위쪽을 모두 1로 채우고, 좁은 연산은 박싱이 깨진 입력을 정규 NaN으로 취급한다.</li>
+      <li>Zfh/Zfhmin은 반정도, BF16(Zfbfmin·Zvfbfmin·Zvfbfwma)은 bfloat16 변환과 벡터 누적, Zfa는 fli·fminm·fround·fcvtmod·fleq 등, Zfinx/Zdinx/Zhinx는 f 레지스터 없이 x 레지스터에서 부동소수점을 계산한다.</li>
+    </ol>
+  </section>
+
+  <section id="quiz">
+    <h2>확인 퀴즈</h2>
+    <div class="quiz">
+      <div class="quiz-question"><p>fcsr의 frm 필드 위치와 frm CSR의 주소로 옳은 것은?</p><div class="options">
+        <button class="option">비트 4–0, 0x001</button>
+        <button class="option" data-correct>비트 7–5, 0x002</button>
+        <button class="option">비트 7–5, 0x003</button>
+        <button class="option">비트 31–8, 0x002</button>
+      </div><div class="quiz-explanation">frm은 fcsr[7:5]이고 따로 0x002로 접근한다. fflags는 [4:0]·0x001, fcsr 전체는 0x003이다.</div></div>
+      <div class="quiz-question"><p>단정도 정규 NaN의 비트 패턴은?</p><div class="options">
+        <button class="option">0xffc00000</button>
+        <button class="option">0x7f800000</button>
+        <button class="option" data-correct>0x7fc00000</button>
+        <button class="option">0x7fffffff</button>
+      </div><div class="quiz-explanation">부호 0, 지수 모두 1, 가수는 최상위(quiet) 비트만 1이다. 0x7f800000은 +∞다.</div></div>
+      <div class="quiz-question"><p>RV64D 하트에서 <code>flw f1</code>로 1.0f(0x3f800000)를 읽은 뒤 f1의 64비트 값은?</p><div class="options">
+        <button class="option">0x000000003f800000</button>
+        <button class="option" data-correct>0xffffffff3f800000</button>
+        <button class="option">0x3ff0000000000000</button>
+        <button class="option">0x3f80000000000000</button>
+      </div><div class="quiz-explanation">좁은 값을 f 레지스터에 넣는 전송 명령은 위쪽을 모두 1로 채운다(NaN 박싱).</div></div>
+      <div class="quiz-question"><p>16777217을 binary32로 변환할 때 RNE와 RMM의 결과로 옳은 것은?</p><div class="options">
+        <button class="option">둘 다 16777216</button>
+        <button class="option">둘 다 16777218</button>
+        <button class="option" data-correct>RNE 16777216, RMM 16777218</button>
+        <button class="option">RNE 16777218, RMM 16777216</button>
+      </div><div class="quiz-explanation">정확히 중간이므로 RNE는 가수가 짝수인 16777216, RMM은 크기가 큰 16777218을 고른다.</div></div>
+      <div class="quiz-question"><p>RISC-V에서 1.0 / 0.0을 실행하면?</p><div class="options">
+        <button class="option">illegal-instruction 예외가 난다</button>
+        <button class="option">0을 돌려주고 NV를 세운다</button>
+        <button class="option" data-correct>+∞를 돌려주고 DZ를 세운다</button>
+        <button class="option">정규 NaN을 돌려주고 DZ를 세운다</button>
+      </div><div class="quiz-explanation">RISC-V는 부동소수점 예외로 트랩하지 않는다. IEEE 기본 결과 +∞와 함께 DZ 플래그만 선다.</div></div>
+      <div class="quiz-question"><p>FMADD.S가 FMUL.S + FADD.S 두 명령과 다른 점은?</p><div class="options">
+        <button class="option">더 높은 정밀도의 결과 형식을 쓴다</button>
+        <button class="option" data-correct>곱을 반올림하지 않고 합한 뒤 한 번만 반올림한다</button>
+        <button class="option">rm 필드가 없다</button>
+        <button class="option">결과를 정수 레지스터에 쓴다</button>
+      </div><div class="quiz-explanation">FMA는 정확한 곱에 rs3를 더한 뒤 한 번만 반올림한다. 그래서 R4 형식(rs3 필드)이 필요하다.</div></div>
+      <div class="quiz-question"><p><code>feq.s</code>와 <code>flt.s</code>에 같은 조용한 NaN을 넣었을 때 NV 플래그는?</p><div class="options">
+        <button class="option">둘 다 세운다</button>
+        <button class="option">둘 다 세우지 않는다</button>
+        <button class="option" data-correct>flt.s만 세운다</button>
+        <button class="option">feq.s만 세운다</button>
+      </div><div class="quiz-explanation">flt/fle는 IEEE의 signaling 비교라 NaN이면 NV를 세우고, feq는 quiet 비교라 sNaN일 때만 세운다. 결과는 둘 다 0이다.</div></div>
+      <div class="quiz-question"><p>Zfinx에 대한 설명으로 <b>틀린</b> 것은?</p><div class="options">
+        <button class="option">부동소수점 연산이 같은 번호의 x 레지스터를 쓴다</button>
+        <button class="option" data-correct>좁은 결과를 쓸 때 위쪽 비트를 모두 1로 채운다(NaN 박싱)</button>
+        <button class="option">FLW·FSW·FMV.W.X·FMV.X.W가 없다</button>
+        <button class="option">fcsr은 그대로 있다</button>
+      </div><div class="quiz-explanation">Zfinx는 NaN 박싱 대신 위쪽 비트를 부호 비트로 채운다(부호 확장). 같은 레지스터에 정수도 살기 때문이다.</div></div>
+    </div>
+  </section>
+
+  <section id="references">
+    <h2>더 읽을거리</h2>
+    <ul class="references">
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/f-st-ext.html" target="_blank" rel="noopener">"F" Extension for Single-Precision Floating-Point, Version 2.2</a></li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/d-st-ext.html" target="_blank" rel="noopener">"D" Extension for Double-Precision Floating-Point, Version 2.2</a> · <a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/q-st-ext.html" target="_blank" rel="noopener">"Q" Extension, Version 2.2</a></li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/zfh.html" target="_blank" rel="noopener">"Zfh" and "Zfhmin" Extensions for Half-Precision Floating-Point, Version 1.0</a></li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/bfloat16.html" target="_blank" rel="noopener">"BF16" Extensions for BFloat16-precision Floating-Point, Version 1.0</a></li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/zfa.html" target="_blank" rel="noopener">"Zfa" Extension for Additional Floating-Point Instructions, Version 1.0</a></li>
+      <li><a href="https://docs.riscv.org/reference/isa/v20260120/unpriv/zfinx.html" target="_blank" rel="noopener">"Zfinx", "Zdinx", "Zhinx", "Zhinxmin" Extensions, Version 1.0</a></li>
+      <li>IEEE Std 754-2008 / 754-2019, <i>IEEE Standard for Floating-Point Arithmetic</i></li>
+      <li>David Goldberg, “What Every Computer Scientist Should Know About Floating-Point Arithmetic” (ACM Computing Surveys, 1991)</li>
+    </ul>
+  </section>
+</main>
+
+<script>
+/* ---------------------------------------------------------------------------
+   부동소수점 공용 계산: BigInt 유리수로 정확히 반올림하고 비트 패턴을 해석한다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const FORMATS = {
+    binary16: { name: "binary16", label: "binary16 (half)", totalBits: 16, exponentBits: 5, fractionBits: 10 },
+    bfloat16: { name: "bfloat16", label: "bfloat16", totalBits: 16, exponentBits: 8, fractionBits: 7 },
+    binary32: { name: "binary32", label: "binary32 (single)", totalBits: 32, exponentBits: 8, fractionBits: 23 },
+    binary64: { name: "binary64", label: "binary64 (double)", totalBits: 64, exponentBits: 11, fractionBits: 52 },
+  };
+  const ROUNDING_MODES = ["RNE", "RTZ", "RDN", "RUP", "RMM"];
+  const FCLASS_MEANINGS = ["−∞", "음의 정규수", "음의 비정규수", "−0", "+0", "양의 비정규수", "양의 정규수", "+∞", "신호 NaN (sNaN)", "조용한 NaN (qNaN)"];
+
+  function formatParameters(format) {
+    const bias = (1 << (format.exponentBits - 1)) - 1;
+    return { bias, minimumExponent: 1 - bias, maximumExponent: bias, precision: format.fractionBits + 1, maximumBiasedExponent: (1 << format.exponentBits) - 1 };
+  }
+
+  const bitLength = (value) => (value === 0n ? 0 : value.toString(2).length);
+
+  /** m = numerator/denominator (> 0) 에 대해 2^E ≤ m < 2^(E+1) 인 E */
+  function floorLog2(numerator, denominator) {
+    let exponent = bitLength(numerator) - bitLength(denominator);
+    const isBelow = (candidate) => (candidate >= 0 ? numerator < (denominator << BigInt(candidate)) : (numerator << BigInt(-candidate)) < denominator);
+    if (isBelow(exponent)) exponent -= 1;
+    return exponent;
+  }
+
+  /** m / 2^quantumExponent 를 정수 부분과 나머지로 나눈다 */
+  function divideByPowerOfTwo(numerator, denominator, quantumExponent) {
+    let scaledNumerator = numerator;
+    let scaledDenominator = denominator;
+    if (quantumExponent < 0) scaledNumerator = numerator << BigInt(-quantumExponent);
+    else scaledDenominator = denominator << BigInt(quantumExponent);
+    return { integer: scaledNumerator / scaledDenominator, remainder: scaledNumerator % scaledDenominator, divisor: scaledDenominator };
+  }
+
+  /** 반올림 모드에 따라 잘린 값에 1 을 더할지 */
+  function shouldIncrement(mode, integer, remainder, divisor, isNegative) {
+    if (remainder === 0n) return false;
+    const twiceRemainder = remainder * 2n;
+    if (mode === "RNE") return twiceRemainder > divisor || (twiceRemainder === divisor && (integer & 1n) === 1n);
+    if (mode === "RMM") return twiceRemainder >= divisor;
+    if (mode === "RTZ") return false;
+    if (mode === "RDN") return isNegative;
+    if (mode === "RUP") return !isNegative;
+    throw new Error("알 수 없는 반올림 모드: " + mode);
+  }
+
+  function encodeFields(format, isNegative, biasedExponent, fraction) {
+    const signBit = isNegative ? 1n : 0n;
+    return (signBit << BigInt(format.totalBits - 1)) | (BigInt(biasedExponent) << BigInt(format.fractionBits)) | fraction;
+  }
+  function infinityBits(format, isNegative) {
+    return encodeFields(format, isNegative, formatParameters(format).maximumBiasedExponent, 0n);
+  }
+  function maximumFiniteBits(format, isNegative) {
+    const parameters = formatParameters(format);
+    return encodeFields(format, isNegative, parameters.maximumBiasedExponent - 1, (1n << BigInt(format.fractionBits)) - 1n);
+  }
+  function canonicalNaNBits(format) {
+    return encodeFields(format, false, formatParameters(format).maximumBiasedExponent, 1n << BigInt(format.fractionBits - 1));
+  }
+
+  /** 유한한 크기 significand × 2^quantumExponent 를 비트 패턴으로. 지수가 넘치면 null */
+  function packMagnitude(format, isNegative, significand, quantumExponent) {
+    const parameters = formatParameters(format);
+    const hiddenBit = 1n << BigInt(format.fractionBits);
+    if (significand === 0n) return encodeFields(format, isNegative, 0, 0n);
+    if (significand >= hiddenBit) {
+      const biasedExponent = quantumExponent + format.fractionBits + parameters.bias;
+      if (biasedExponent >= parameters.maximumBiasedExponent) return null;
+      return encodeFields(format, isNegative, biasedExponent, significand - hiddenBit);
+    }
+    return encodeFields(format, isNegative, 0, significand); // 비정규수
+  }
+
+  /**
+   * 정확한 유리수 (−1)^sign × numerator/denominator 를 format 으로 반올림한다.
+   * 반환: { bits, isInexact, isOverflow, isUnderflow, isTiny, lowerBits, upperBits, isTie, fractionBetween }
+   * 규격대로 tininess 는 "반올림 뒤"에 판단한다(지수 범위가 무한하다고 보고 반올림한 결과가 최소 정규수보다 작은가).
+   */
+  function roundRational(numerator, denominator, isNegative, format, mode) {
+    const parameters = formatParameters(format);
+    if (numerator === 0n) {
+      const zeroBits = encodeFields(format, isNegative, 0, 0n);
+      return { bits: zeroBits, isInexact: false, isOverflow: false, isUnderflow: false, isTiny: false, lowerBits: zeroBits, upperBits: zeroBits, isTie: false, fractionBetween: 0 };
+    }
+    const exponent = floorLog2(numerator, denominator);
+    const quantumExponent = Math.max(exponent, parameters.minimumExponent) - (parameters.precision - 1);
+    const division = divideByPowerOfTwo(numerator, denominator, quantumExponent);
+    const isInexact = division.remainder !== 0n;
+    const increment = shouldIncrement(mode, division.integer, division.remainder, division.divisor, isNegative);
+    let significand = division.integer + (increment ? 1n : 0n);
+    let resultQuantum = quantumExponent;
+    if (significand === (1n << BigInt(parameters.precision))) {
+      significand >>= 1n;
+      resultQuantum += 1;
+    }
+    // 지수 범위가 무한하다고 보고 반올림했을 때 최소 정규수보다 작으면 tiny
+    const unboundedQuantum = exponent - (parameters.precision - 1);
+    const unboundedDivision = divideByPowerOfTwo(numerator, denominator, unboundedQuantum);
+    const unboundedIncrement = shouldIncrement(mode, unboundedDivision.integer, unboundedDivision.remainder, unboundedDivision.divisor, isNegative);
+    let unboundedExponent = exponent;
+    if (unboundedDivision.integer + (unboundedIncrement ? 1n : 0n) === (1n << BigInt(parameters.precision))) unboundedExponent += 1;
+    const isTiny = unboundedExponent < parameters.minimumExponent;
+
+    let bits = packMagnitude(format, isNegative, significand, resultQuantum);
+    let isOverflow = false;
+    if (bits === null) {
+      isOverflow = true;
+      const isToInfinity = mode === "RNE" || mode === "RMM" || (mode === "RUP" && !isNegative) || (mode === "RDN" && isNegative);
+      bits = isToInfinity ? infinityBits(format, isNegative) : maximumFiniteBits(format, isNegative);
+    }
+    // 이웃한 두 표현 가능한 값 (크기 기준 아래/위)
+    const lowerBits = packMagnitude(format, isNegative, division.integer, quantumExponent);
+    let upperSignificand = division.integer + 1n;
+    let upperQuantum = quantumExponent;
+    if (upperSignificand === (1n << BigInt(parameters.precision))) { upperSignificand >>= 1n; upperQuantum += 1; }
+    let upperBits = packMagnitude(format, isNegative, upperSignificand, upperQuantum);
+    if (upperBits === null) upperBits = infinityBits(format, isNegative);
+    const isTie = division.remainder * 2n === division.divisor;
+    const fractionBetween = Number((division.remainder * 1000000n) / division.divisor) / 1000000;
+    return {
+      bits, isInexact: isInexact || isOverflow, isOverflow, isUnderflow: isTiny && isInexact && !isOverflow, isTiny,
+      lowerBits: lowerBits === null ? maximumFiniteBits(format, isNegative) : lowerBits, upperBits, isTie, fractionBetween,
+    };
+  }
+
+  /** "1.5e-3", "-0.1", "16777217" 같은 10진수 문자열을 정확한 유리수로. 해석할 수 없으면 null */
+  const MAXIMUM_DECIMAL_EXPONENT = 400;
+  function parseDecimal(text) {
+    const match = /^\s*([+-])?(\d*)(?:\.(\d*))?(?:[eE]([+-]?\d+))?\s*$/.exec(String(text));
+    if (!match) return null;
+    const integerDigits = match[2] || "";
+    const fractionDigits = match[3] || "";
+    if (integerDigits.length + fractionDigits.length === 0) return null;
+    let decimalExponent = (match[4] ? Number(match[4]) : 0) - fractionDigits.length;
+    if (Math.abs(decimalExponent) > MAXIMUM_DECIMAL_EXPONENT + 60) return null;
+    let numerator = BigInt((integerDigits + fractionDigits) || "0");
+    let denominator = 1n;
+    if (decimalExponent >= 0) numerator *= 10n ** BigInt(decimalExponent);
+    else denominator = 10n ** BigInt(-decimalExponent);
+    return { numerator, denominator, isNegative: match[1] === "-" };
+  }
+
+  /** 비트 패턴을 해석한다. value 는 JavaScript Number (모든 형식에서 정확함) */
+  function decode(bits, format) {
+    const parameters = formatParameters(format);
+    const fractionMask = (1n << BigInt(format.fractionBits)) - 1n;
+    const sign = Number((bits >> BigInt(format.totalBits - 1)) & 1n);
+    const biasedExponent = Number((bits >> BigInt(format.fractionBits)) & BigInt(parameters.maximumBiasedExponent));
+    const fraction = bits & fractionMask;
+    const quietBit = 1n << BigInt(format.fractionBits - 1);
+    let classIndex;
+    let value;
+    if (biasedExponent === parameters.maximumBiasedExponent) {
+      if (fraction === 0n) { classIndex = sign ? 0 : 7; value = sign ? -Infinity : Infinity; }
+      else { classIndex = (fraction & quietBit) ? 9 : 8; value = NaN; }
+    } else if (biasedExponent === 0) {
+      if (fraction === 0n) { classIndex = sign ? 3 : 4; value = sign ? -0 : 0; }
+      else { classIndex = sign ? 2 : 5; value = (sign ? -1 : 1) * Number(fraction) * Math.pow(2, parameters.minimumExponent - format.fractionBits); }
+    } else {
+      classIndex = sign ? 1 : 6;
+      value = (sign ? -1 : 1) * Number((1n << BigInt(format.fractionBits)) | fraction) * Math.pow(2, biasedExponent - parameters.bias - format.fractionBits);
+    }
+    return { sign, biasedExponent, fraction, classIndex, value, unbiasedExponent: biasedExponent === 0 ? parameters.minimumExponent : biasedExponent - parameters.bias };
+  }
+
+  const api = { FORMATS, ROUNDING_MODES, FCLASS_MEANINGS, formatParameters, roundRational, parseDecimal, decode, infinityBits, maximumFiniteBits, canonicalNaNBits, encodeFields };
+  if (typeof window !== "undefined") window.FloatingPointChapter = api;
+  if (typeof module !== "undefined") module.exports = api;
+})();
+</script>
+<script>
+/* ---------------------------------------------------------------------------
+   그림 12-7: fli.s 상수표를 그린다 (32칸이라 손으로 쓰는 대신 만든다).
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
+  const FLI_VALUES = ["−1.0", "min", "2^-16", "2^-15", "2^-8", "2^-7", "0.0625", "0.125", "0.25", "0.3125", "0.375", "0.4375", "0.5", "0.625", "0.75", "0.875",
+    "1.0", "1.25", "1.5", "1.75", "2.0", "2.5", "3", "4", "8", "16", "128", "256", "2^15", "2^16", "+inf", "nan"];
+  const COLUMN_COUNT = 8;
+  const CELL_WIDTH = 100;
+  const CELL_HEIGHT = 54;
+  const CELL_GAP = 6;
+  const svg = document.getElementById("fli-figure-svg");
+  const create = (name, attributes, text) => {
+    const element = document.createElementNS(SVG_NAMESPACE, name);
+    Object.entries(attributes).forEach(([key, value]) => element.setAttribute(key, value));
+    if (text !== undefined) element.textContent = text;
+    return element;
+  };
+  FLI_VALUES.forEach((label, index) => {
+    const column = index % COLUMN_COUNT;
+    const row = Math.floor(index / COLUMN_COUNT);
+    const cellX = 10 + column * (CELL_WIDTH + CELL_GAP);
+    const cellY = 10 + row * (CELL_HEIGHT + CELL_GAP);
+    let style = "f-surface";
+    if (index === 1 || index >= 30) style = "f-gold-soft";
+    else if (index >= 8 && index <= 22) style = "f-accent-soft";
+    svg.appendChild(create("rect", { x: cellX, y: cellY, width: CELL_WIDTH, height: CELL_HEIGHT, rx: 8, class: style }));
+    svg.appendChild(create("text", { x: cellX + 8, y: cellY + 17, class: "t-faint" }, "rs1=" + index));
+    svg.appendChild(create("text", { x: cellX + CELL_WIDTH / 2, y: cellY + 42, "text-anchor": "middle", class: "t-mono t-bold" }, label));
+  });
+})();
+
+/* ---------------------------------------------------------------------------
+   IEEE 754 비트 편집기
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const floating = window.FloatingPointChapter;
+  const WIDE_FORMAT_BITS = 64;
+  const bitRow = document.getElementById("bit-editor-bits");
+  const input = document.getElementById("bit-editor-input");
+  let format = floating.FORMATS.binary32;
+  let bits = 0x3dcccccdn;
+
+  function presetsFor(currentFormat) {
+    const parameters = floating.formatParameters(currentFormat);
+    const fractionAllOnes = (1n << BigInt(currentFormat.fractionBits)) - 1n;
+    const encode = (isNegative, exponent, fraction) => floating.encodeFields(currentFormat, isNegative, exponent, fraction);
+    return [
+      { label: "+0", bits: encode(false, 0, 0n) },
+      { label: "−0", bits: encode(true, 0, 0n) },
+      { label: "1.0", bits: encode(false, parameters.bias, 0n) },
+      { label: "−2.5", bits: encode(true, parameters.bias + 1, 1n << BigInt(currentFormat.fractionBits - 2)) },
+      { label: "가장 작은 비정규수", bits: encode(false, 0, 1n) },
+      { label: "가장 큰 비정규수", bits: encode(false, 0, fractionAllOnes) },
+      { label: "가장 작은 정규수", bits: encode(false, 1, 0n) },
+      { label: "가장 큰 유한값", bits: floating.maximumFiniteBits(currentFormat, false) },
+      { label: "+∞", bits: floating.infinityBits(currentFormat, false) },
+      { label: "−∞", bits: floating.infinityBits(currentFormat, true) },
+      { label: "정규 NaN (qNaN)", bits: floating.canonicalNaNBits(currentFormat) },
+      { label: "sNaN", bits: encode(false, parameters.maximumBiasedExponent, 1n) },
+    ];
+  }
+
+  function buildBits() {
+    bitRow.innerHTML = "";
+    bitRow.classList.toggle("is-wide", format.totalBits >= WIDE_FORMAT_BITS);
+    for (let bitIndex = format.totalBits - 1; bitIndex >= 0; bitIndex -= 1) {
+      const bitElement = document.createElement("span");
+      let field = "fraction";
+      if (bitIndex === format.totalBits - 1) field = "sign";
+      else if (bitIndex >= format.fractionBits) field = "exponent";
+      bitElement.className = "bit field-" + field;
+      if (bitIndex === format.totalBits - 2 || bitIndex === format.fractionBits - 1) bitElement.classList.add("gap");
+      bitElement.dataset.index = bitIndex;
+      bitElement.title = "비트 " + bitIndex;
+      bitElement.setAttribute("role", "button");
+      bitElement.setAttribute("tabindex", "0");
+      const toggle = () => { bits ^= 1n << BigInt(bitIndex); render(); };
+      bitElement.addEventListener("click", toggle);
+      bitElement.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); toggle(); } });
+      bitRow.appendChild(bitElement);
+    }
+    const presetRow = document.getElementById("bit-editor-presets");
+    presetRow.innerHTML = "";
+    presetsFor(format).forEach((preset) => {
+      const button = document.createElement("button");
+      button.className = "button";
+      button.textContent = preset.label;
+      button.addEventListener("click", () => { bits = preset.bits; render(); });
+      presetRow.appendChild(button);
+    });
+  }
+
+  function describeValue(decoded) {
+    if (Number.isNaN(decoded.value)) return "NaN";
+    if (Object.is(decoded.value, -0)) return "−0";
+    if (!Number.isFinite(decoded.value)) return decoded.value > 0 ? "+∞" : "−∞";
+    return String(decoded.value);
+  }
+
+  function render() {
+    const decoded = floating.decode(bits, format);
+    [...bitRow.children].forEach((bitElement) => {
+      const isOn = Boolean((bits >> BigInt(bitElement.dataset.index)) & 1n);
+      bitElement.classList.toggle("on", isOn);
+      bitElement.textContent = isOn ? "1" : "0";
+    });
+    const parameters = floating.formatParameters(format);
+    document.getElementById("bit-editor-hex").textContent = book.toHex(bits, format.totalBits);
+    document.getElementById("bit-editor-value").textContent = describeValue(decoded);
+    document.getElementById("bit-editor-class").textContent = "비트 " + decoded.classIndex + " · " + floating.FCLASS_MEANINGS[decoded.classIndex] + " (rd = " + book.toHex(1 << decoded.classIndex, 12) + ")";
+    let exponentText = "E = " + decoded.biasedExponent;
+    if (decoded.biasedExponent === parameters.maximumBiasedExponent) exponentText += " (모두 1: ∞/NaN)";
+    else if (decoded.biasedExponent === 0) exponentText += " (모두 0: 0/비정규, 2^" + parameters.minimumExponent + ")";
+    else exponentText += " − " + parameters.bias + " = " + decoded.unbiasedExponent;
+    document.getElementById("bit-editor-exponent").textContent = exponentText;
+    const fractionHex = "0x" + decoded.fraction.toString(16);
+    let formula;
+    if (decoded.biasedExponent === parameters.maximumBiasedExponent) {
+      formula = decoded.fraction === 0n ? "지수가 모두 1이고 가수가 0 → 무한대" : "지수가 모두 1이고 가수 ≠ 0 → NaN. 가수 최상위 비트가 " + (decoded.classIndex === 9 ? "1이므로 조용한(quiet) NaN" : "0이므로 신호(signaling) NaN");
+    } else if (decoded.biasedExponent === 0) {
+      formula = "(−1)^" + decoded.sign + " × 0." + "f(" + fractionHex + ") × 2^" + parameters.minimumExponent + "   — 지수 0: 숨은 1이 없는 비정규수(또는 0)";
+    } else {
+      formula = "(−1)^" + decoded.sign + " × 1.f(" + fractionHex + ") × 2^(" + decoded.biasedExponent + " − " + parameters.bias + ") = " + describeValue(decoded);
+    }
+    document.getElementById("bit-editor-formula").textContent = formula;
+  }
+
+  function applyInput() {
+    const rational = floating.parseDecimal(input.value);
+    input.style.outline = rational ? "" : "2px solid var(--bad)";
+    if (!rational) return;
+    bits = floating.roundRational(rational.numerator, rational.denominator, rational.isNegative, format, "RNE").bits;
+    render();
+  }
+
+  document.getElementById("bit-editor-apply").addEventListener("click", applyInput);
+  input.addEventListener("keydown", (event) => { if (event.key === "Enter") applyInput(); });
+  book.segmented("bit-editor-format", (value) => {
+    format = floating.FORMATS[value];
+    buildBits();
+    applyInput();
+  });
+})();
+
+/* ---------------------------------------------------------------------------
+   반올림 모드 시각화: 입력 값의 두 binary32 이웃과 다섯 모드의 선택을 그린다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const floating = window.FloatingPointChapter;
+  const FORMAT = floating.FORMATS.binary32;
+  const MODE_CODES = { RNE: "000", RTZ: "001", RDN: "010", RUP: "011", RMM: "100" };
+  const input = document.getElementById("rounding-input");
+  const canvasElement = document.getElementById("rounding-canvas");
+  let analysis = null;
+
+  function describeBits(bitPattern) {
+    const value = floating.decode(bitPattern, FORMAT).value;
+    if (!Number.isFinite(value)) return value > 0 ? "+∞" : "−∞";
+    if (Object.is(value, -0)) return "−0";
+    return String(value);
+  }
+
+  function analyze() {
+    const rational = floating.parseDecimal(input.value);
+    input.style.outline = rational ? "" : "2px solid var(--bad)";
+    if (!rational) return;
+    const results = {};
+    floating.ROUNDING_MODES.forEach((mode) => { results[mode] = floating.roundRational(rational.numerator, rational.denominator, rational.isNegative, FORMAT, mode); });
+    analysis = { rational, results, text: input.value.trim() };
+    renderTable();
+    canvas.redraw();
+  }
+
+  function flagText(result) {
+    const flags = [];
+    if (result.isOverflow) flags.push("OF");
+    if (result.isUnderflow) flags.push("UF");
+    if (result.isInexact) flags.push("NX");
+    return flags.length ? flags.join(" ") : "—";
+  }
+
+  function renderTable() {
+    const sample = analysis.results.RNE;
+    let html = "<thead><tr><th>모드</th><th>rm</th><th>결과 비트</th><th>값</th><th>플래그</th></tr></thead><tbody>";
+    floating.ROUNDING_MODES.forEach((mode) => {
+      const result = analysis.results[mode];
+      html += '<tr><td class="mode-name">' + mode + "</td><td><code>" + MODE_CODES[mode] + "</code></td><td><code>" + book.toHex(result.bits, 32) + "</code></td><td>" + describeBits(result.bits) + "</td><td>" + flagText(result) + "</td></tr>";
+    });
+    document.getElementById("rounding-table").innerHTML = html + "</tbody>";
+    let note;
+    if (!sample.isInexact) note = "<b>" + analysis.text + "</b>은(는) binary32로 <b>정확히</b> 표현된다. 반올림이 필요 없으므로 다섯 모드가 모두 같고 NX도 서지 않는다.";
+    else if (sample.isOverflow) note = "크기가 binary32의 가장 큰 유한값(≈3.4028235e38)을 넘는다. 넘침(OF)과 부정확(NX)이 서고, RNE·RMM과 그 방향의 RUP/RDN은 ∞를, RTZ와 반대 방향 모드는 가장 큰 유한값을 낸다.";
+    else {
+      note = "아래 이웃 " + describeBits(sample.lowerBits) + " 과 위 이웃 " + describeBits(sample.upperBits) + " 사이, 아래쪽에서 간격의 <b>" + (sample.fractionBetween * 100).toFixed(2) + "%</b> 지점이다(크기 기준).";
+      if (sample.isTie) note += " <b>정확히 중간</b>이라 RNE(짝수 쪽)와 RMM(큰 쪽)이 갈릴 수 있다.";
+      if (sample.isUnderflow) note += " 결과가 비정규수 영역이라 tiny이고 부정확하므로 UF도 선다.";
+    }
+    document.getElementById("rounding-description").innerHTML = note;
+  }
+
+  function draw(context, width, height, colors) {
+    if (!analysis) return;
+    const sample = analysis.results.RNE;
+    const left = 46;
+    const right = width - 46;
+    const lineY = 70;
+    const isNarrow = width < 520;
+    // 수직선은 실제 수의 순서로 그린다: 음수면 크기가 큰 쪽(upper)이 왼쪽
+    const isNegative = analysis.rational.isNegative;
+    const leftBits = isNegative ? sample.upperBits : sample.lowerBits;
+    const rightBits = isNegative ? sample.lowerBits : sample.upperBits;
+    let position = sample.fractionBetween;
+    if (isNegative) position = 1 - position;
+    context.strokeStyle = colors.faint;
+    context.lineWidth = 2;
+    context.beginPath();
+    context.moveTo(left - 20, lineY);
+    context.lineTo(right + 20, lineY);
+    context.stroke();
+    const midX = (left + right) / 2;
+    context.save();
+    context.setLineDash([4, 4]);
+    context.beginPath();
+    context.moveTo(midX, lineY - 16);
+    context.lineTo(midX, lineY + 16);
+    context.stroke();
+    context.restore();
+    book.drawText(context, "중간", midX, lineY + 26, { size: 11, color: colors.faint, align: "center" });
+    [[left, leftBits], [right, rightBits]].forEach(([pointX, pointBits]) => {
+      context.beginPath();
+      context.arc(pointX, lineY, 7, 0, Math.PI * 2);
+      context.fillStyle = colors.accent;
+      context.fill();
+      book.drawText(context, describeBits(pointBits), pointX, lineY - 36, { size: isNarrow ? 10.5 : 12.5, mono: true, color: colors.text, align: pointX === left ? "left" : "right" });
+      book.drawText(context, book.toHex(pointBits, 32), pointX, lineY - 20, { size: 11, mono: true, color: colors.dim, align: pointX === left ? "left" : "right" });
+    });
+    if (!sample.isInexact) {
+      book.drawText(context, "정확히 표현됨: " + describeBits(sample.bits), width / 2, lineY + 60, { size: 15, bold: true, color: colors.ok, align: "center" });
+      return;
+    }
+    const valueX = book.linearInterpolate(left, right, position);
+    context.strokeStyle = colors.gold;
+    context.lineWidth = 3;
+    context.beginPath();
+    context.moveTo(valueX, lineY - 14);
+    context.lineTo(valueX, lineY + 14);
+    context.stroke();
+    // 모드별 화살표: x 에서 고른 쪽 끝으로
+    const rowStart = lineY + 44;
+    const rowGap = Math.max(22, (height - rowStart - 14) / floating.ROUNDING_MODES.length);
+    floating.ROUNDING_MODES.forEach((mode, index) => {
+      const result = analysis.results[mode];
+      const rowY = rowStart + index * rowGap;
+      let targetX = null;
+      if (result.bits === leftBits) targetX = left;
+      else if (result.bits === rightBits) targetX = right;
+      book.drawText(context, mode, 8, rowY, { size: 12, bold: true, mono: true, color: colors.accent });
+      context.save();
+      context.setLineDash([2, 4]);
+      context.strokeStyle = colors.border;
+      context.lineWidth = 1;
+      context.beginPath();
+      context.moveTo(valueX, lineY + 14);
+      context.lineTo(valueX, rowY);
+      context.stroke();
+      context.restore();
+      if (targetX === null) {
+        book.drawText(context, "→ " + describeBits(result.bits), valueX + 8, rowY, { size: 12, mono: true, color: colors.bad });
+        return;
+      }
+      book.drawArrow(context, valueX, rowY, targetX, rowY, { color: colors.gold, width: 2.2, headSize: 9 });
+    });
+  }
+
+  const canvas = book.createCanvas(canvasElement, draw, { aspectRatio: 0.34, minimumHeight: 250, maximumHeight: 280 });
+  document.getElementById("rounding-apply").addEventListener("click", analyze);
+  input.addEventListener("keydown", (event) => { if (event.key === "Enter") analyze(); });
+  document.querySelectorAll("[data-rounding-preset]").forEach((button) => button.addEventListener("click", () => { input.value = button.dataset.roundingPreset; analyze(); }));
+  analyze();
+})();
+
+/* ---------------------------------------------------------------------------
+   fcsr 플래그 놀이터: 명령마다 정확한 유리수 계산 + 현재 frm 으로 결과와 플래그를 만든다.
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const floating = window.FloatingPointChapter;
+  const FORMAT = floating.FORMATS.binary32;
+  const FLAG_NAMES = ["NV", "DZ", "OF", "UF", "NX"]; // 비트 4..0
+  const FLAG_BITS = { NV: 0x10, DZ: 0x08, OF: 0x04, UF: 0x02, NX: 0x01 };
+  const MODE_CODES = { RNE: 0, RTZ: 1, RDN: 2, RUP: 3, RMM: 4 };
+  const FRM_SHIFT = 5;
+  const INT32_MAXIMUM = 2147483647;
+  const LOG_LINE_LIMIT = 30;
+  const MAXIMUM_FINITE = { numerator: ((1n << 24n) - 1n) << 104n, denominator: 1n };
+  const QUIET_NAN_INPUT = "qNaN(0x7fc00000)";
+  const SIGNALING_NAN_INPUT = "sNaN(0x7f800001)";
+
+  let roundingMode = "RNE";
+  let accruedFlags = 0;
+  const logLines = [];
+
+  const roundFloat = (numerator, denominator, isNegative) => floating.roundRational(numerator, denominator, isNegative, FORMAT, roundingMode);
+  function flagsFromRounding(result) {
+    let flags = 0;
+    if (result.isOverflow) flags |= FLAG_BITS.OF;
+    if (result.isUnderflow) flags |= FLAG_BITS.UF;
+    if (result.isInexact) flags |= FLAG_BITS.NX;
+    return flags;
+  }
+  function floatResult(result) { return { kind: "float", bits: result.bits, flags: flagsFromRounding(result) }; }
+  const canonicalNaN = () => floating.canonicalNaNBits(FORMAT);
+
+  // 2.5 를 정수로: 현재 rm 에 따라 2 또는 3
+  function convertToInteger(numerator, denominator) {
+    const integer = numerator / denominator;
+    const remainder = numerator % denominator;
+    let isIncrement = false;
+    if (remainder !== 0n) {
+      const twiceRemainder = remainder * 2n;
+      if (roundingMode === "RNE") isIncrement = twiceRemainder > denominator || (twiceRemainder === denominator && (integer & 1n) === 1n);
+      if (roundingMode === "RMM") isIncrement = twiceRemainder >= denominator;
+      if (roundingMode === "RUP") isIncrement = true;
+    }
+    return { value: Number(integer + (isIncrement ? 1n : 0n)), isInexact: remainder !== 0n };
+  }
+
+  const OPERATIONS = [
+    { title: "1.0 / 0.0", assembly: "fdiv.s fa0, fa1, fa2", run: () => ({ kind: "float", bits: floating.infinityBits(FORMAT, false), flags: FLAG_BITS.DZ }) },
+    { title: "0.0 / 0.0", assembly: "fdiv.s fa0, fa1, fa2", run: () => ({ kind: "float", bits: canonicalNaN(), flags: FLAG_BITS.NV }) },
+    { title: "√(−1.0)", assembly: "fsqrt.s fa0, fa1", run: () => ({ kind: "float", bits: canonicalNaN(), flags: FLAG_BITS.NV }) },
+    { title: "1.0 / 3.0", assembly: "fdiv.s fa0, fa1, fa2", run: () => floatResult(roundFloat(1n, 3n, false)) },
+    { title: "1.0 + 2^−24 (정확히 중간)", assembly: "fadd.s fa0, fa1, fa2", run: () => floatResult(roundFloat((1n << 24n) + 1n, 1n << 24n, false)) },
+    { title: "1.0 + 2.0", assembly: "fadd.s fa0, fa1, fa2", run: () => floatResult(roundFloat(3n, 1n, false)) },
+    { title: "최댓값 × 2", assembly: "fmul.s fa0, fa1, fa2", run: () => floatResult(roundFloat(MAXIMUM_FINITE.numerator * 2n, 1n, false)) },
+    { title: "최소 정규수 / 3", assembly: "fdiv.s fa0, fa1, fa2", run: () => floatResult(roundFloat(1n, 3n << 126n, false)) },
+    { title: "3.0e9 → int32", assembly: "fcvt.w.s a0, fa1", run: () => ({ kind: "integer", value: INT32_MAXIMUM, flags: FLAG_BITS.NV, note: "범위 밖 → 2³¹−1로 자름 (NX는 서지 않음)" }) },
+    { title: "2.5 → int32", assembly: "fcvt.w.s a0, fa1", run: () => { const converted = convertToInteger(5n, 2n); return { kind: "integer", value: converted.value, flags: converted.isInexact ? FLAG_BITS.NX : 0 }; } },
+    { title: QUIET_NAN_INPUT + " < 1.0", assembly: "flt.s a0, fa1, fa2", run: () => ({ kind: "integer", value: 0, flags: FLAG_BITS.NV, note: "signaling 비교: NaN이면 NV" }) },
+    { title: QUIET_NAN_INPUT + " == 1.0", assembly: "feq.s a0, fa1, fa2", run: () => ({ kind: "integer", value: 0, flags: 0, note: "quiet 비교: sNaN일 때만 NV" }) },
+    { title: "min(" + SIGNALING_NAN_INPUT + ", 1.0)", assembly: "fmin.s fa0, fa1, fa2", run: () => ({ kind: "float", bits: 0x3f800000n, flags: FLAG_BITS.NV, note: "NaN이 아닌 쪽을 돌려주지만 sNaN이라 NV" }) },
+  ];
+
+  const bitRow = document.getElementById("fcsr-bits");
+  for (let bitIndex = 7; bitIndex >= 0; bitIndex -= 1) {
+    const bitElement = document.createElement("span");
+    bitElement.className = "bit";
+    bitElement.dataset.index = bitIndex;
+    bitRow.appendChild(bitElement);
+  }
+  const operationGrid = document.getElementById("fcsr-operations");
+  OPERATIONS.forEach((operation) => {
+    const button = document.createElement("button");
+    button.className = "button";
+    button.innerHTML = operation.title + "<small>" + operation.assembly + "</small>";
+    button.addEventListener("click", () => execute(operation));
+    operationGrid.appendChild(button);
+  });
+
+  function flagList(flags) {
+    const names = FLAG_NAMES.filter((name) => flags & FLAG_BITS[name]);
+    return names.length ? names.join(" ") : "없음";
+  }
+  function describeFloat(bitPattern) {
+    const value = floating.decode(bitPattern, FORMAT).value;
+    if (Number.isNaN(value)) return "NaN";
+    if (!Number.isFinite(value)) return value > 0 ? "+∞" : "−∞";
+    return String(value);
+  }
+
+  function execute(operation) {
+    const result = operation.run();
+    const previousFlags = accruedFlags;
+    accruedFlags |= result.flags;
+    let resultText;
+    if (result.kind === "float") resultText = "fa0 = " + book.toHex(result.bits, 32) + " (" + describeFloat(result.bits) + ")";
+    else resultText = "a0 = " + result.value;
+    document.getElementById("fcsr-result").textContent = resultText;
+    document.getElementById("fcsr-new-flags").textContent = flagList(result.flags);
+    let description = "<code>" + operation.assembly + "</code> (" + operation.title + ", rm = DYN → frm = " + roundingMode + "): " + resultText + ". 이번에 선 플래그: <b>" + flagList(result.flags) + "</b>.";
+    if (result.note) description += " " + result.note + ".";
+    if (result.flags && (previousFlags & result.flags) === result.flags) description += " (이미 서 있던 플래그라 fflags 값은 그대로다.)";
+    document.getElementById("fcsr-description").innerHTML = description;
+    logLines.push((operation.assembly + "   # " + operation.title).padEnd(46, " ") + " → " + resultText + "  [" + flagList(result.flags) + "]");
+    if (logLines.length > LOG_LINE_LIMIT) logLines.shift();
+    render(result.flags);
+  }
+
+  function render(newFlags) {
+    const fcsrValue = (MODE_CODES[roundingMode] << FRM_SHIFT) | accruedFlags;
+    [...bitRow.children].forEach((bitElement) => {
+      const bitIndex = Number(bitElement.dataset.index);
+      const isOn = Boolean(fcsrValue & (1 << bitIndex));
+      bitElement.classList.toggle("on", isOn);
+      bitElement.textContent = isOn ? "1" : "0";
+      bitElement.classList.remove("flag-raised");
+      if (newFlags && (newFlags & (1 << bitIndex))) {
+        void bitElement.offsetWidth; // 애니메이션을 다시 시작하게 한다
+        bitElement.classList.add("flag-raised");
+      }
+    });
+    document.getElementById("fcsr-fflags").textContent = book.toHex(accruedFlags, 8);
+    document.getElementById("fcsr-value").textContent = book.toHex(fcsrValue, 8);
+    const logBox = document.getElementById("fcsr-log");
+    logBox.textContent = logLines.length ? logLines.join("\n") : "(아직 실행한 명령이 없다)";
+    logBox.scrollTop = logBox.scrollHeight;
+  }
+
+  document.getElementById("fcsr-clear").addEventListener("click", () => {
+    accruedFlags = 0;
+    logLines.push("csrwi fflags, 0                                → 플래그 모두 지움");
+    document.getElementById("fcsr-description").innerHTML = "<code>csrwi fflags, 0</code> (= <code>fsflags x0</code>)로 누적 플래그를 지웠다. frm은 그대로다.";
+    render(0);
+  });
+  book.segmented("fcsr-rounding-mode", (value) => { roundingMode = value; render(0); });
+})();
+
+/* ---------------------------------------------------------------------------
+   NaN 박싱 애니메이션: 64비트 f 레지스터의 16진수 칸이 채워지고 검사되는 과정
+--------------------------------------------------------------------------- */
+(function () {
+  "use strict";
+  const book = window.RiscvBook;
+  const floating = window.FloatingPointChapter;
+  const NIBBLE_COUNT = 16;
+  const FILL_SECONDS = 1.0;
+  const AUTOPLAY_PAUSE_SECONDS = 1.2;
+  const UPPER_ALL_ONES = 0xffffffffn;
+  const canvasElement = document.getElementById("nan-boxing-canvas");
+  const descriptionElement = document.getElementById("nan-boxing-description");
+
+  const SCENARIOS = {
+    boxed: [
+      { instruction: "flw f1, 0(a0)", memory: "메모리[a0] = 0x3f800000 (1.0f)", target: "f1", value: 0xffffffff3f800000n,
+        text: "32비트 값을 64비트 f1에 넣는다. 전송 명령은 아래 32비트에 값을, 위 32비트에 <b>모두 1</b>을 채운다(NaN 박싱)." },
+      { instruction: "fadd.s f2, f1, f1", target: "f2", value: 0xffffffff40000000n, check: { register: "f1", isValid: true, label: "위 32비트 = 0xffffffff ✓" },
+        text: "단정도 연산은 먼저 f1의 위 32비트가 모두 1인지 검사한다. 맞으므로 아래 32비트(1.0)를 쓴다. 1.0 + 1.0 = 2.0(0x40000000)을 다시 박싱해 f2에 쓴다." },
+    ],
+    unboxed: [
+      { instruction: "fld f1, 0(a0)", memory: "메모리[a0] = 0x3ff0000000000000 (1.0 배정도)", target: "f1", value: 0x3ff0000000000000n,
+        text: "64비트 전체를 그대로 싣는다. 배정도 1.0이므로 단정도 기준으로는 박싱되어 있지 않다." },
+      { instruction: "fadd.s f2, f1, f1", target: "f2", value: 0xffffffff7fc00000n, check: { register: "f1", isValid: false, label: "위 32비트 = 0x3ff00000 ✕" },
+        text: "위 32비트가 모두 1이 아니다 → 입력을 단정도 <b>정규 NaN</b>(0x7fc00000)으로 취급한다. NaN + NaN = 정규 NaN을 박싱해 쓴다. 조용한 NaN이므로 NV는 서지 않는다." },
+    ],
+    wide: [
+      { instruction: "flw f1, 0(a0)", memory: "메모리[a0] = 0x3f800000 (1.0f)", target: "f1", value: 0xffffffff3f800000n,
+        text: "단정도 1.0을 박싱해 f1에 넣는다." },
+      { instruction: "fadd.d f2, f1, f1", target: "f2", value: 0x7ff8000000000000n, check: { register: "f1", isValid: false, label: "배정도로 보면 음의 qNaN" },
+        text: "배정도 연산은 64비트 전체를 하나의 값으로 읽는다. 0xffffffff3f800000은 부호 1, 지수 모두 1, 가수 최상위 1인 <b>음의 조용한 NaN</b>이다. 결과는 배정도 정규 NaN 0x7ff8000000000000." },
+    ],
+  };
+
+  let scenarioKey = "boxed";
+  let stepIndex = 0;
+  let registers = null;
+  let previousRegisters = null;
+  let fillProgress = 1;
+  let activeStep = null;
+  let isAutoplay = false;
+  let autoplayTimer = 0;
+
+  const hexDigits = (value) => (value === null ? "?".repeat(NIBBLE_COUNT) : value.toString(16).padStart(NIBBLE_COUNT, "0"));
+
+  function interpret(value) {
+    if (value === null) return "—";
+    const upper = value >> 32n;
+    const lower = value & 0xffffffffn;
+    const doubleValue = floating.decode(value, floating.FORMATS.binary64).value;
+    const doubleText = Number.isNaN(doubleValue) ? "NaN" : String(doubleValue);
+    if (upper === UPPER_ALL_ONES) {
+      const singleValue = floating.decode(lower, floating.FORMATS.binary32).value;
+      return "단정도 " + (Number.isNaN(singleValue) ? "NaN" : singleValue) + " (박싱됨) · 배정도로는 NaN";
+    }
+    return "배정도 " + doubleText + " · 단정도로는 정규 NaN 취급";
+  }
+
+  function reset() {
+    registers = { f1: null, f2: null };
+    previousRegisters = { f1: null, f2: null };
+    stepIndex = 0;
+    fillProgress = 1;
+    activeStep = null;
+    isAutoplay = false;
+    document.getElementById("nan-boxing-play").textContent = "자동 재생";
+    descriptionElement.innerHTML = "f1, f2의 값은 아직 모른다(?). <b>한 단계</b>를 눌러 시작하자.";
+    updateReadouts();
+    canvas.redraw();
+  }
+
+  function startStep() {
+    const steps = SCENARIOS[scenarioKey];
+    if (stepIndex >= steps.length) return;
+    activeStep = steps[stepIndex];
+    previousRegisters = Object.assign({}, registers);
+    registers[activeStep.target] = activeStep.value;
+    fillProgress = 0;
+    descriptionElement.innerHTML = "<code>" + activeStep.instruction + "</code> — " + activeStep.text;
+    stepIndex += 1;
+    if (stepIndex >= steps.length) {
+      isAutoplay = false;
+      document.getElementById("nan-boxing-play").textContent = "자동 재생";
+    }
+    updateReadouts();
+  }
+
+  function updateReadouts() {
+    document.getElementById("nan-boxing-first").textContent = registers.f1 === null ? "?" : book.toHex(registers.f1, 64);
+    document.getElementById("nan-boxing-second").textContent = registers.f2 === null ? "?" : book.toHex(registers.f2, 64);
+    document.getElementById("nan-boxing-meaning").textContent = interpret(registers.f2);
+  }
+
+  function draw(context, width, height, colors) {
+    if (!registers) return;
+    const isNarrow = width < 520;
+    const labelWidth = 40;
+    const middleGap = 10;
+    const cellWidth = (width - labelWidth - 24 - middleGap) / NIBBLE_COUNT;
+    const cellHeight = 34;
+    const rowY = { f1: 78, f2: 172 };
+    book.drawText(context, activeStep ? activeStep.instruction : "(시작 전)", 14, 22, { size: 15, bold: true, mono: true, color: colors.accent });
+    if (activeStep && activeStep.memory) book.drawText(context, activeStep.memory, width - 14, 22, { size: isNarrow ? 10 : 12, mono: true, color: colors.dim, align: "right" });
+    ["f1", "f2"].forEach((registerName) => {
+      const top = rowY[registerName];
+      book.drawText(context, registerName, 12, top + cellHeight / 2, { size: 15, bold: true, mono: true, color: colors.text });
+      book.drawText(context, "63", labelWidth, top - 9, { size: 10, mono: true, color: colors.faint });
+      book.drawText(context, "0", width - 14, top - 9, { size: 10, mono: true, color: colors.faint, align: "right" });
+      const isTarget = activeStep && activeStep.target === registerName;
+      const newDigits = hexDigits(registers[registerName]);
+      const oldDigits = hexDigits(isTarget ? previousRegisters[registerName] : registers[registerName]);
+      for (let nibbleIndex = 0; nibbleIndex < NIBBLE_COUNT; nibbleIndex += 1) {
+        const isUpper = nibbleIndex < NIBBLE_COUNT / 2;
+        const cellX = labelWidth + nibbleIndex * cellWidth + (isUpper ? 0 : middleGap);
+        const isFilled = !isTarget || fillProgress >= (nibbleIndex + 1) / NIBBLE_COUNT;
+        const digit = isFilled ? newDigits[nibbleIndex] : oldDigits[nibbleIndex];
+        const isFresh = isTarget && isFilled && fillProgress < 1;
+        book.roundedRectangle(context, cellX + 1, top, cellWidth - 2, cellHeight, 5);
+        if (isFresh) context.fillStyle = colors.goldSoft;
+        else context.fillStyle = isUpper ? colors.violetSoft : colors.accentSoft;
+        context.fill();
+        context.strokeStyle = isFresh ? colors.gold : colors.border;
+        context.lineWidth = 1;
+        context.stroke();
+        book.drawText(context, digit, cellX + cellWidth / 2, top + cellHeight / 2 + 1, { size: isNarrow ? 12 : 15, bold: true, mono: true, color: colors.text, align: "center" });
+      }
+      book.drawText(context, "위 32비트", labelWidth + cellWidth * 4, top + cellHeight + 13, { size: 10.5, color: colors.faint, align: "center" });
+      book.drawText(context, "아래 32비트", labelWidth + middleGap + cellWidth * 12, top + cellHeight + 13, { size: 10.5, color: colors.faint, align: "center" });
+    });
+    // 검사 표시: 읽는 레지스터의 위쪽 절반을 감싼다
+    if (activeStep && activeStep.check && fillProgress > 0) {
+      const top = rowY[activeStep.check.register];
+      const checkColor = activeStep.check.isValid ? colors.ok : colors.bad;
+      context.save();
+      context.strokeStyle = checkColor;
+      context.lineWidth = 2.5;
+      context.setLineDash([6, 4]);
+      book.roundedRectangle(context, labelWidth - 3, top - 4, cellWidth * NIBBLE_COUNT / 2 + 6, cellHeight + 8, 8);
+      context.stroke();
+      context.restore();
+      book.drawText(context, activeStep.check.label, labelWidth, top + cellHeight + 30, { size: isNarrow ? 11 : 13, bold: true, color: checkColor });
+    }
+    book.drawText(context, "f2 → " + interpret(registers.f2), 14, height - 16, { size: isNarrow ? 10.5 : 12.5, color: colors.dim });
+  }
+
+  const canvas = book.createCanvas(canvasElement, draw, { aspectRatio: 0.36, minimumHeight: 270, maximumHeight: 290 });
+  book.animationLoop(canvasElement, (deltaSeconds) => {
+    if (fillProgress < 1) {
+      fillProgress = Math.min(1, fillProgress + deltaSeconds / FILL_SECONDS);
+      canvas.redraw();
+    } else if (isAutoplay) {
+      autoplayTimer -= deltaSeconds;
+      if (autoplayTimer <= 0) {
+        autoplayTimer = AUTOPLAY_PAUSE_SECONDS;
+        startStep();
+      }
+    }
+  });
+  document.getElementById("nan-boxing-step").addEventListener("click", () => {
+    fillProgress = 1;
+    startStep();
+    canvas.redraw();
+  });
+  document.getElementById("nan-boxing-play").addEventListener("click", (event) => {
+    if (stepIndex >= SCENARIOS[scenarioKey].length) reset();
+    isAutoplay = !isAutoplay;
+    autoplayTimer = 0;
+    event.currentTarget.textContent = isAutoplay ? "멈춤" : "자동 재생";
+  });
+  document.getElementById("nan-boxing-reset").addEventListener("click", reset);
+  book.segmented("nan-boxing-scenario", (value) => { scenarioKey = value; reset(); });
+})();
+</script>
+</body>
+</html>
